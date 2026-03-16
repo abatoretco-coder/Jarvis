@@ -22,7 +22,6 @@ export type Vm400Capabilities = {
   integrations: {
     homeAssistant: boolean;
     spotifyWebApi: boolean;
-    influx: boolean;
   };
   auth?: {
     requireApiKey: boolean;
@@ -32,7 +31,6 @@ export type Vm400Capabilities = {
 export function getVm400Capabilities(input: {
   haConfigured: boolean;
   spotifyWebApiConfigured: boolean;
-  influxEnabled: boolean;
   requireApiKey?: boolean;
 }): Vm400Capabilities {
   const spotifyWebApiActions = new Set<SupportedActionType>([
@@ -64,7 +62,6 @@ export function getVm400Capabilities(input: {
     integrations: {
       homeAssistant: input.haConfigured,
       spotifyWebApi: input.spotifyWebApiConfigured,
-      influx: input.influxEnabled,
     },
     ...(typeof input.requireApiKey === 'boolean'
       ? { auth: { requireApiKey: input.requireApiKey } }

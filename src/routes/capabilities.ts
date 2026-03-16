@@ -8,7 +8,6 @@ export function registerCapabilitiesRoute(app: FastifyInstance, deps: AppDeps): 
     const caps = getVm400Capabilities({
       haConfigured: Boolean(deps.ha),
       spotifyWebApiConfigured: deps.spotifyWebApi.isConfigured(),
-      influxEnabled: deps.influx.isEnabled(),
       requireApiKey: deps.env.REQUIRE_API_KEY,
     });
 

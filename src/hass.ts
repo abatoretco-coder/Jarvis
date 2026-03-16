@@ -5,21 +5,7 @@ export type HassState = {
   last_changed?: string;
 };
 
-export function isRecord(x: unknown): x is Record<string, unknown> {
-  return typeof x === 'object' && x !== null && !Array.isArray(x);
-}
-
-export function getString(obj: Record<string, unknown>, key: string): string | undefined {
-  const value = obj[key];
-  return typeof value === 'string' ? value : undefined;
-}
-
-export function getNumber(obj: Record<string, unknown>, key: string): number | undefined {
-  const value = obj[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
 export function isHassState(x: unknown): x is HassState {
-  if (!isRecord(x)) return false;
-  return typeof x.entity_id === 'string' && typeof x.state === 'string';
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false;
+  return typeof (x as Record<string, unknown>).entity_id === 'string' && typeof (x as Record<string, unknown>).state === 'string';
 }

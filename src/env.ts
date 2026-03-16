@@ -106,31 +106,12 @@ const envSchema = z
   SPOTIFY_WEBAPI_REFRESH_BLACKOUT_END: hhmmFromEnv.default('03:20'),
   SPOTIFY_WEBAPI_PRE_REFRESH_WINDOW_MS: numberFromEnv.default('1800000'),
 
-  // Persistent flow audit trail (append-only NDJSON)
-  FLOW_AUDIT_ENABLED: booleanFromEnv.default('true'),
-  FLOW_AUDIT_STORE_PATH: z.string().default('/app/data/flow-audit.ndjson'),
-
   // Persistent conversation memory (SQLite) - used by ThreadRepository/MessageRepository
   CONVERSATION_DB_PATH: z.string().default('/app/data/conversation-memory.sqlite'),
   CONVERSATION_RECENT_MESSAGES: numberFromEnv.default('10'),
 
-  // Optional: Rights map (policy) for HA execution
-  // If ENFORCE_RIGHTS_MAP=true, HA calls are allowed only when they match RIGHTS_MAP_JSON.
-  ENFORCE_RIGHTS_MAP: booleanFromEnv.default('false'),
-  RIGHTS_MAP_JSON: optionalNonEmptyString,
-
   // Optional: expose a minimal Home Assistant entity index for mapping/disambiguation
   EXPOSE_HA_INDEX: booleanFromEnv.default('false'),
-  // Optional: expose flow audit HTTP endpoint (/v1/flows/recent)
-  EXPOSE_FLOW_AUDIT_API: booleanFromEnv.default('false'),
-
-  // Optional: InfluxDB v2 metrics
-  INFLUXDB_URL: optionalUrl,
-  INFLUXDB_TOKEN: optionalNonEmptyString,
-  INFLUXDB_ORG: optionalNonEmptyString,
-  INFLUXDB_BUCKET: optionalNonEmptyString,
-  INFLUXDB_TIMEOUT_MS: numberFromEnv.default('2000'),
-  METRICS_INSTANCE: z.string().default('vm400'),
 })
   .transform((value) => ({
     ...value,

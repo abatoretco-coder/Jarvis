@@ -1,12 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { Env } from './env';
-import { FlowAuditStore } from './flowAuditStore';
 import { HomeAssistantClient } from './haClient';
-import { InfluxWriter } from './influx';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
-import { registerFlowAuditRoute } from './routes/flowAudit';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerIngestRoute } from './routes/ingest';
@@ -15,17 +12,13 @@ import { SpotifyWebApiClient } from './spotifyWebApi';
 export type AppDeps = {
   env: Env;
   ha?: HomeAssistantClient;
-  influx: InfluxWriter;
   spotifyWebApi: SpotifyWebApiClient;
-  flowAudit: FlowAuditStore;
 };
 
 export function buildApp(env: Env): FastifyInstance {
   const ha = env.HA_BASE_URL && env.HA_TOKEN ? new HomeAssistantClient(env) : undefined;
-  const influx = new InfluxWriter(env);
   const spotifyWebApi = new SpotifyWebApiClient(env);
   spotifyWebApi.startSituationPrefetch();
-  const flowAudit = new FlowAuditStore(env.FLOW_AUDIT_STORE_PATH, env.FLOW_AUDIT_ENABLED);
 
   const app = Fastify({
     logger: {
@@ -50,7 +43,7 @@ export function buildApp(env: Env): FastifyInstance {
     bodyLimit: env.BODY_LIMIT_BYTES,
   });
 
-  const deps: AppDeps = { env, ha, influx, spotifyWebApi, flowAudit };
+  const deps: AppDeps = { env, ha, spotifyWebApi };
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();
@@ -79,7 +72,6 @@ export function buildApp(env: Env): FastifyInstance {
   registerApiKeyHook(app, env);
 
   registerCapabilitiesRoute(app, deps);
-  registerFlowAuditRoute(app, deps);
   registerHaIndexRoute(app, deps);
 
   registerIngestRoute(app, deps);
