@@ -1508,18 +1508,6 @@ export class SpotifyWebApiClient {
         return this.retryWithTargetDevice('PUT', '/v1/me/player/play', did, { context_uri: uri });
       }
 
-      if (r.ok && /^spotify:playlist:/i.test(uri) && this.env.SPOTIFY_WEBAPI_SHUFFLE_PLAYLISTS) {
-        const shuffle = await this.setShuffle(true, did || undefined);
-        if (!shuffle.ok) {
-          this.log('warn', 'playlist_shuffle_enable_failed', {
-            contextUri: uri,
-            targetDeviceId: did || undefined,
-            status: shuffle.status,
-            error: shuffle.error,
-          });
-        }
-      }
-
       return r;
     });
   }

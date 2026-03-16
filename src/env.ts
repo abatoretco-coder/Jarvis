@@ -90,8 +90,6 @@ const envSchema = z
   // Optional: retries/backoff when device id/name is missing from Spotify devices list
   SPOTIFY_WEBAPI_DEVICE_DISCOVERY_RETRIES: numberFromEnv.default('3'),
   SPOTIFY_WEBAPI_DEVICE_DISCOVERY_DELAY_MS: numberFromEnv.default('1200'),
-  // Optional: automatically enable shuffle when playing playlists through Spotify Web API
-  SPOTIFY_WEBAPI_SHUFFLE_PLAYLISTS: booleanFromEnv.default('true'),
   // Optional: when true, playlist requests only match current user's playlists (no public catalog fallback)
   SPOTIFY_WEBAPI_USER_PLAYLISTS_ONLY: booleanFromEnv.default('true'),
   SPOTIFY_WEBAPI_BASE_URL: z.string().url().default('https://api.spotify.com'),
