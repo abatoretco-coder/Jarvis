@@ -375,7 +375,7 @@ async function _executeSpotifyCapability(input: {
     }
     return {
       status: 'success',
-      tts: `${result.devices.length} appareil(s) Spotify détecté(s). Je me permets de vous tenir informé.`,
+      tts: `${result.devices.length} appareil(s) disponible(s).`,
       data: {
         devices: result.devices,
         registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION,
@@ -395,7 +395,7 @@ async function _executeSpotifyCapability(input: {
     const title = typeof itemRecord?.name === 'string' ? itemRecord.name : 'un titre inconnu';
     return {
       status: 'success',
-      tts: `En cours : ${title}. Je supposais que vous le saviez.`,
+      tts: `En cours : ${title}.`,
       data: {
         now_playing: result.data,
         registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION,
@@ -408,7 +408,7 @@ async function _executeSpotifyCapability(input: {
     if (now.ok && !isNowPlayingActive(now.data)) {
       return {
         status: 'success',
-        tts: 'Déjà en pause. Je m\'abstiens de mentionner que c\'était évident.',
+        tts: 'Déjà en pause.',
         data: {
           no_op: true,
           reason: 'already_paused',
@@ -419,7 +419,7 @@ async function _executeSpotifyCapability(input: {
     if (!now.ok && now.status === 204) {
       return {
         status: 'success',
-        tts: 'Rien ne joue actuellement. Il fallait peut-être le vérifier d\'abord.',
+        tts: 'Rien ne joue actuellement.',
         data: {
           no_op: true,
           reason: 'no_active_playback',
@@ -432,7 +432,7 @@ async function _executeSpotifyCapability(input: {
     if (!paused.ok) {
       return toErrorResponse(paused.error, 'Impossible de mettre en pause.', { status: paused.status });
     }
-    return { status: 'success', tts: 'Mis en pause. À votre service, comme toujours.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+    return { status: 'success', tts: 'En pause.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
   }
 
   if (request.action === 'play') {
@@ -455,7 +455,7 @@ async function _executeSpotifyCapability(input: {
         : 'Impossible de relancer la lecture.';
       return toErrorResponse(played.error, tts, { status: played.status });
     }
-    return { status: 'success', tts: 'Lecture reprise. Je présume que vous saviez ce que vous faisiez.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+    return { status: 'success', tts: 'Lecture reprise.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
   }
 
   if (request.action === 'next') {
@@ -463,7 +463,7 @@ async function _executeSpotifyCapability(input: {
     if (!skipped.ok) {
       return toErrorResponse(skipped.error, 'Impossible de passer à la piste suivante.', { status: skipped.status });
     }
-    return { status: 'success', tts: 'Piste suivante. Espérons que celle-ci vous convienne davantage.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+    return { status: 'success', tts: 'Piste suivante.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
   }
 
   if (request.action === 'previous') {
@@ -471,7 +471,7 @@ async function _executeSpotifyCapability(input: {
     if (!previous.ok) {
       return toErrorResponse(previous.error, 'Impossible de revenir en arrière.', { status: previous.status });
     }
-    return { status: 'success', tts: 'Retour en arrière. Je m\'abstiens de tout commentaire.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+    return { status: 'success', tts: 'Piste précédente.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
   }
 
   if (request.action === 'volume_set') {
@@ -511,7 +511,7 @@ async function _executeSpotifyCapability(input: {
       if (typeof nowSnapshot.volumePercent === 'number' && nowSnapshot.volumePercent === targetVolume) {
         return {
           status: 'success',
-          tts: `Le volume est déjà à ${targetVolume}%. Bonne observation.`,
+          tts: `Volume déjà à ${targetVolume}%.`,
           data: {
             no_op: true,
             reason: 'already_at_volume',
@@ -528,7 +528,7 @@ async function _executeSpotifyCapability(input: {
     }
     return {
       status: 'success',
-      tts: `Volume réglé à ${targetVolume}%. Considérez-le fait.`,
+      tts: `Volume : ${targetVolume}%.`,
       data: { volume_percent: targetVolume, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
     };
   }
@@ -541,7 +541,7 @@ async function _executeSpotifyCapability(input: {
     if (!query) {
       return {
         status: 'need_clarification',
-        tts: 'Je dois savoir quoi chercher. Les miracles ont des limites.',
+        tts: 'Précisez votre recherche.',
         error_code: 'missing_query',
         data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
@@ -626,8 +626,8 @@ async function _executeSpotifyCapability(input: {
     return {
       status: 'success',
       tts: firstUrl
-        ? `${flatItems.length} résultat(s) — premier : ${firstName}. Je vous laisse la main.`
-        : `${flatItems.length} résultat(s) pour "${query}". Je vous laisse la main.`,
+        ? `${flatItems.length} résultat(s) — premier : ${firstName}.`
+        : `${flatItems.length} résultat(s) pour "${query}".`,
       data: {
         query,
         type: requestedType ?? 'auto',
@@ -661,7 +661,7 @@ async function _executeSpotifyCapability(input: {
           : 'Impossible de démarrer la lecture sur cet appareil.';
         return toErrorResponse(played.error, tts, { status: played.status });
       }
-      return { status: 'success', tts: 'Lecture lancée sur cet appareil. Enfin.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+      return { status: 'success', tts: 'Lecture lancée.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
     }
 
     if (now.ok) {
@@ -692,14 +692,14 @@ async function _executeSpotifyCapability(input: {
           }
           return {
             status: 'success',
-            tts: 'Lecture reprise sur cet appareil. Comme demandé.',
+            tts: 'Lecture reprise.',
             data: { resumed: true, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
           };
         }
 
         return {
           status: 'success',
-          tts: 'La lecture est déjà sur cet appareil. Je l\'avais remarqué.',
+          tts: 'Déjà en lecture sur cet appareil.',
           data: {
             no_op: true,
             reason: 'already_on_target_device',
@@ -716,7 +716,7 @@ async function _executeSpotifyCapability(input: {
         : 'Impossible de transférer la lecture vers cet appareil.';
       return toErrorResponse(transfer.error, tts, { status: transfer.status });
     }
-    return { status: 'success', tts: 'Lecture transférée. Je vous laisse apprécier.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
+    return { status: 'success', tts: 'Lecture transférée.', data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION } };
   }
 
   if (request.action === 'queue_add') {
@@ -731,7 +731,7 @@ async function _executeSpotifyCapability(input: {
       if (!query) {
         return {
           status: 'need_clarification',
-          tts: 'Précisez le titre à ajouter à la file. Je ne devine pas — enfin, pas encore.',
+          tts: 'Précisez le titre à ajouter à la file.',
           error_code: 'missing_query',
           data: {
             expected_slots: ['uri|track_uri', 'query', 'type'],
@@ -767,7 +767,7 @@ async function _executeSpotifyCapability(input: {
         if (!top || !shouldAutoselectRankedCandidates(ranked)) {
           return {
             status: 'need_clarification',
-            tts: `Plusieurs résultats pour "${query}". Soyez plus précis, je vous prie.`,
+            tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
             options: options.slice(0, 5),
             error_code: 'ambiguous_search',
           };
@@ -796,7 +796,7 @@ async function _executeSpotifyCapability(input: {
     if (!queued.ok) return toErrorResponse(queued.error, 'Impossible d’ajouter ce titre à la file Spotify.', { status: queued.status });
     return {
       status: 'success',
-      tts: 'Titre ajouté à la file d\'attente. Il attendra sagement.',
+      tts: 'Ajouté à la file.',
       data: { uri: targetTrackUri, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
     };
   }
@@ -810,7 +810,7 @@ async function _executeSpotifyCapability(input: {
     if (!acted.ok) return toErrorResponse(acted.error, 'Impossible de modifier vos favoris Spotify.', { status: acted.status });
     return {
       status: 'success',
-      tts: state ? 'Ajouté à vos favoris. Votre goût musical reste entre nous.' : 'Retiré de vos favoris. Je ne juge pas.',
+      tts: state ? 'Ajouté aux favoris.' : 'Retiré des favoris.',
       data: { track_id: trackId, state, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
     };
   }
@@ -832,7 +832,7 @@ async function _executeSpotifyCapability(input: {
     if (!targetPlaylistId) {
       return {
         status: 'need_clarification',
-        tts: 'Précisez dans quelle playlist ajouter ce titre. Je ne travaille pas à l\'aveugle.',
+        tts: 'Précisez la playlist.',
         error_code: 'missing_playlist',
       };
     }
@@ -843,7 +843,7 @@ async function _executeSpotifyCapability(input: {
       if (!query) {
         return {
           status: 'need_clarification',
-          tts: 'Quel titre voulez-vous ajouter à cette playlist ? Je suis là — j\'attends.',
+          tts: 'Précisez le titre à ajouter.',
           error_code: 'missing_track_query',
         };
       }
@@ -851,7 +851,7 @@ async function _executeSpotifyCapability(input: {
       if (!track.ok) {
         return {
           status: 'need_clarification',
-          tts: `Plusieurs résultats pour "${query}". Soyez plus précis, je vous prie.`,
+          tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
           options: Array.isArray((track.details as Record<string, unknown> | undefined)?.candidates)
             ? ((track.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 5)
             : undefined,
@@ -870,7 +870,7 @@ async function _executeSpotifyCapability(input: {
 
     return {
       status: 'success',
-      tts: 'Titre ajouté à la playlist. Excellente sélection — pour une fois.',
+      tts: 'Ajouté à la playlist.',
       data: {
         playlist_id: targetPlaylistId,
         uris: candidateUris,
@@ -898,7 +898,7 @@ async function _executeSpotifyCapability(input: {
       if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });
       return {
         status: 'success',
-        tts: `Lecture de ${displayName}. C'est parti.`,
+        tts: `Lecture de ${displayName}.`,
         data: { uri: trackUri, type: 'track', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
     }
@@ -908,7 +908,7 @@ async function _executeSpotifyCapability(input: {
       if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });
       return {
         status: 'success',
-        tts: `Lecture de ${displayName}. À votre service.`,
+        tts: `Lecture de ${displayName}.`,
         data: { context_uri: contextUri, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
     }
@@ -917,7 +917,7 @@ async function _executeSpotifyCapability(input: {
     if (!query) {
       return {
         status: 'need_clarification',
-        tts: 'Précisez l\'artiste, l\'album, la playlist ou le titre. Je ne suis pas devin.',
+        tts: 'Précisez ce que vous souhaitez écouter.',
         error_code: 'missing_play_target',
         data: {
           expected_slots: ['uri|track_uri', 'context_uri', 'query', 'type'],
@@ -932,7 +932,7 @@ async function _executeSpotifyCapability(input: {
       if (!track.ok) {
         return {
           status: 'need_clarification',
-          tts: `Plusieurs résultats pour "${query}". Un peu plus de précision, je vous prie.`,
+          tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
           options: Array.isArray((track.details as Record<string, unknown> | undefined)?.candidates)
             ? ((track.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 5)
             : undefined,
@@ -944,7 +944,7 @@ async function _executeSpotifyCapability(input: {
       if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });
       return {
         status: 'success',
-        tts: `Lecture de ${displayName}. C'est parti.`,
+        tts: `Lecture de ${displayName}.`,
         data: { uri: track.uri, type: 'track', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
     }
@@ -963,7 +963,7 @@ async function _executeSpotifyCapability(input: {
         }
         return {
           status: 'success',
-          tts: `Lecture de ${userPlaylist.name}. Bonne écoute — j'espère que ça vous convient.`,
+          tts: `Lecture de ${userPlaylist.name}.`,
           data: { context_uri: userPlaylist.uri, type: 'playlist', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
         };
       }
@@ -974,7 +974,7 @@ async function _executeSpotifyCapability(input: {
           : [];
         return {
           status: 'need_clarification',
-          tts: `Introuvable dans vos playlists personnelles. Un peu plus de précision serait appréciée.`,
+          tts: 'Introuvable dans vos playlists.',
           options: candidates,
           error_code: userPlaylist.error,
         };
@@ -1015,7 +1015,7 @@ async function _executeSpotifyCapability(input: {
     if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });
     return {
       status: 'success',
-      tts: `Lecture de ${slotString(selected, 'name') ?? displayName}. Enfin.`,
+      tts: `Lecture de ${slotString(selected, 'name') ?? displayName}.`,
       data: { item: selected, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
     };
   }
@@ -1026,13 +1026,13 @@ async function _executeSpotifyCapability(input: {
     if (result.was_empty) {
       return {
         status: 'success',
-        tts: "La file d'attente est déjà vide. Il n'y avait donc rien à faire.",
+        tts: 'File déjà vide.',
         data: { no_op: true, reason: 'queue_already_empty', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
     }
     return {
       status: 'success',
-      tts: `${result.cleared} titre${result.cleared > 1 ? 's' : ''} retiré${result.cleared > 1 ? 's' : ''} de la file. Fait — sans contestation.`,
+      tts: `${result.cleared} titre${result.cleared > 1 ? 's' : ''} retiré${result.cleared > 1 ? 's' : ''} de la file.`,
       data: { cleared: result.cleared, registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
     };
   }

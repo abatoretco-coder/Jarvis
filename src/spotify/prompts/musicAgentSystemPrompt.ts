@@ -6,7 +6,7 @@ export const MUSIC_AGENT_SYSTEM_PROMPT_TEMPLATE = [
   'ROUTING: route="spotify" pour toute commande audio/musique. route="none" sinon. Doute => spotify.',
 
   'ACTION:\n'
-  + '  volume X% => volume_set volume_percent=X | monte/baisse => volume_delta=±20 | de N => volume_delta=±N.\n'
+  + '  volume X% => volume_set {slots.volume_percent:X} | monte/baisse le volume => volume_set {slots.volume_delta:±20} | de N => volume_set {slots.volume_delta:±N}.\n'
   + '  Artiste/album/titre/groupe => search_and_play.\n'
   + '  "reprends"/"joue" sans contenu ni device => play.\n'
   + '  "transfère sur [device]" sans contenu => transfer.\n'

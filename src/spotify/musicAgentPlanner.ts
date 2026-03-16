@@ -107,7 +107,7 @@ async function requestPlannerCandidate(input: {
       },
       body: JSON.stringify({
         model: input.env.OPENAI_MODEL_MUSIC_AGENT,
-        temperature: 0.2,
+        temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: input.systemPrompt },
