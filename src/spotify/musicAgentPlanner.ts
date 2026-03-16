@@ -76,17 +76,13 @@ function buildActionCatalog(): string {
     const lines = [`ACTION: ${cap.action} — ${cap.description}`];
     if (cap.required.length > 0) {
       lines.push(`  REQUIS    : ${cap.required.join(' | ')}`);
-    } else {
-      lines.push('  REQUIS    : aucun');
     }
     if (cap.optional.length > 0) {
       lines.push(`  OPTIONNEL : ${cap.optional.join(', ')}`);
     }
-    if (cap.forbidden.length > 0) {
-      lines.push(`  INTERDIT  : ${cap.forbidden.join(', ')}`);
-    }
-    if (cap.examples.length > 0) {
-      lines.push(`  EXEMPLE   : "${cap.examples[0]}"`);
+    const nonDeviceForbidden = cap.forbidden.filter((f) => f !== 'slots.device');
+    if (nonDeviceForbidden.length > 0) {
+      lines.push(`  INTERDIT  : ${nonDeviceForbidden.join(', ')}`);
     }
     return lines.join('\n');
   }).join('\n\n');
@@ -230,7 +226,7 @@ export async function planSpotifyActionFromTextWithOpenAi(input: {
     metadataJson: compactJson({ correlation_id: input.correlationId ?? null, user_id: input.userId ?? null }),
   });
 
-  const strictUserPrompt = `${userPrompt}\nRAPPEL STRICT: le JSON doit toujours inclure route et reason (reason non vide).`;
+  const strictUserPrompt = `${userPrompt}\nreason doit être non vide.`;
 
   const plan = await requestPlannerCandidate({
     env: input.env,
