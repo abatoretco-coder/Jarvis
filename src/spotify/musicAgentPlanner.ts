@@ -141,8 +141,6 @@ async function requestPlannerCandidate(input: {
 
 function extractNowPlayingSummary(data: Record<string, unknown>): {
   is_playing: boolean;
-  repeat_state?: string;
-  shuffle_state?: boolean;
   device: { name?: string; volume_percent?: number };
   item: { name?: string; artists: string[] };
 } {
@@ -161,8 +159,6 @@ function extractNowPlayingSummary(data: Record<string, unknown>): {
 
   return {
     is_playing: data.is_playing === true,
-    repeat_state: typeof data.repeat_state === 'string' ? data.repeat_state : undefined,
-    shuffle_state: typeof data.shuffle_state === 'boolean' ? data.shuffle_state : undefined,
     device: {
       name: typeof device?.name === 'string' ? device.name : undefined,
       volume_percent: typeof device?.volume_percent === 'number' ? device.volume_percent : undefined,
@@ -206,8 +202,6 @@ async function buildMusicSituation(spotifyWebApi: SpotifyWebApiClient, env: Env)
     const deviceName = s.device.name ?? activeDevice?.name ?? 'inconnu';
     const vol = s.device.volume_percent !== undefined ? ` (volume ${s.device.volume_percent}%)` : '';
     lines.push(`Lecture actuelle ${state} sur "${deviceName}"${vol}: "${title}"${artists ? ` par ${artists}` : ''}.`);
-    if (s.shuffle_state === true) lines.push('Shuffle activé.');
-    if (s.repeat_state && s.repeat_state !== 'off') lines.push(`Repeat: ${s.repeat_state}.`);
   } else {
     lines.push('Aucune lecture Spotify active en ce moment.');
   }
