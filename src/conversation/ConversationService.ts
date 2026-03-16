@@ -1,0 +1,180 @@
+import { toSingleParagraphPlainText } from './plainText';
+import type { MessageRepository } from './repositories/MessageRepository';
+import type { ThreadRepository } from './repositories/ThreadRepository';
+
+export type ConversationServiceOptions = {
+  haBaseUrl: string;
+  haToken: string;
+  requestTimeoutMs: number;
+  minIntervalMs: number;
+  retryCount: number;
+  retryDelayMs: number;
+};
+
+const JARVIS_HA_AGENT_ID = 'conversation.openai_conversation';
+
+function sleep(ms: number): Promise<void> {
+  const safeMs = Math.max(0, Math.floor(ms));
+  return new Promise((resolve) => setTimeout(resolve, safeMs));
+}
+
+function parseAssistantTextFromHaResponse(data: unknown): string {
+  const normalizeHaSpeech = (text: string): string => {
+    const clean = text.trim();
+    if (/^error talking to openai$/i.test(clean)) {
+      return 'Je ne peux pas joindre OpenAI pour le moment. Reessaie dans quelques secondes.';
+    }
+    return clean;
+  };
+
+  const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+
+  const root = asRecord(data);
+  const response = asRecord(root?.response);
+  const speech = asRecord(response?.speech);
+  const plain = asRecord(speech?.plain);
+  const fromPrimary = typeof plain?.speech === 'string' ? plain.speech : '';
+  if (fromPrimary.trim()) return normalizeHaSpeech(fromPrimary);
+
+  if (Array.isArray(data) && data.length > 0) {
+    const first = asRecord(data[0]);
+    const nestedResponse = asRecord(first?.response);
+    const nestedSpeech = asRecord(nestedResponse?.speech);
+    const nestedPlain = asRecord(nestedSpeech?.plain);
+    const fromArray = typeof nestedPlain?.speech === 'string' ? nestedPlain.speech : '';
+    if (fromArray.trim()) return normalizeHaSpeech(fromArray);
+  }
+
+  return 'Je ne peux pas répondre correctement pour le moment.';
+}
+
+function buildAiGuidedInput(userText: string): string {
+  const clean = toSingleParagraphPlainText(userText);
+  const modeHint = inferModeHint(clean);
+  return [
+    'Tu es J.A.R.V.I.S. Ton ton : légèrement condescendant, impeccablement poli, humour sec. Une seule réponse en texte brut, une phrase.',
+    'Role: Home Assistant decide, Jarvis execute delegated actions only.',
+    'Rules: call HA action when available; never invent entities/services.',
+    'Guardrail: never decide or execute Spotify/music streaming intents here; Spotify is handled by a dedicated music agent running in parallel.',
+    'If this request is about Spotify or music streaming and you have no HA entity to control for it, say so briefly in one sentence and do nothing.',
+    'Reply: one short plain text sentence only — no markdown, no lists, no emojis.',
+    `Mode suggere: ${modeHint}`,
+    `Commande utilisateur: ${clean}`,
+  ].join('\n');
+}
+
+function inferModeHint(userText: string): 'control' | 'play' | 'search' | 'queue' | 'info' | 'clarify' {
+  const normalized = toSingleParagraphPlainText(userText)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (/\b(file|queue|ajoute|ajouter)\b/.test(normalized)) return 'queue';
+  if (/\b(recherche|trouve|quel|quoi|infos?|en cours|now playing)\b/.test(normalized)) return 'info';
+  if (/\b(joue|lance|playlist|album|artiste|track|musique)\b/.test(normalized)) return 'play';
+  if (/\b(pause|play|reprend|suivant|precedent|volume|son|mute|stop)\b/.test(normalized)) return 'control';
+  if (normalized.length < 3) return 'clarify';
+  return 'search';
+}
+
+export class ConversationService {
+  private lastHaCallAtMs = 0;
+  private haGate: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly threadRepository: ThreadRepository,
+    private readonly messageRepository: MessageRepository,
+    private readonly options: ConversationServiceOptions
+  ) {}
+
+  private async waitForHaSlot(): Promise<void> {
+    const run = async () => {
+      const now = Date.now();
+      const elapsed = now - this.lastHaCallAtMs;
+      const waitMs = this.options.minIntervalMs - elapsed;
+      if (waitMs > 0) await sleep(waitMs);
+      this.lastHaCallAtMs = Date.now();
+    };
+
+    const next = this.haGate.then(run, run);
+    this.haGate = next.then(() => undefined, () => undefined);
+    await next;
+  }
+
+  private shouldRetry(respStatus: number): boolean {
+    return respStatus === 429 || respStatus === 500 || respStatus === 502 || respStatus === 503 || respStatus === 504;
+  }
+
+  async callHomeAssistantConversation(userText: string, threadId: string): Promise<string> {
+    const textForAgent = buildAiGuidedInput(userText);
+    const maxAttempts = Math.max(1, this.options.retryCount + 1);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      await this.waitForHaSlot();
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
+
+      try {
+        const resp = await fetch(`${this.options.haBaseUrl.replace(/\/$/, '')}/api/conversation/process`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.options.haToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            agent_id: JARVIS_HA_AGENT_ID,
+            text: textForAgent,
+            conversation_id: threadId,
+          }),
+          signal: controller.signal,
+        });
+
+        const bodyText = await resp.text();
+        let data: unknown = bodyText;
+        try {
+          data = bodyText ? (JSON.parse(bodyText) as unknown) : {};
+        } catch {
+          data = bodyText;
+        }
+
+        if (resp.ok) {
+          return toSingleParagraphPlainText(parseAssistantTextFromHaResponse(data));
+        }
+
+        if (attempt < maxAttempts && this.shouldRetry(resp.status)) {
+          await sleep(this.options.retryDelayMs * attempt);
+          continue;
+        }
+
+        throw new Error(`home_assistant_conversation_failed:${resp.status}`);
+      } catch (error) {
+        if (attempt >= maxAttempts) throw error;
+        await sleep(this.options.retryDelayMs * attempt);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    throw new Error('home_assistant_conversation_failed:exhausted_retries');
+  }
+
+  async persistMessages(threadId: string, userText: string, assistantText: string): Promise<void> {
+    const now = Date.now();
+    await this.threadRepository.getOrCreate(threadId);
+    await this.messageRepository.appendMessage({
+      threadId,
+      role: 'user',
+      content: toSingleParagraphPlainText(userText),
+      createdAtMs: now,
+    });
+    await this.messageRepository.appendMessage({
+      threadId,
+      role: 'assistant',
+      content: toSingleParagraphPlainText(assistantText),
+      createdAtMs: now + 1,
+    });
+    await this.threadRepository.incrementInteractionCount(threadId);
+  }
+}
