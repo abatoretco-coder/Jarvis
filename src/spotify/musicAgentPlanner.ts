@@ -262,3 +262,79 @@ export async function planSpotifyActionFromTextWithOpenAi(input: {
     request: normalizedRequest,
   };
 }
+
+type SearchCandidate = {
+  type: string;
+  name: string;
+  artists_string?: string;
+  uri?: string;
+};
+
+/** Asks OpenAI to pick the best candidate from a Spotify search result list.
+ *  Returns the 0-based index of the best match. Falls back to 0 on any error. */
+export async function selectBestSpotifyResult(input: {
+  env: Env;
+  userText: string;
+  query: string;
+  candidates: Array<SearchCandidate | Record<string, unknown>>;
+}): Promise<number> {
+  const { env, userText, query, candidates } = input;
+
+  if (!candidates.length) return 0;
+  if (candidates.length === 1) return 0;
+
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return 0;
+
+  const list = candidates
+    .map((c, i) => {
+      const name = typeof (c as SearchCandidate).name === 'string' ? (c as SearchCandidate).name : String(c.name ?? '');
+      const type = typeof (c as SearchCandidate).type === 'string' ? (c as SearchCandidate).type : String(c.type ?? '');
+      const sub = typeof (c as SearchCandidate).artists_string === 'string' ? ` — ${(c as SearchCandidate).artists_string}` : '';
+      return `${i}: [${type}] "${name}"${sub}`;
+    })
+    .join('\n');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), env.OPENAI_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: env.OPENAI_MODEL_MUSIC_AGENT,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        max_tokens: 20,
+        messages: [
+          { role: 'system', content: 'Sélectionne le meilleur résultat Spotify. Réponds uniquement {"index":N}.' },
+          { role: 'user', content: `Commande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}` },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    if (!response.ok) return 0;
+
+    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+    const choices = Array.isArray((parsed as { choices?: unknown[] }).choices)
+      ? (parsed as { choices: Array<{ message?: { content?: string } }> }).choices
+      : [];
+    const content = choices[0]?.message?.content ?? '';
+    const data = parseJsonObject(content);
+
+    if (!data || typeof data !== 'object') return 0;
+    const idx = (data as { index?: unknown }).index;
+    if (typeof idx !== 'number' || !Number.isFinite(idx)) return 0;
+    return Math.min(Math.max(0, Math.round(idx)), candidates.length - 1);
+  } catch {
+    return 0;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

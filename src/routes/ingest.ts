@@ -250,6 +250,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const spotifyResponse = await executeSpotifyCapability({
         request: spotifyPayload.data,
         spotifyWebApi: deps.spotifyWebApi,
+        env: deps.env,
         log: app.log,
       });
 
@@ -318,6 +319,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const spotifyResponse = await executeSpotifyCapability({
             request: spotifyPayload.data,
             spotifyWebApi: deps.spotifyWebApi,
+            env: deps.env,
             log: app.log,
           });
 

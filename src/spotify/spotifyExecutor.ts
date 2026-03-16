@@ -1,6 +1,8 @@
-﻿import type { SpotifyWebApiClient } from '../spotifyWebApi';
+﻿import type { Env } from '../env';
+import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { getSpotifyCapability, SPOTIFY_CAPABILITY_REGISTRY_VERSION } from './capabilityRegistry';
 import type { IngestSpotifyRequest, JarvisSpotifyResponse } from './contracts';
+import { selectBestSpotifyResult } from './musicAgentPlanner';
 
 type LoggerLike = {
   info?: (obj: Record<string, unknown>, msg?: string) => void;
@@ -85,40 +87,8 @@ function normalizeForMatch(input: string): string {
     .trim();
 }
 
-function tokenize(input: string): string[] {
-  const normalized = normalizeForMatch(input);
-  if (!normalized) return [];
-  return normalized.split(/\s+/).filter((token) => token.length >= 2);
-}
 
-function nameMatchScore(candidateName: string, requestedName: string): number {
-  const candidate = normalizeForMatch(candidateName);
-  const requested = normalizeForMatch(requestedName);
-  if (!candidate || !requested) return 0;
-  if (candidate === requested) return 1000;
-  if (candidate.startsWith(requested)) return 900;
-  if (requested.startsWith(candidate)) return 850;
-  if (candidate.includes(requested) || requested.includes(candidate)) return 800;
 
-  const requestedTokens = tokenize(requested);
-  if (!requestedTokens.length) return 0;
-
-  const candidateSet = new Set(tokenize(candidate));
-  const overlap = requestedTokens.filter((token) => candidateSet.has(token)).length;
-  if (!overlap) return 0;
-
-  const ratio = overlap / requestedTokens.length;
-  if (ratio < 0.5) return 0;
-  return Math.round(ratio * 700);
-}
-
-function candidateNameFromType(entities: Record<string, unknown>, type: string): string | undefined {
-  if (type === 'artist') return slotString(entities, 'artist') ?? slotString(entities, 'artist_name');
-  if (type === 'album') return slotString(entities, 'album') ?? slotString(entities, 'album_name');
-  if (type === 'playlist') return slotString(entities, 'playlist') ?? slotString(entities, 'playlist_name');
-  if (type === 'track') return slotString(entities, 'track') ?? slotString(entities, 'title');
-  return undefined;
-}
 
 function normalizeCatalogOptions(type: string, items: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   return items
@@ -127,47 +97,20 @@ function normalizeCatalogOptions(type: string, items: Array<Record<string, unkno
       const name = slotString(item, 'name');
       if (!uri || !name) return undefined;
       const url = spotifyUriToUrl(uri);
+      const artists_string = slotString(item, 'artists_string');
       return {
         type,
         id: slotString(item, 'id') ?? undefined,
         name,
         uri,
         ...(url ? { url } : {}),
+        ...(artists_string ? { artists_string } : {}),
       } as Record<string, unknown>;
     })
     .filter((item): item is Record<string, unknown> => Boolean(item));
 }
 
-function rankCatalogOptions(input: {
-  options: Array<Record<string, unknown>>;
-  query: string;
-  type: string;
-  assistantUnderstanding?: Record<string, unknown>;
-}): Array<{ option: Record<string, unknown>; score: number }> {
-  const { options, query, type, assistantUnderstanding } = input;
-  const entities = asRecord(assistantUnderstanding?.entities) ?? {};
-  const hintedName = candidateNameFromType(entities, type);
 
-  return options
-    .map((option) => {
-      const optionName = slotString(option, 'name') ?? '';
-      const byQuery = nameMatchScore(optionName, query);
-      const byHint = hintedName ? nameMatchScore(optionName, hintedName) : 0;
-      const score = Math.max(byQuery, byHint > 0 ? byHint + 120 : 0);
-      return { option, score };
-    })
-    .sort((left, right) => right.score - left.score);
-}
-
-function shouldAutoselectRankedCandidates(ranked: Array<{ option: Record<string, unknown>; score: number }>): boolean {
-  if (!ranked.length) return false;
-  const top = ranked[0]?.score ?? 0;
-  const second = ranked[1]?.score ?? 0;
-  if (top >= 1000) return true;
-  if (top >= 900 && top - second >= 120) return true;
-  if (top >= 850 && ranked.length === 1) return true;
-  return false;
-}
 
 function spotifyUriToUrl(uri: string): string | undefined {
   const normalized = String(uri ?? '').trim();
@@ -315,6 +258,7 @@ const READONLY_SPOTIFY_ACTIONS = new Set(['list_devices', 'now_playing', 'search
 export async function executeSpotifyCapability(input: {
   request: IngestSpotifyRequest;
   spotifyWebApi: SpotifyWebApiClient;
+  env: Env;
   log?: LoggerLike;
 }): Promise<JarvisSpotifyResponse> {
   const result = await _executeSpotifyCapability(input);
@@ -327,9 +271,10 @@ export async function executeSpotifyCapability(input: {
 async function _executeSpotifyCapability(input: {
   request: IngestSpotifyRequest;
   spotifyWebApi: SpotifyWebApiClient;
+  env: Env;
   log?: LoggerLike;
 }): Promise<JarvisSpotifyResponse> {
-  const { request, spotifyWebApi, log } = input;
+  const { request, spotifyWebApi, env, log } = input;
   const capability = getSpotifyCapability(request.action);
 
   if (!capability) {
@@ -742,43 +687,32 @@ async function _executeSpotifyCapability(input: {
       }
 
       if (type === 'track') {
-        const uri = await spotifyWebApi.searchTopTrackUri(query, hintedArtist);
-        if (!uri.ok) {
-          return toErrorResponse(uri.error, `Je n’ai pas trouvé de résultat unique pour ${query}.`, {
-            options: Array.isArray((uri.details as Record<string, unknown> | undefined)?.candidates)
-              ? ((uri.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 5)
-              : undefined,
-          });
+        const trackSearch = await spotifyWebApi.searchCatalog('track', query, 5);
+        if (!trackSearch.ok) {
+          return toErrorResponse(trackSearch.error, `Recherche Spotify impossible pour ${query}.`, { status: trackSearch.status });
         }
-        targetTrackUri = uri.uri;
+        const trackOptions = normalizeCatalogOptions('track', trackSearch.items);
+        if (!trackOptions.length) {
+          return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
+        }
+        const trackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: trackOptions });
+        targetTrackUri = slotString(trackOptions[trackIdx], 'uri') ?? '';
       } else {
         const searched = await spotifyWebApi.searchCatalog(type, query, 5);
         if (!searched.ok) {
           return toErrorResponse(searched.error, `Recherche Spotify impossible pour ${query}.`, { status: searched.status });
         }
-
         const options = normalizeCatalogOptions(type, searched.items);
         if (!options.length) {
-          return toErrorResponse('spotify_search_no_results', `Je n’ai trouvé aucun résultat Spotify pour ${query}.`);
+          return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
         }
-
-        const ranked = rankCatalogOptions({ options, query, type, assistantUnderstanding });
-        const top = ranked[0]?.option;
-        if (!top || !shouldAutoselectRankedCandidates(ranked)) {
-          return {
-            status: 'need_clarification',
-            tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
-            options: options.slice(0, 5),
-            error_code: 'ambiguous_search',
-          };
-        }
-
-        const contextUri = slotString(top, 'uri');
-        if (!contextUri) return toErrorResponse('spotify_missing_uri', 'Je ne trouve pas d’URI Spotify valide.');
-
+        const elseIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+        const selectedCtx = options[elseIdx];
+        const contextUri = slotString(selectedCtx, 'uri');
+        if (!contextUri) return toErrorResponse('spotify_missing_uri', "Je ne trouve pas d'URI Spotify valide.");
         const resolved = await spotifyWebApi.getFirstTrackUriFromContext(contextUri, hintedArtist);
         if (!resolved.ok) {
-          return toErrorResponse(resolved.error, `Je ne peux pas déterminer un titre à ajouter depuis ${slotString(top, 'name') ?? query}.`, {
+          return toErrorResponse(resolved.error, `Je ne peux pas déterminer un titre à ajouter depuis ${slotString(selectedCtx, 'name') ?? query}.`, {
             status: resolved.status,
           });
         }
@@ -847,18 +781,20 @@ async function _executeSpotifyCapability(input: {
           error_code: 'missing_track_query',
         };
       }
-      const track = await spotifyWebApi.searchTopTrackUri(query);
-      if (!track.ok) {
-        return {
-          status: 'need_clarification',
-          tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
-          options: Array.isArray((track.details as Record<string, unknown> | undefined)?.candidates)
-            ? ((track.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 5)
-            : undefined,
-          error_code: track.error,
-        };
+      const playlistSearch = await spotifyWebApi.searchCatalog('track', query, 5);
+      if (!playlistSearch.ok) {
+        return toErrorResponse(playlistSearch.error, `Recherche Spotify impossible pour "${query}".`, { status: playlistSearch.status });
       }
-      candidateUris = [track.uri];
+      const playlistOptions = normalizeCatalogOptions('track', playlistSearch.items);
+      if (!playlistOptions.length) {
+        return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
+      }
+      const playlistTrackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: playlistOptions });
+      const selectedPlaylistTrackUri = slotString(playlistOptions[playlistTrackIdx], 'uri');
+      if (!selectedPlaylistTrackUri) {
+        return toErrorResponse('spotify_missing_uri', "Je ne trouve pas d'URI Spotify valide.");
+      }
+      candidateUris = [selectedPlaylistTrackUri];
     }
 
     const added = await spotifyWebApi.addUrisToPlaylist(targetPlaylistId, candidateUris);
@@ -928,24 +864,32 @@ async function _executeSpotifyCapability(input: {
     }
 
     if (type === 'track') {
-      const track = await spotifyWebApi.searchTopTrackUri(query, hintedArtist);
-      if (!track.ok) {
+      const searched = await spotifyWebApi.searchCatalog('track', query, 5);
+      if (!searched.ok) {
+        return toErrorResponse(searched.error, `Recherche Spotify impossible pour "${query}".`, { status: searched.status });
+      }
+
+      const options = normalizeCatalogOptions('track', searched.items);
+      if (!options.length) {
         return {
           status: 'need_clarification',
-          tts: `Plusieurs résultats pour "${query}", soyez plus précis.`,
-          options: Array.isArray((track.details as Record<string, unknown> | undefined)?.candidates)
-            ? ((track.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 5)
-            : undefined,
-          error_code: track.error,
+          tts: `Aucun résultat pour "${query}".`,
+          error_code: 'spotify_search_no_results',
+          data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
         };
       }
 
-      const played = await spotifyWebApi.playUris([track.uri], deviceId);
+      const idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+      const selectedTrack = options[idx]!;
+      const trackUri = slotString(selectedTrack, 'uri') ?? '';
+      if (!trackUri) return toErrorResponse('spotify_missing_uri', 'Je ne trouve pas d\'URI Spotify valide.');
+
+      const played = await spotifyWebApi.playUris([trackUri], deviceId);
       if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });
       return {
         status: 'success',
-        tts: `Lecture de ${displayName}.`,
-        data: { uri: track.uri, type: 'track', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
+        tts: `Lecture de ${slotString(selectedTrack, 'name') ?? displayName}.`,
+        data: { uri: trackUri, type: 'track', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
     }
 
@@ -990,26 +934,18 @@ async function _executeSpotifyCapability(input: {
     if (!options.length) {
       return {
         status: 'need_clarification',
-        tts: `Aucun résultat pour "${query}". Spotify n’est pas plus inspiré que vous.`,
+        tts: `Aucun résultat pour "${query}".`,
         options: [],
         error_code: 'spotify_search_no_results',
       };
     }
 
-    const ranked = rankCatalogOptions({ options, query, type, assistantUnderstanding });
-    const selected = ranked[0]?.option;
-    const forceAutoSelect = slotBoolean(slots, 'auto_select_top') === true || type === 'playlist';
-    if (!selected || (!forceAutoSelect && !shouldAutoselectRankedCandidates(ranked))) {
-      return {
-        status: 'need_clarification',
-        tts: `J’ai trouvé ${options.length} résultats pour "${query}". Un peu plus de précision, je vous prie.`,
-        options: options.slice(0, 5),
-        error_code: 'ambiguous_search',
-      };
-    }
+    const idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+    const selected = options[idx]!;
 
     const selectedContextUri = slotString(selected, 'uri') ?? '';
-    if (!selectedContextUri) return toErrorResponse('spotify_missing_uri', 'Je ne trouve pas d’URI Spotify valide.');
+    if (!selectedContextUri) return toErrorResponse('spotify_missing_uri', "Je ne trouve pas d'URI Spotify valide.");
+
 
     const played = await spotifyWebApi.playContextUri(selectedContextUri, deviceId);
     if (!played.ok) return toErrorResponse(played.error, 'Impossible de lancer cette lecture Spotify.', { status: played.status });

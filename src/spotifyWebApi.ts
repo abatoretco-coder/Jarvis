@@ -1695,12 +1695,22 @@ export class SpotifyWebApiClient {
       ? itemsRaw
           .map((item) => asRecord(item))
           .filter((item): item is Record<string, unknown> => Boolean(item))
-          .map((item) => ({
-            id: item.id,
-            name: item.name,
-            uri: item.uri,
-            type: cleanType,
-          }))
+          .map((item) => {
+            const artistsRaw = cleanType === 'track' && Array.isArray(item.artists)
+              ? (item.artists as Array<{ name?: unknown }>)
+              : [];
+            const artists_string = artistsRaw
+              .map((a) => String(a?.name ?? '').trim())
+              .filter(Boolean)
+              .join(', ') || undefined;
+            return {
+              id: item.id,
+              name: item.name,
+              uri: item.uri,
+              type: cleanType,
+              ...(artists_string ? { artists_string } : {}),
+            };
+          })
       : [];
 
     return { ok: true, items };
