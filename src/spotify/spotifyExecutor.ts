@@ -276,39 +276,20 @@ type PlaybackSnapshot = {
   deviceId?: string;
   deviceName?: string;
   volumePercent?: number;
-  shuffleState?: boolean;
-  repeatState?: string;
-  progressMs?: number;
-  durationMs?: number;
 };
 
 function toPlaybackSnapshot(data: Record<string, unknown>): PlaybackSnapshot {
   const device = asRecord(data.device);
-  const item = asRecord(data.item);
-  const durationMsRaw = item?.duration_ms;
-  const durationMs = typeof durationMsRaw === 'number' && Number.isFinite(durationMsRaw)
-    ? Math.max(0, Math.round(durationMsRaw))
-    : undefined;
-  const progressMsRaw = data.progress_ms;
-  const progressMs = typeof progressMsRaw === 'number' && Number.isFinite(progressMsRaw)
-    ? Math.max(0, Math.round(progressMsRaw))
-    : undefined;
   const volumeRaw = device?.volume_percent;
   const volumePercent = typeof volumeRaw === 'number' && Number.isFinite(volumeRaw)
     ? Math.max(0, Math.min(100, Math.round(volumeRaw)))
     : undefined;
-  const repeatRaw = typeof data.repeat_state === 'string' ? data.repeat_state.trim().toLowerCase() : '';
-  const repeatState = repeatRaw || undefined;
 
   return {
     isPlaying: data.is_playing === true ? true : data.is_playing === false ? false : undefined,
     deviceId: typeof device?.id === 'string' ? device.id.trim() || undefined : undefined,
     deviceName: typeof device?.name === 'string' ? device.name.trim() || undefined : undefined,
     volumePercent,
-    shuffleState: typeof data.shuffle_state === 'boolean' ? data.shuffle_state : undefined,
-    repeatState,
-    progressMs,
-    durationMs,
   };
 }
 

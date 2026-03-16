@@ -1,6 +1,6 @@
 import type { SpotifyCapability } from './contracts';
 
-export const SPOTIFY_CAPABILITY_REGISTRY_VERSION = '2026-03-04.v2';
+export const SPOTIFY_CAPABILITY_REGISTRY_VERSION = '2026-03-17.v1';
 
 export const SPOTIFY_CAPABILITIES: SpotifyCapability[] = [
   {
