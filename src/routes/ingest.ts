@@ -227,6 +227,50 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
   const TTS_PROVIDER_CACHE_TTL_MS = 60_000;
 
+  // ─── TTS circuit breaker ─────────────────────────────────────────────────
+  const ttsCb = new Map<string, { failures: number; openUntil: number }>();
+  const CB_THRESHOLD = 3;
+  const CB_OPEN_MS = 45_000;
+
+  function isTtsCbOpen(engineId: string): boolean {
+    const state = ttsCb.get(engineId);
+    if (!state) return false;
+    if (Date.now() > state.openUntil) { ttsCb.delete(engineId); return false; }
+    return state.failures >= CB_THRESHOLD;
+  }
+
+  function recordTtsFailure(engineId: string): void {
+    const state = ttsCb.get(engineId) ?? { failures: 0, openUntil: 0 };
+    state.failures += 1;
+    if (state.failures >= CB_THRESHOLD) state.openUntil = Date.now() + CB_OPEN_MS;
+    ttsCb.set(engineId, state);
+  }
+
+  function recordTtsSuccess(engineId: string): void {
+    ttsCb.delete(engineId);
+  }
+
+  // ─── Per-endpoint perf samples (rolling window 200) ──────────────────────
+  const PERF_MAX = 200;
+  const perfSamples = new Map<string, number[]>();
+
+  function recordPerf(key: string, elapsedMs: number): void {
+    let arr = perfSamples.get(key);
+    if (!arr) { arr = []; perfSamples.set(key, arr); }
+    arr.push(elapsedMs);
+    if (arr.length > PERF_MAX) arr.shift();
+  }
+
+  function computePercentiles(key: string): { count: number; avg: number; p50: number; p95: number } {
+    const arr = perfSamples.get(key) ?? [];
+    if (arr.length === 0) return { count: 0, avg: 0, p50: 0, p95: 0 };
+    const sorted = [...arr].sort((a, b) => a - b);
+    const avg = Math.round(sorted.reduce((s, v) => s + v, 0) / sorted.length);
+    const p50 = sorted[Math.floor(sorted.length * 0.5)]!;
+    const p95 = sorted[Math.floor(sorted.length * 0.95)]!;
+    return { count: sorted.length, avg, p50, p95 };
+  }
+
   app.post('/v1/ingest', async (req, reply) => {
     const parsed = ingestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -241,6 +285,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const requestId = randomUUID();
     const t0 = Date.now();
+    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
     const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
 
     const toDeterministicHaFailureMessage = (): string => (
@@ -303,11 +348,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         summarizationService.startPresummarize(threadId);
       }
 
+      recordPerf('ingest', Date.now() - t0);
       app.log.info(
         {
           threadId,
           requestId,
           correlation_id: correlationId || undefined,
+          voice_turn_id: voiceTurnId || undefined,
           intent: deterministicReply.intent,
           target: deterministicReply.target,
           elapsed_ms: Date.now() - t0,
@@ -452,7 +499,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(500).send({ error: 'response_validation_failed' });
     }
 
-    app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_complete');
+    recordPerf('ingest', Date.now() - t0);
+    app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_complete');
     return reply.code(200).send(payload);
   });
 
@@ -475,6 +523,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const requestedEngineId = params.data.engineId.trim();
     const t0 = Date.now();
+    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
 
     try {
       const openAiResult = await transcribeWithOpenAi({
@@ -483,7 +532,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         incomingContentType,
       });
 
-      app.log.info({ engineId: `openai:${openAiResult.model}`, elapsed_ms: Date.now() - t0 }, 'stt_complete');
+      recordPerf('stt', Date.now() - t0);
+      app.log.info({ engineId: `openai:${openAiResult.model}`, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'stt_complete');
       return reply.code(200).send({
         text: openAiResult.text,
         result: openAiResult.text,
@@ -576,7 +626,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
-    app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0 }, 'stt_complete');
+    recordPerf('stt', Date.now() - t0);
+    app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'stt_complete');
     return reply.code(200).send({ text, result: text, engineId: selectedEngineId });
   });
 
@@ -628,6 +679,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const text = toSingleParagraphPlainText(parsed.data.text);
     const t0 = Date.now();
+    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
     const configuredEntity = deps.env.HA_TTS_ENTITY_ID?.trim();
     const primaryEngineId = configuredEntity && configuredEntity.length > 0
       ? configuredEntity
@@ -668,6 +720,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const engineId = candidateEngineIds[index]!;
         selectedEngineId = engineId;
 
+        if (isTtsCbOpen(engineId)) {
+          app.log.warn({ engineId }, 'tts_circuit_open_skipping');
+          attempts.push({ engineId, stage: 'tts_get_url', status: 0, message: 'circuit_open' });
+          continue;
+        }
+
         const ttsUrlController = new AbortController();
         const ttsUrlTimeoutId = setTimeout(() => ttsUrlController.abort(), deps.env.HA_TIMEOUT_MS);
         const ttsUrlResponse = await fetch(`${haBaseUrl}/api/tts_get_url`, {
@@ -692,6 +750,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             status: ttsUrlResponse.status,
             message: errorBody.slice(0, 300),
           });
+          recordTtsFailure(engineId);
 
           const hasNext = index < candidateEngineIds.length - 1;
           const shouldTryNext =
@@ -755,6 +814,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             status: upstream.status,
             message: errorText.slice(0, 300),
           });
+          recordTtsFailure(engineId);
 
           const hasNext = index < candidateEngineIds.length - 1;
           const shouldTryNext =
@@ -773,7 +833,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const contentType = upstream.headers.get('content-type') ?? 'audio/mpeg';
         const bytes = Buffer.from(await upstream.arrayBuffer());
 
-        app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0 }, 'tts_complete');
+        recordTtsSuccess(selectedEngineId);
+        recordPerf('tts', Date.now() - t0);
+        app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
         return reply
           .code(200)
           .header('content-type', contentType)
@@ -783,7 +845,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       try {
         const openAiSpeech = await synthesizeWithOpenAi({ env: deps.env, text });
-        app.log.info({ engineId: openAiSpeech.provider, elapsed_ms: Date.now() - t0 }, 'tts_complete');
+        recordPerf('tts', Date.now() - t0);
+        app.log.info({ engineId: openAiSpeech.provider, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
         return reply
           .code(200)
           .header('content-type', openAiSpeech.contentType)
@@ -872,6 +935,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const message = error instanceof Error ? error.message : 'unknown_error';
       return reply.code(500).send({ error: 'delete_failed', message });
     }
+  });
+
+  app.get('/v1/stats', async (_req, reply) => {
+    const keys = ['stt', 'tts', 'ingest'];
+    const stats: Record<string, ReturnType<typeof computePercentiles>> = {};
+    for (const key of keys) {
+      stats[key] = computePercentiles(key);
+    }
+    const cbState: Record<string, { failures: number; openUntil: string | null }> = {};
+    for (const [engineId, state] of ttsCb.entries()) {
+      cbState[engineId] = {
+        failures: state.failures,
+        openUntil: state.openUntil > 0 ? new Date(state.openUntil).toISOString() : null,
+      };
+    }
+    return reply.code(200).send({ latency_ms: stats, tts_circuit_breaker: cbState });
   });
 
 }
