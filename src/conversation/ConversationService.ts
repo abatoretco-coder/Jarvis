@@ -24,6 +24,9 @@ function parseAssistantTextFromHaResponse(data: unknown): string {
     if (/^error talking to openai$/i.test(clean)) {
       return 'Je ne peux pas joindre OpenAI pour le moment. Reessaie dans quelques secondes.';
     }
+    if (/(insufficient\s+funds|insufficient\s+quota|quota|billing|credit)/i.test(clean)) {
+      return 'OpenAI n\'a plus de crédit disponible pour le moment. Recharge le compte, puis réessaie.';
+    }
     return clean;
   };
 
