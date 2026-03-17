@@ -314,8 +314,14 @@ export async function selectBestSpotifyResult(input: {
         response_format: { type: 'json_object' },
         max_tokens: 20,
         messages: [
-          { role: 'system', content: 'Sélectionne le meilleur résultat Spotify. Réponds uniquement {"index":N}.' },
-          { role: 'user', content: `Commande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}` },
+          {
+            role: 'system',
+            content: 'Sélectionne le meilleur résultat Spotify. Réponse JSON obligatoire, objet unique: {"index":N}.',
+          },
+          {
+            role: 'user',
+            content: `Réponds en JSON strict uniquement avec la clé index.\nCommande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}`,
+          },
         ],
       }),
       signal: controller.signal,
@@ -331,6 +337,12 @@ export async function selectBestSpotifyResult(input: {
       ? (parsed as { choices: Array<{ message?: { content?: string } }> }).choices
       : [];
     const content = choices[0]?.message?.content ?? '';
+
+    const directNumber = Number(content.trim());
+    if (Number.isFinite(directNumber)) {
+      return Math.min(Math.max(0, Math.round(directNumber)), candidates.length - 1);
+    }
+
     const data = parseJsonObject(content);
 
     if (!data || typeof data !== 'object') {
