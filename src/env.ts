@@ -46,7 +46,7 @@ const envSchema = z
   HA_TOKEN: optionalNonEmptyString,
   HA_LONG_LIVED_TOKEN: optionalNonEmptyString,
   HA_TIMEOUT_MS: numberFromEnv.default('10000'),
-  HA_CONVERSATION_MIN_INTERVAL_MS: numberFromEnv.default('900'),
+  HA_CONVERSATION_MIN_INTERVAL_MS: numberFromEnv.default('300'),
   HA_CONVERSATION_RETRY_COUNT: numberFromEnv.default('1'),
   HA_CONVERSATION_RETRY_DELAY_MS: numberFromEnv.default('1200'),
   HA_TTS_ENTITY_ID: optionalNonEmptyString,

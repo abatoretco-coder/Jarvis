@@ -105,13 +105,16 @@ async function transcribeWithOpenAi(params: {
   const fileExt = audioExtensionFromContentType(params.incomingContentType);
   form.set('file', new Blob([params.body], { type: params.incomingContentType }), `audio.${fileExt}`);
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TIMEOUT_MS);
   const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/transcriptions`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${openAiApiKey}`,
     },
     body: form,
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timeoutId));
 
   const raw = await response.text();
   if (!response.ok) {
@@ -147,6 +150,8 @@ async function synthesizeWithOpenAi(params: {
   const voice = params.env.OPENAI_TTS_VOICE.trim();
   const format = params.env.OPENAI_TTS_FORMAT;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TIMEOUT_MS);
   const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
     method: 'POST',
     headers: {
@@ -159,7 +164,8 @@ async function synthesizeWithOpenAi(params: {
       input: params.text,
       format,
     }),
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timeoutId));
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -217,6 +223,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     retryCount: deps.env.HA_CONVERSATION_RETRY_COUNT,
     retryDelayMs: deps.env.HA_CONVERSATION_RETRY_DELAY_MS,
   });
+
+  let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
+  const TTS_PROVIDER_CACHE_TTL_MS = 60_000;
 
   app.post('/v1/ingest', async (req, reply) => {
     const parsed = ingestSchema.safeParse(req.body);
@@ -475,7 +484,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         result: openAiResult.text,
         engineId: `openai:${openAiResult.model}`,
       });
-    } catch {
+    } catch (err) {
+      app.log.warn({ err }, 'stt_openai_failed_falling_back_to_ha');
     }
 
     if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) {
@@ -498,6 +508,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     let response: Response | undefined;
     let selectedEngineId = requestedEngineId;
     for (const candidate of engineCandidates) {
+      const sttHaController = new AbortController();
+      const sttHaTimeoutId = setTimeout(() => sttHaController.abort(), deps.env.HA_TIMEOUT_MS);
       const candidateResponse = await fetch(`${deps.env.HA_BASE_URL.replace(/\/$/, '')}/api/stt/${encodeURIComponent(candidate)}`, {
         method: 'POST',
         headers: {
@@ -506,7 +518,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           'x-speech-content': speechContent,
         },
         body,
-      });
+        signal: sttHaController.signal,
+      }).finally(() => clearTimeout(sttHaTimeoutId));
 
       if (candidateResponse.ok || candidateResponse.status !== 404) {
         response = candidateResponse;
@@ -621,17 +634,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (deps.ha) {
       try {
-        const statesRaw = await deps.ha.getStates();
-        const availableTtsProviders = new Set(
-          toEntityStates(statesRaw)
-            .map((item) => item.entity_id)
-            .filter((entityId) => entityId.startsWith('tts.'))
-        );
-        const availableCandidates = candidateEngineIds.filter((engineId) => availableTtsProviders.has(engineId));
+        const nowMs = Date.now();
+        if (!ttsProviderCache || nowMs - ttsProviderCache.at > TTS_PROVIDER_CACHE_TTL_MS) {
+          const statesRaw = await deps.ha.getStates();
+          const providers = new Set(
+            toEntityStates(statesRaw)
+              .map((item) => item.entity_id)
+              .filter((entityId) => entityId.startsWith('tts.'))
+          );
+          ttsProviderCache = { providers, at: nowMs };
+        }
+        const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
         if (availableCandidates.length > 0) {
           candidateEngineIds = availableCandidates;
         }
-      } catch {
+      } catch (err) {
+        app.log.warn({ err }, 'tts_provider_discovery_failed');
       }
     }
 
@@ -643,6 +661,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const engineId = candidateEngineIds[index]!;
         selectedEngineId = engineId;
 
+        const ttsUrlController = new AbortController();
+        const ttsUrlTimeoutId = setTimeout(() => ttsUrlController.abort(), deps.env.HA_TIMEOUT_MS);
         const ttsUrlResponse = await fetch(`${haBaseUrl}/api/tts_get_url`, {
           method: 'POST',
           headers: {
@@ -654,7 +674,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             message: text,
             cache: true,
           }),
-        });
+          signal: ttsUrlController.signal,
+        }).finally(() => clearTimeout(ttsUrlTimeoutId));
 
         if (!ttsUrlResponse.ok) {
           const errorBody = await ttsUrlResponse.text();
@@ -709,12 +730,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           return reply.code(502).send({ error: 'ha_tts_invalid_response', attempts });
         }
 
+        const proxyController = new AbortController();
+        const proxyTimeoutId = setTimeout(() => proxyController.abort(), deps.env.HA_TIMEOUT_MS);
         const upstream = await fetch(proxyUrl, {
           method: 'GET',
           headers: {
             authorization: `Bearer ${deps.env.HA_TOKEN}`,
           },
-        });
+          signal: proxyController.signal,
+        }).finally(() => clearTimeout(proxyTimeoutId));
 
         if (!upstream.ok) {
           const errorText = await upstream.text();
@@ -756,7 +780,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           .header('content-type', openAiSpeech.contentType)
           .header('x-tts-provider', openAiSpeech.provider)
           .send(openAiSpeech.bytes);
-      } catch {
+      } catch (err) {
+        app.log.warn({ err, attempts }, 'tts_openai_fallback_failed');
       }
 
       return reply.code(502).send({
