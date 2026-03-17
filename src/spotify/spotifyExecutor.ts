@@ -128,6 +128,15 @@ function toErrorResponse(errorCode: string, tts: string, details?: Record<string
   };
 }
 
+function toSelectionFailureResponse(error: unknown): JarvisSpotifyResponse {
+  const reason = error instanceof Error ? error.message : 'openai_selection_failed_unknown';
+  return toErrorResponse(
+    'openai_selection_failed',
+    'Je ne peux pas départager les résultats Spotify pour le moment. Réessayez en précisant le titre et l\'artiste.',
+    { reason }
+  );
+}
+
 function normalizeDeviceSlot(slots: Record<string, unknown>): string | undefined {
   const device = slotString(slots, 'device') ?? slotString(slots, 'device_id');
   if (!device) return undefined;
@@ -695,7 +704,12 @@ async function _executeSpotifyCapability(input: {
         if (!trackOptions.length) {
           return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
         }
-        const trackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: trackOptions });
+        let trackIdx: number;
+        try {
+          trackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: trackOptions });
+        } catch (error: unknown) {
+          return toSelectionFailureResponse(error);
+        }
         targetTrackUri = slotString(trackOptions[trackIdx], 'uri') ?? '';
       } else {
         const searched = await spotifyWebApi.searchCatalog(type, query, 5);
@@ -706,7 +720,12 @@ async function _executeSpotifyCapability(input: {
         if (!options.length) {
           return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
         }
-        const elseIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+        let elseIdx: number;
+        try {
+          elseIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+        } catch (error: unknown) {
+          return toSelectionFailureResponse(error);
+        }
         const selectedCtx = options[elseIdx];
         const contextUri = slotString(selectedCtx, 'uri');
         if (!contextUri) return toErrorResponse('spotify_missing_uri', "Je ne trouve pas d'URI Spotify valide.");
@@ -789,7 +808,12 @@ async function _executeSpotifyCapability(input: {
       if (!playlistOptions.length) {
         return toErrorResponse('spotify_search_no_results', `Je n'ai trouvé aucun résultat Spotify pour "${query}".`);
       }
-      const playlistTrackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: playlistOptions });
+      let playlistTrackIdx: number;
+      try {
+        playlistTrackIdx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: playlistOptions });
+      } catch (error: unknown) {
+        return toSelectionFailureResponse(error);
+      }
       const selectedPlaylistTrackUri = slotString(playlistOptions[playlistTrackIdx], 'uri');
       if (!selectedPlaylistTrackUri) {
         return toErrorResponse('spotify_missing_uri', "Je ne trouve pas d'URI Spotify valide.");
@@ -879,7 +903,12 @@ async function _executeSpotifyCapability(input: {
         };
       }
 
-      const idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+      let idx: number;
+      try {
+        idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+      } catch (error: unknown) {
+        return toSelectionFailureResponse(error);
+      }
       const selectedTrack = options[idx]!;
       const trackUri = slotString(selectedTrack, 'uri') ?? '';
       if (!trackUri) return toErrorResponse('spotify_missing_uri', 'Je ne trouve pas d\'URI Spotify valide.');
@@ -940,7 +969,12 @@ async function _executeSpotifyCapability(input: {
       };
     }
 
-    const idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+    let idx: number;
+    try {
+      idx = await selectBestSpotifyResult({ env, userText: request.text ?? query, query, candidates: options });
+    } catch (error: unknown) {
+      return toSelectionFailureResponse(error);
+    }
     const selected = options[idx]!;
 
     const selectedContextUri = slotString(selected, 'uri') ?? '';

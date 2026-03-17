@@ -271,7 +271,8 @@ type SearchCandidate = {
 };
 
 /** Asks OpenAI to pick the best candidate from a Spotify search result list.
- *  Returns the 0-based index of the best match. Falls back to 0 on any error. */
+ *  Returns the 0-based index of the best match.
+ *  Throws on OpenAI/config/response errors to avoid silent bad matches. */
 export async function selectBestSpotifyResult(input: {
   env: Env;
   userText: string;
@@ -284,7 +285,9 @@ export async function selectBestSpotifyResult(input: {
   if (candidates.length === 1) return 0;
 
   const apiKey = env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return 0;
+  if (!apiKey) {
+    throw new Error('openai_api_key_missing');
+  }
 
   const list = candidates
     .map((c, i) => {
@@ -319,7 +322,9 @@ export async function selectBestSpotifyResult(input: {
     });
 
     const raw = await response.text();
-    if (!response.ok) return 0;
+    if (!response.ok) {
+      throw new Error(`openai_selection_failed:${response.status}:${raw.slice(0, 500)}`);
+    }
 
     const parsed = raw ? (JSON.parse(raw) as unknown) : {};
     const choices = Array.isArray((parsed as { choices?: unknown[] }).choices)
@@ -328,12 +333,17 @@ export async function selectBestSpotifyResult(input: {
     const content = choices[0]?.message?.content ?? '';
     const data = parseJsonObject(content);
 
-    if (!data || typeof data !== 'object') return 0;
+    if (!data || typeof data !== 'object') {
+      throw new Error('openai_selection_invalid_response');
+    }
     const idx = (data as { index?: unknown }).index;
-    if (typeof idx !== 'number' || !Number.isFinite(idx)) return 0;
+    if (typeof idx !== 'number' || !Number.isFinite(idx)) {
+      throw new Error('openai_selection_invalid_index');
+    }
     return Math.min(Math.max(0, Math.round(idx)), candidates.length - 1);
-  } catch {
-    return 0;
+  } catch (err: unknown) {
+    if (err instanceof Error) throw err;
+    throw new Error('openai_selection_failed_unknown');
   } finally {
     clearTimeout(timeout);
   }
