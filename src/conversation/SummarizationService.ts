@@ -8,6 +8,7 @@ export type SummarizationServiceOptions = {
   minDeltaM: number;
   triggerEveryInteractions: number;
   openAiApiKey?: string;
+  openAiBaseUrl: string;
   openAiModelSummary: string;
   openAiTimeoutMs: number;
 };
@@ -91,7 +92,7 @@ export class SummarizationService {
     const timeout = setTimeout(() => controller.abort(), this.options.openAiTimeoutMs);
 
     try {
-      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      const resp = await fetch(`${this.options.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${this.options.openAiApiKey}`,

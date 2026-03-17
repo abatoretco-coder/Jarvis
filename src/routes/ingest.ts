@@ -106,7 +106,7 @@ async function transcribeWithOpenAi(params: {
   form.set('file', new Blob([params.body], { type: params.incomingContentType }), `audio.${fileExt}`);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_STT_TIMEOUT_MS);
   const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/transcriptions`, {
     method: 'POST',
     headers: {
@@ -151,7 +151,7 @@ async function synthesizeWithOpenAi(params: {
   const format = params.env.OPENAI_TTS_FORMAT;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TTS_TIMEOUT_MS);
   const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
     method: 'POST',
     headers: {
@@ -211,6 +211,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     minDeltaM: deps.env.LIMIT_M,
     triggerEveryInteractions: 10,
     openAiApiKey: deps.env.OPENAI_API_KEY,
+    openAiBaseUrl: deps.env.OPENAI_BASE_URL,
     openAiModelSummary: deps.env.OPENAI_MODEL_SUMMARY,
     openAiTimeoutMs: deps.env.OPENAI_TIMEOUT_MS,
   });
@@ -381,6 +382,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // Both run in parallel — music planner (1 OpenAI call) + HA conversation simultaneously.
     // If planner routes to Spotify the HA result is discarded. If route=none, HA result is used directly.
+    // haAbort: abort HA fetch early once planner confirms route=spotify (no need to wait for HA to finish).
+    const haAbort = new AbortController();
     const [musicPlanResult, haResponseResult] = await Promise.allSettled([
       planSpotifyActionFromTextWithOpenAi({
         env: deps.env,
@@ -388,8 +391,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         text,
         correlationId: correlationId || undefined,
         userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+      }).then((plan) => {
+        if (plan.route === 'spotify') haAbort.abort('music_route_confirmed');
+        return plan;
       }),
-      conversationService.callHomeAssistantConversation(text, threadId),
+      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal),
     ]);
 
     // If the music planner decided this is Spotify, execute and return immediately.
@@ -413,11 +419,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             log: app.log,
           });
 
-          await conversationService.persistMessages(threadId, text, spotifyResponse.tts);
-
-          if (await summarizationService.shouldPresummarize(threadId)) {
-            summarizationService.startPresummarize(threadId);
-          }
+          void conversationService.persistMessages(threadId, text, spotifyResponse.tts).then(async () => {
+            if (await summarizationService.shouldPresummarize(threadId)) {
+              summarizationService.startPresummarize(threadId);
+            }
+          });
 
           app.log.info(
             {
@@ -482,11 +488,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       assistantText = toDeterministicHaFailureMessage();
     }
 
-    await conversationService.persistMessages(threadId, text, assistantText);
-
-    if (await summarizationService.shouldPresummarize(threadId)) {
-      summarizationService.startPresummarize(threadId);
-    }
+    void conversationService.persistMessages(threadId, text, assistantText).then(async () => {
+      if (await summarizationService.shouldPresummarize(threadId)) {
+        summarizationService.startPresummarize(threadId);
+      }
+    });
 
     const payload = {
       threadId,

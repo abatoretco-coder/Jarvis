@@ -183,7 +183,7 @@ export class SpotifyWebApiClient {
   private readonly refreshSkewMs = 120_000;
   private cachedDeviceList?: { result: Awaited<ReturnType<SpotifyWebApiClient['listDevices']>>; fetchedAtMs: number };
   private cachedNowPlaying?: { result: Awaited<ReturnType<SpotifyWebApiClient['getNowPlaying']>>; fetchedAtMs: number };
-  private readonly shortCacheTtlMs = 35_000;
+  private readonly shortCacheTtlMs = 65_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
 
   constructor(env: Env) {

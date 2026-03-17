@@ -47,7 +47,7 @@ const envSchema = z
   HA_LONG_LIVED_TOKEN: optionalNonEmptyString,
   HA_TIMEOUT_MS: numberFromEnv.default('5000'),
   HA_CONVERSATION_MIN_INTERVAL_MS: numberFromEnv.default('300'),
-  HA_CONVERSATION_RETRY_COUNT: numberFromEnv.default('1'),
+  HA_CONVERSATION_RETRY_COUNT: numberFromEnv.default('0'),
   HA_CONVERSATION_RETRY_DELAY_MS: numberFromEnv.default('1200'),
   HA_TTS_ENTITY_ID: optionalNonEmptyString,
   HA_TTS_FALLBACK_ENTITY_IDS: optionalNonEmptyString,
@@ -57,6 +57,8 @@ const envSchema = z
   OPENAI_MODEL_SUMMARY: z.string().default('gpt-4o-mini'),
   OPENAI_MODEL_MUSIC_AGENT: z.string().default('gpt-4o-mini'),
   OPENAI_TIMEOUT_MS: numberFromEnv.default('12000'),
+  OPENAI_STT_TIMEOUT_MS: numberFromEnv.default('10000'),
+  OPENAI_TTS_TIMEOUT_MS: numberFromEnv.default('7000'),
   OPENAI_STT_MODEL: z.string().default('whisper-1'),
   OPENAI_STT_LANGUAGE: optionalNonEmptyString,
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
@@ -88,8 +90,8 @@ const envSchema = z
   SPOTIFY_WEBAPI_DEVICE_ALIAS_COMPUTER_NAME: optionalNonEmptyString,
   SPOTIFY_WEBAPI_DEVICE_ALIAS_SALON_NAME: optionalNonEmptyString,
   // Optional: retries/backoff when device id/name is missing from Spotify devices list
-  SPOTIFY_WEBAPI_DEVICE_DISCOVERY_RETRIES: numberFromEnv.default('3'),
-  SPOTIFY_WEBAPI_DEVICE_DISCOVERY_DELAY_MS: numberFromEnv.default('1200'),
+  SPOTIFY_WEBAPI_DEVICE_DISCOVERY_RETRIES: numberFromEnv.default('2'),
+  SPOTIFY_WEBAPI_DEVICE_DISCOVERY_DELAY_MS: numberFromEnv.default('500'),
   // Optional: when true, playlist requests only match current user's playlists (no public catalog fallback)
   SPOTIFY_WEBAPI_USER_PLAYLISTS_ONLY: booleanFromEnv.default('true'),
   SPOTIFY_WEBAPI_BASE_URL: z.string().url().default('https://api.spotify.com'),

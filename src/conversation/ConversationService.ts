@@ -109,15 +109,19 @@ export class ConversationService {
     return respStatus === 429 || respStatus === 500 || respStatus === 502 || respStatus === 503 || respStatus === 504;
   }
 
-  async callHomeAssistantConversation(userText: string, threadId: string): Promise<string> {
+  async callHomeAssistantConversation(userText: string, threadId: string, externalSignal?: AbortSignal): Promise<string> {
     const textForAgent = buildAiGuidedInput(userText);
     const maxAttempts = Math.max(1, this.options.retryCount + 1);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (externalSignal?.aborted) throw new Error('ha_conversation_aborted');
+
       await this.waitForHaSlot();
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs);
+      const onExternalAbort = () => controller.abort();
+      externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
       try {
         const resp = await fetch(`${this.options.haBaseUrl.replace(/\/$/, '')}/api/conversation/process`, {
@@ -157,6 +161,7 @@ export class ConversationService {
         await sleep(this.options.retryDelayMs * attempt);
       } finally {
         clearTimeout(timeout);
+        externalSignal?.removeEventListener('abort', onExternalAbort);
       }
     }
 
