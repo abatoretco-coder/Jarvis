@@ -7,7 +7,7 @@ describe('deterministic intents', () => {
     const result = resolveDeterministicIntentReply('Fais un compliment a Robin');
 
     expect(result).toBeDefined();
-    expect(result?.intent).toBe('taunt_named_target');
+    expect(result?.intent).toBe('ironic_named_target');
     expect(result?.responseText).toContain('Robin');
     expect(result?.responseText).toContain('pas');
     expect(result?.responseText.endsWith('.')).toBe(true);
@@ -29,16 +29,34 @@ describe('deterministic intents', () => {
     const result = resolveDeterministicIntentReply('Est-ce que tu peux me faire un petit compliment pour Robin ?');
 
     expect(result).toBeDefined();
-    expect(result?.intent).toBe('taunt_named_target');
+    expect(result?.intent).toBe('ironic_named_target');
     expect(result?.responseText).toContain('Robin');
     expect(result?.responseText).not.toContain('Pour n est pas');
+  });
+
+  test('matches insult keyword with savage style', () => {
+    const result = resolveDeterministicIntentReply('Insulte Robin');
+
+    expect(result).toBeDefined();
+    expect(result?.intent).toBe('savage_named_target');
+    expect(result?.responseText).toContain('Robin');
+    expect(result?.responseText.endsWith('.')).toBe(true);
+  });
+
+  test('keeps Robin as target in "insulte-moi Robin ... pour voir" phrasing', () => {
+    const result = resolveDeterministicIntentReply('Insulte-moi Robin pour voir ce que ca donne');
+
+    expect(result).toBeDefined();
+    expect(result?.intent).toBe('savage_named_target');
+    expect(result?.responseText).toContain('Robin');
+    expect(result?.responseText).not.toContain('Voir');
   });
 
   test('asks for target when no target is present', () => {
     const result = resolveDeterministicIntentReply('Fais un compliment');
 
     expect(result).toBeDefined();
-    expect(result?.intent).toBe('taunt_missing_target');
+    expect(result?.intent).toBe('ironic_missing_target');
     expect(result?.responseText).toContain('il me faut un prenom');
   });
 

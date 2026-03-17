@@ -26,7 +26,7 @@ const COMPLIMENT_TRIGGER_RE = /\b(compliment(?:e|er)?|complimente|roast(?:e|er)?
 const INSULT_TRIGGER_RE = /\b(insulte(?:r)?|insult(?:e|er)?|savage|detruis|atomise|massacre)\b/i;
 const TARGET_CAPTURE_RE = /\b(?:a|a\s+la|a\s+l'|pour|sur)\s+([a-z][a-z\-']{1,30})\b/i;
 const DIRECT_CAPTURE_RE = /\b(?:compliment(?:e|er)?|complimente|roast(?:e|er)?|vanne(?:r)?|taquine(?:r)?)\s+([a-z][a-z\-']{1,30})\b/i;
-const DIRECT_INSULT_CAPTURE_RE = /\b(?:insulte(?:r)?|insult(?:e|er)?|detruis|atomise|massacre)\s+([a-z][a-z\-']{1,30})\b/i;
+const DIRECT_INSULT_CAPTURE_RE = /\b(?:insulte(?:r)?|insult(?:e|er)?|detruis|atomise|massacre)(?:[-\s]*(?:moi|le|la|lui))?\s+([a-z][a-z\-']{1,30})\b/i;
 const TARGET_STOPWORDS = new Set(['pour', 'sur', 'a', 'au', 'aux', 'la', 'le', 'les', 'un', 'une', 'du', 'de', 'des', 'l']);
 
 const IRONIC_TAUNTS = [
@@ -82,7 +82,7 @@ const SAVAGE_STARTERS = [
   '{target}, c est {ending}.',
   'Version courte: {target}, c est {ending}.',
   'A ce stade, {target}, c est juste {ending}.',
-  '{target} joue en categorie {ending}.',
+  '{target} joue en ligue {ending}.',
   'Soyons francs, {target}, c est {ending}.',
 ];
 
@@ -111,6 +111,8 @@ function pickRandom<T>(items: T[]): T {
 }
 
 function extractTarget(normalizedText: string, directRegex: RegExp): string | undefined {
+  if (/\brobin\b/i.test(normalizedText)) return 'robin';
+
   const direct = normalizedText.match(directRegex)?.[1];
   if (direct && !TARGET_STOPWORDS.has(direct)) return direct;
 
@@ -124,7 +126,6 @@ function extractTarget(normalizedText: string, directRegex: RegExp): string | un
   const captured = normalizedText.match(TARGET_CAPTURE_RE)?.[1]?.toLowerCase();
   if (captured && !TARGET_STOPWORDS.has(captured)) return captured;
 
-  if (/\brobin\b/i.test(normalizedText)) return 'robin';
   return undefined;
 }
 
