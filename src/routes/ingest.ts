@@ -240,6 +240,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const threadId = parsed.data.threadId.trim();
     const text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const requestId = randomUUID();
+    const t0 = Date.now();
     const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
 
     const toDeterministicHaFailureMessage = (): string => (
@@ -309,6 +310,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           correlation_id: correlationId || undefined,
           intent: deterministicReply.intent,
           target: deterministicReply.target,
+          elapsed_ms: Date.now() - t0,
         },
         'ingest_deterministic_reply_done'
       );
@@ -450,6 +452,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(500).send({ error: 'response_validation_failed' });
     }
 
+    app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_complete');
     return reply.code(200).send(payload);
   });
 
@@ -471,6 +474,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const speechContent = incomingSpeechContent || 'format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1; language=fr';
 
     const requestedEngineId = params.data.engineId.trim();
+    const t0 = Date.now();
 
     try {
       const openAiResult = await transcribeWithOpenAi({
@@ -479,6 +483,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         incomingContentType,
       });
 
+      app.log.info({ engineId: `openai:${openAiResult.model}`, elapsed_ms: Date.now() - t0 }, 'stt_complete');
       return reply.code(200).send({
         text: openAiResult.text,
         result: openAiResult.text,
@@ -571,6 +576,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
+    app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0 }, 'stt_complete');
     return reply.code(200).send({ text, result: text, engineId: selectedEngineId });
   });
 
@@ -621,6 +627,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const text = toSingleParagraphPlainText(parsed.data.text);
+    const t0 = Date.now();
     const configuredEntity = deps.env.HA_TTS_ENTITY_ID?.trim();
     const primaryEngineId = configuredEntity && configuredEntity.length > 0
       ? configuredEntity
@@ -766,6 +773,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const contentType = upstream.headers.get('content-type') ?? 'audio/mpeg';
         const bytes = Buffer.from(await upstream.arrayBuffer());
 
+        app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0 }, 'tts_complete');
         return reply
           .code(200)
           .header('content-type', contentType)
@@ -775,6 +783,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       try {
         const openAiSpeech = await synthesizeWithOpenAi({ env: deps.env, text });
+        app.log.info({ engineId: openAiSpeech.provider, elapsed_ms: Date.now() - t0 }, 'tts_complete');
         return reply
           .code(200)
           .header('content-type', openAiSpeech.contentType)

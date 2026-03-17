@@ -45,7 +45,7 @@ const envSchema = z
   HA_BASE_URL: z.string().url().optional(),
   HA_TOKEN: optionalNonEmptyString,
   HA_LONG_LIVED_TOKEN: optionalNonEmptyString,
-  HA_TIMEOUT_MS: numberFromEnv.default('10000'),
+  HA_TIMEOUT_MS: numberFromEnv.default('5000'),
   HA_CONVERSATION_MIN_INTERVAL_MS: numberFromEnv.default('300'),
   HA_CONVERSATION_RETRY_COUNT: numberFromEnv.default('1'),
   HA_CONVERSATION_RETRY_DELAY_MS: numberFromEnv.default('1200'),
@@ -54,7 +54,7 @@ const envSchema = z
 
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
-  OPENAI_MODEL_SUMMARY: z.string().default('gpt-4'),
+  OPENAI_MODEL_SUMMARY: z.string().default('gpt-4o-mini'),
   OPENAI_MODEL_MUSIC_AGENT: z.string().default('gpt-4o-mini'),
   OPENAI_TIMEOUT_MS: numberFromEnv.default('12000'),
   OPENAI_STT_MODEL: z.string().default('whisper-1'),
