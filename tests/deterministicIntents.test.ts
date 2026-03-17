@@ -25,6 +25,15 @@ describe('deterministic intents', () => {
     expect(outputs.size).toBeGreaterThan(1);
   });
 
+  test('extracts target correctly for "pour Robin" phrasing', () => {
+    const result = resolveDeterministicIntentReply('Est-ce que tu peux me faire un petit compliment pour Robin ?');
+
+    expect(result).toBeDefined();
+    expect(result?.intent).toBe('taunt_named_target');
+    expect(result?.responseText).toContain('Robin');
+    expect(result?.responseText).not.toContain('Pour n est pas');
+  });
+
   test('asks for target when no target is present', () => {
     const result = resolveDeterministicIntentReply('Fais un compliment');
 
