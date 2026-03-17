@@ -757,6 +757,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             message: errorBody.slice(0, 300),
           });
           recordTtsFailure(engineId);
+          app.log.warn(
+            { engineId, stage: 'tts_get_url', status: ttsUrlResponse.status, body: errorBody.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
+            'tts_ha_engine_failed'
+          );
 
           const hasNext = index < candidateEngineIds.length - 1;
           const shouldTryNext =
@@ -821,7 +825,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             message: errorText.slice(0, 300),
           });
           recordTtsFailure(engineId);
-
+          app.log.warn(
+            { engineId, stage: 'audio_proxy', status: upstream.status, body: errorText.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
+            'tts_ha_engine_failed'
+          );
           const hasNext = index < candidateEngineIds.length - 1;
           const shouldTryNext =
             hasNext
@@ -849,6 +856,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           .send(bytes);
       }
 
+      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_all_failed_openai_fallback');
       try {
         const openAiSpeech = await synthesizeWithOpenAi({ env: deps.env, text });
         recordPerf('tts', Date.now() - t0);

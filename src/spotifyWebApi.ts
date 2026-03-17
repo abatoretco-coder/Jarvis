@@ -291,7 +291,11 @@ export class SpotifyWebApiClient {
     const blackout = this.getRefreshBlackoutWindow(nowMs);
     if (blackout.inWindow) return false;
 
-    const tokenExpiresDuringNextWindow = expiresAtMs <= blackout.nextEndMs + this.refreshSkewMs;
+    // Only pre-refresh when the token would expire DURING the blackout window (not just before it ends).
+    // Original bug: `<= nextEndMs + skew` captured tokens expiring hours before the window start.
+    const tokenExpiresDuringNextWindow =
+      expiresAtMs >= blackout.nextStartMs - this.refreshSkewMs &&
+      expiresAtMs <= blackout.nextEndMs + this.refreshSkewMs;
     if (tokenExpiresDuringNextWindow) return true;
 
     const msUntilNextWindow = Math.max(0, blackout.nextStartMs - nowMs);
