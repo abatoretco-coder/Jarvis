@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { ConversationService } from '../conversation/ConversationService';
+import { resolveDeterministicIntentReply } from '../conversation/deterministicIntents';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import {
   createConversationDb,
@@ -282,6 +283,37 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (!text) {
       return reply.code(400).send({ error: 'invalid_body', message: 'text is required when domain/action is not provided' });
+    }
+
+    const deterministicReply = resolveDeterministicIntentReply(text);
+    if (deterministicReply) {
+      await conversationService.persistMessages(threadId, text, deterministicReply.responseText);
+
+      if (await summarizationService.shouldPresummarize(threadId)) {
+        summarizationService.startPresummarize(threadId);
+      }
+
+      app.log.info(
+        {
+          threadId,
+          requestId,
+          correlation_id: correlationId || undefined,
+          intent: deterministicReply.intent,
+          target: deterministicReply.target,
+        },
+        'ingest_deterministic_reply_done'
+      );
+
+      return reply.code(200).send({
+        threadId,
+        responseText: deterministicReply.responseText,
+        status: 'success',
+        deterministic: {
+          intent: deterministicReply.intent,
+          ...(deterministicReply.target ? { target: deterministicReply.target } : {}),
+        },
+        ...(correlationId ? { correlation_id: correlationId } : {}),
+      });
     }
 
     const committed = await summarizationService.commitCandidateIfReady(threadId);
