@@ -64,6 +64,8 @@ const envSchema = z
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   OPENAI_TTS_VOICE: z.string().default('alloy'),
   OPENAI_TTS_FORMAT: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).default('mp3'),
+  // Optional: pass speaking style instructions to gpt-4o-mini-tts (e.g. deep voice, pacing)
+  OPENAI_TTS_INSTRUCTIONS: optionalNonEmptyString,
   // Audio post-processing (applied to all TTS output via ffmpeg)
   TTS_SPEED: z.coerce.number().min(0.25).max(4.0).default(1.0),           // atempo 0.5–2.0 (1.0=normal, 1.1=10% faster)
   TTS_PITCH_SEMITONES: z.coerce.number().min(-12).max(12).default(0),     // pitch shift in semitones (0=unchanged)

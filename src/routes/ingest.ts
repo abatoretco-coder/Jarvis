@@ -873,8 +873,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const response = await fetch(`${deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
         method: 'POST',
         headers: { authorization: `Bearer ${openAiApiKey}`, 'content-type': 'application/json' },
-        // Speed is passed natively to OpenAI API (0.25–4.0); ffmpeg handles pitch+clarity only
-        body: JSON.stringify({ model, voice, input: text, response_format: format, speed: deps.env.TTS_SPEED }),
+        // Speed is passed natively to OpenAI API (0.25–4.0); voice character via instructions if set
+        body: JSON.stringify({
+          model, voice, input: text, response_format: format, speed: deps.env.TTS_SPEED,
+          ...(deps.env.OPENAI_TTS_INSTRUCTIONS ? { instructions: deps.env.OPENAI_TTS_INSTRUCTIONS } : {}),
+        }),
         signal: controller.signal,
       }).finally(() => {
         clearTimeout(timeoutId);
@@ -885,8 +888,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         throw new Error(`openai_tts_failed:${response.status}:${errBody.slice(0, 300)}`);
       }
       const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-      // skipSpeed=true: OpenAI already applied speed natively above
-      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: deps.env.TTS_PITCH_SEMITONES, clarity: deps.env.TTS_CLARITY }, true);
+      // skipSpeed=true: OpenAI handles speed natively above.
+      // pitchSemitones always 0 for OpenAI: pitch/voice character is controlled via instructions, not ffmpeg.
+      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: deps.env.TTS_CLARITY }, true);
       const openAiBody = response.body;
       const bytes = openAiFilters.length > 0 && openAiBody
         ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
