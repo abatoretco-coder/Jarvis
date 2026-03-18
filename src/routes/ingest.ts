@@ -63,9 +63,11 @@ function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string
   const filters: string[] = [];
   if (opts.pitchSemitones !== 0) {
     const ratio = Math.pow(2, opts.pitchSemitones / 12);
-    // asetrate shifts pitch+speed; aresample normalises sample rate; atempo corrects speed back
+    // asetrate expects a plain integer — precompute to avoid expression-parse failure
+    const shiftedRate = Math.round(44100 * ratio);
+    // asetrate shifts pitch+tempo; aresample restores sample rate; atempo corrects speed back
     filters.push(
-      `asetrate=44100*${ratio.toFixed(6)}`,
+      `asetrate=${shiftedRate}`,
       'aresample=44100',
       `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`,
     );
