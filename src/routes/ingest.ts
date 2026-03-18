@@ -739,10 +739,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           break;
         }
 
-        // Step 2 – fetch audio bytes (one retry after 800ms on 500: HA generates audio async)
+        // Step 2 – fetch audio bytes (up to 3 attempts on 500: HA generates audio async via ElevenLabs)
+        // Delays: 0ms → 1000ms → 2500ms (cumulative max ~3.5s extra wait)
+        const proxyDelays = [0, 1000, 2500];
         let upstream: Response;
-        for (let proxyAttempt = 0; proxyAttempt <= 1; proxyAttempt += 1) {
-          if (proxyAttempt > 0) await new Promise<void>((r) => setTimeout(r, 800));
+        for (let proxyAttempt = 0; proxyAttempt < proxyDelays.length; proxyAttempt += 1) {
+          if (proxyDelays[proxyAttempt]! > 0) await new Promise<void>((r) => setTimeout(r, proxyDelays[proxyAttempt]));
           if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
           const proxyCtrl = new AbortController();
           const proxyTimeout = setTimeout(() => proxyCtrl.abort(), deps.env.HA_TIMEOUT_MS);
@@ -758,9 +760,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             clearTimeout(proxyTimeout);
             haAbort.signal.removeEventListener('abort', onHaAbortProxy);
           }
-          // Retry only on 500 and only once
-          if (upstream.ok || upstream.status !== 500 || proxyAttempt === 1) break;
-          app.log.warn({ engineId, stage: 'audio_proxy', status: 500, proxyAttempt, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_proxy_500_retrying');
+          if (upstream.ok || upstream.status !== 500) break;
+          if (proxyAttempt < proxyDelays.length - 1) {
+            app.log.warn({ engineId, stage: 'audio_proxy', status: 500, proxyAttempt, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_proxy_500_retrying');
+          }
         }
 
         if (!upstream!.ok) {
