@@ -739,42 +739,48 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           break;
         }
 
-        // Step 2 – fetch audio bytes
-        if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
-        const proxyCtrl = new AbortController();
-        const proxyTimeout = setTimeout(() => proxyCtrl.abort(), deps.env.HA_TIMEOUT_MS);
-        const onHaAbortProxy = () => proxyCtrl.abort();
-        haAbort.signal.addEventListener('abort', onHaAbortProxy, { once: true });
+        // Step 2 – fetch audio bytes (one retry after 800ms on 500: HA generates audio async)
         let upstream: Response;
-        try {
-          upstream = await fetch(proxyUrl, {
-            method: 'GET',
-            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` },
-            signal: proxyCtrl.signal,
-          });
-        } finally {
-          clearTimeout(proxyTimeout);
-          haAbort.signal.removeEventListener('abort', onHaAbortProxy);
+        for (let proxyAttempt = 0; proxyAttempt <= 1; proxyAttempt += 1) {
+          if (proxyAttempt > 0) await new Promise<void>((r) => setTimeout(r, 800));
+          if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
+          const proxyCtrl = new AbortController();
+          const proxyTimeout = setTimeout(() => proxyCtrl.abort(), deps.env.HA_TIMEOUT_MS);
+          const onHaAbortProxy = () => proxyCtrl.abort();
+          haAbort.signal.addEventListener('abort', onHaAbortProxy, { once: true });
+          try {
+            upstream = await fetch(proxyUrl, {
+              method: 'GET',
+              headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` },
+              signal: proxyCtrl.signal,
+            });
+          } finally {
+            clearTimeout(proxyTimeout);
+            haAbort.signal.removeEventListener('abort', onHaAbortProxy);
+          }
+          // Retry only on 500 and only once
+          if (upstream.ok || upstream.status !== 500 || proxyAttempt === 1) break;
+          app.log.warn({ engineId, stage: 'audio_proxy', status: 500, proxyAttempt, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_proxy_500_retrying');
         }
 
-        if (!upstream.ok) {
-          const errorText = await upstream.text();
-          attempts.push({ engineId, stage: 'audio_proxy', status: upstream.status, message: errorText.slice(0, 300) });
+        if (!upstream!.ok) {
+          const errorText = await upstream!.text();
+          attempts.push({ engineId, stage: 'audio_proxy', status: upstream!.status, message: errorText.slice(0, 300) });
           recordTtsFailure(engineId);
           app.log.warn(
-            { engineId, stage: 'audio_proxy', status: upstream.status, body: errorText.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
+            { engineId, stage: 'audio_proxy', status: upstream!.status, body: errorText.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
             'tts_ha_engine_failed'
           );
           const hasNext = index < candidateEngineIds.length - 1;
           const shouldTryNext = hasNext && (isElevenLabsEngine(engineId)
-            ? shouldFallbackFromElevenLabs(upstream.status, errorText)
-            : upstream.status === 404 || upstream.status === 429 || upstream.status >= 500);
+            ? shouldFallbackFromElevenLabs(upstream!.status, errorText)
+            : upstream!.status === 404 || upstream!.status === 429 || upstream!.status >= 500);
           if (!shouldTryNext) break;
           continue;
         }
 
-        const contentType = upstream.headers.get('content-type') ?? 'audio/mpeg';
-        const bytes = Buffer.from(await upstream.arrayBuffer());
+        const contentType = upstream!.headers.get('content-type') ?? 'audio/mpeg';
+        const bytes = Buffer.from(await upstream!.arrayBuffer());
         recordTtsSuccess(engineId);
         return { bytes, contentType, engineId, via: `ha:${engineId}` };
       }
