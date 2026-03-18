@@ -21,7 +21,7 @@
         "volume X% => volume_set{volume_percent:X}; monte|baisse => volume_set{volume_delta:±20}; de N => volume_set{volume_delta:±N}.",
         "artiste|album|titre|groupe => search_and_play.",
         "demande playlist, nommée ou non => search_and_play{type:\"playlist\",query:<commande>}.",
-        "reprends|joue sans contenu ni device => play.",
+        "reprends|joue|lance sans contenu => play.",
         "transfère sur [device] sans contenu => transfer.",
         "joue [contenu] sur [device] => search_and_play + device.",
         "cherche sans jouer => search.",

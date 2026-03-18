@@ -137,56 +137,7 @@ async function transcribeWithOpenAi(params: {
   return { text, model };
 }
 
-async function synthesizeWithOpenAi(params: {
-  env: AppDeps['env'];
-  text: string;
-  externalSignal?: AbortSignal;
-}): Promise<{ bytes: Buffer; contentType: string; provider: string }> {
-  const openAiApiKey = params.env.OPENAI_API_KEY?.trim();
-  if (!openAiApiKey) {
-    throw new Error('openai_api_key_missing');
-  }
 
-  const model = params.env.OPENAI_TTS_MODEL.trim();
-  const voice = params.env.OPENAI_TTS_VOICE.trim();
-  const format = params.env.OPENAI_TTS_FORMAT;
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TTS_TIMEOUT_MS);
-  const onExternal = () => controller.abort();
-  params.externalSignal?.addEventListener('abort', onExternal, { once: true });
-
-  const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${openAiApiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      voice,
-      input: params.text,
-      format,
-    }),
-    signal: controller.signal,
-  }).finally(() => {
-    clearTimeout(timeoutId);
-    params.externalSignal?.removeEventListener('abort', onExternal);
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`openai_tts_failed:${response.status}:${errorBody.slice(0, 500)}`);
-  }
-
-  const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-  const bytes = Buffer.from(await response.arrayBuffer());
-  return {
-    bytes,
-    contentType,
-    provider: `openai:${model}`,
-  };
-}
 
 function toEntityStates(input: unknown): EntityStateLike[] {
   if (!Array.isArray(input)) return [];
@@ -731,9 +682,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const attempts: Array<{ engineId: string; stage: 'tts_get_url' | 'audio_proxy'; status: number; message?: string }> = [];
 
     const haAbort = new AbortController();
-    const openAiAbort = new AbortController();
 
-    // ── HA TTS coroutine ──────────────────────────────────────────────────────
+    // ── HA TTS coroutine (ElevenLabs only — OpenAI TTS removed for voice consistency) ──
     const doHaTts = async (): Promise<TtsWin> => {
       for (let index = 0; index < candidateEngineIds.length; index += 1) {
         if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
@@ -831,23 +781,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       throw new Error('ha_tts_all_failed');
     };
 
-    // ── OpenAI TTS coroutine ──────────────────────────────────────────────────
-    const doOpenAiTts = async (): Promise<TtsWin> => {
-      const r = await synthesizeWithOpenAi({ env: deps.env, text, externalSignal: openAiAbort.signal });
-      return { bytes: r.bytes, contentType: r.contentType, engineId: r.provider, via: r.provider };
-    };
-
-    // ── Race: first success wins, abort the loser ─────────────────────────────
+    // ── ElevenLabs only ───────────────────────────────────────────────────────
     let winner: TtsWin;
     try {
-      const haPromise = doHaTts().then((v) => { openAiAbort.abort('race_winner_ha'); return v; });
-      const openAiPromise = doOpenAiTts().then((v) => { haAbort.abort('race_winner_openai'); return v; });
-      winner = await new Promise<TtsWin>((resolve, reject) => {
-        let remaining = 2;
-        const onFail = () => { remaining -= 1; if (remaining === 0) reject(new Error('tts_all_failed')); };
-        haPromise.then(resolve, onFail);
-        openAiPromise.then(resolve, onFail);
-      });
+      winner = await doHaTts();
     } catch {
       app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
       return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
