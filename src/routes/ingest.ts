@@ -889,8 +889,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
       const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
       // skipSpeed=true: OpenAI handles speed natively above.
-      // pitchSemitones always 0 for OpenAI: pitch/voice character is controlled via instructions, not ffmpeg.
-      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: deps.env.TTS_CLARITY }, true);
+      // Small pitch shift via ffmpeg is safe (≤ ±3 semitones) and adds a subtle nudge on top of native instructions.
+      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: deps.env.TTS_PITCH_SEMITONES, clarity: deps.env.TTS_CLARITY }, true);
       const openAiBody = response.body;
       const bytes = openAiFilters.length > 0 && openAiBody
         ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
