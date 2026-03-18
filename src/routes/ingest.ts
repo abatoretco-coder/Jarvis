@@ -790,13 +790,42 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       throw new Error('ha_tts_all_failed');
     };
 
-    // ── ElevenLabs only ───────────────────────────────────────────────────────
+    // ── ElevenLabs first, OpenAI as silent sequential fallback ───────────────
+    // OpenAI is only used when ElevenLabs fails entirely (quota exceeded, 500s).
+    // No parallel race — sequential only to avoid paying OpenAI when ElevenLabs works.
     let winner: TtsWin;
     try {
       winner = await doHaTts();
     } catch {
-      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
-      return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
+      const openAiApiKey = deps.env.OPENAI_API_KEY?.trim();
+      if (!openAiApiKey) {
+        app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
+        return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
+      }
+      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_all_failed_openai_fallback');
+      try {
+        const model = deps.env.OPENAI_TTS_MODEL.trim();
+        const voice = deps.env.OPENAI_TTS_VOICE.trim();
+        const format = deps.env.OPENAI_TTS_FORMAT;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), deps.env.OPENAI_TTS_TIMEOUT_MS);
+        const response = await fetch(`${deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${openAiApiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ model, voice, input: text, response_format: format }),
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeoutId));
+        if (!response.ok) {
+          const errBody = await response.text();
+          throw new Error(`openai_tts_failed:${response.status}:${errBody.slice(0, 300)}`);
+        }
+        const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
+        const bytes = Buffer.from(await response.arrayBuffer());
+        winner = { bytes, contentType, engineId: `openai:${model}`, via: `openai:${model}` };
+      } catch (openAiErr) {
+        app.log.warn({ attempts, err: openAiErr, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
+        return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
+      }
     }
 
     recordPerf('tts', Date.now() - t0);
