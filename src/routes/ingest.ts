@@ -58,24 +58,29 @@ type EntityStateLike = {
 
 type AudioTransformOpts = { speed: number; pitchSemitones: number; clarity: boolean };
 
-function applyTtsTransforms(bytes: Buffer, opts: AudioTransformOpts): Promise<Buffer> {
+// Build ffmpeg audio filter chain (speed is optional — OpenAI handles it natively)
+function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string[] {
   const filters: string[] = [];
-
   if (opts.pitchSemitones !== 0) {
     const ratio = Math.pow(2, opts.pitchSemitones / 12);
-    // asetrate shifts pitch + speed; aresample normalises; atempo restores original speed
-    filters.push(`asetrate=44100*${ratio.toFixed(6)}`, 'aresample=44100', `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`);
+    // asetrate shifts pitch+speed; aresample normalises sample rate; atempo corrects speed back
+    filters.push(
+      `asetrate=44100*${ratio.toFixed(6)}`,
+      'aresample=44100',
+      `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`,
+    );
   }
-  if (opts.speed !== 1.0) {
+  if (!skipSpeed && opts.speed !== 1.0) {
     filters.push(`atempo=${Math.max(0.5, Math.min(2.0, opts.speed)).toFixed(6)}`);
   }
   if (opts.clarity) {
-    // Cut low-frequency rumble; boost presence at 3 kHz for intelligibility
     filters.push('highpass=f=100', 'equalizer=f=3000:width_type=o:width=2:g=2');
   }
+  return filters;
+}
 
-  if (filters.length === 0) return Promise.resolve(bytes);
-
+// Stream HTTP response body directly through ffmpeg (transform runs while bytes arrive — no buffer-then-transform)
+function pipeStreamThroughFfmpeg(body: ReadableStream<Uint8Array>, filters: string[]): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const proc = spawn('ffmpeg', [
       '-f', 'mp3', '-i', 'pipe:0',
@@ -89,10 +94,19 @@ function applyTtsTransforms(bytes: Buffer, opts: AudioTransformOpts): Promise<Bu
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
     proc.on('close', (code) => {
       if (code === 0) resolve(Buffer.concat(chunks));
-      else reject(new Error(`ffmpeg_transform exit ${code}: ${stderr.slice(0, 200)}`));
+      else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(0, 200)}`));
     });
     proc.on('error', reject);
-    proc.stdin.end(bytes);
+    const reader = body.getReader();
+    const pump = (): void => {
+      reader.read().then(({ done, value }) => {
+        if (done) { proc.stdin.end(); return; }
+        const ok = proc.stdin.write(value);
+        if (ok) pump();
+        else proc.stdin.once('drain', pump);
+      }).catch((err: unknown) => { proc.stdin.destroy(err as Error); reject(err); });
+    };
+    pump();
   });
 }
 
@@ -832,7 +846,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
 
         const contentType = upstream!.headers.get('content-type') ?? 'audio/mpeg';
-        const bytes = Buffer.from(await upstream!.arrayBuffer());
+        const haFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: deps.env.TTS_PITCH_SEMITONES, clarity: deps.env.TTS_CLARITY });
+        const body = upstream!.body;
+        const bytes = haFilters.length > 0 && body
+          ? await pipeStreamThroughFfmpeg(body, haFilters)
+          : Buffer.from(await upstream!.arrayBuffer());
         recordTtsSuccess(engineId);
         return { bytes, contentType, engineId, via: `ha:${engineId}` };
       }
@@ -853,7 +871,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const response = await fetch(`${deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
         method: 'POST',
         headers: { authorization: `Bearer ${openAiApiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, voice, input: text, response_format: format }),
+        // Speed is passed natively to OpenAI API (0.25–4.0); ffmpeg handles pitch+clarity only
+        body: JSON.stringify({ model, voice, input: text, response_format: format, speed: deps.env.TTS_SPEED }),
         signal: controller.signal,
       }).finally(() => {
         clearTimeout(timeoutId);
@@ -864,7 +883,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         throw new Error(`openai_tts_failed:${response.status}:${errBody.slice(0, 300)}`);
       }
       const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-      const bytes = Buffer.from(await response.arrayBuffer());
+      // skipSpeed=true: OpenAI already applied speed natively above
+      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: deps.env.TTS_PITCH_SEMITONES, clarity: deps.env.TTS_CLARITY }, true);
+      const openAiBody = response.body;
+      const bytes = openAiFilters.length > 0 && openAiBody
+        ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
+        : Buffer.from(await response.arrayBuffer());
       return { bytes, contentType, engineId: `openai:${model}`, via: `openai:${model}` };
     };
 
@@ -891,21 +915,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     recordPerf('tts', Date.now() - t0);
     app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-
-    // Apply audio post-processing (speed / pitch / clarity) when any param is non-default
-    if (deps.env.TTS_SPEED !== 1.0 || deps.env.TTS_PITCH_SEMITONES !== 0 || deps.env.TTS_CLARITY) {
-      try {
-        winner.bytes = await applyTtsTransforms(winner.bytes, {
-          speed: deps.env.TTS_SPEED,
-          pitchSemitones: deps.env.TTS_PITCH_SEMITONES,
-          clarity: deps.env.TTS_CLARITY,
-        });
-      } catch (err) {
-        app.log.warn({ err }, 'tts_transform_failed');
-        // Serve untransformed audio rather than failing the request
-      }
-    }
-
     return reply
       .code(200)
       .header('content-type', winner.contentType)
