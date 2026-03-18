@@ -1,0 +1,8 @@
+{
+  "template_lines": [
+    "{{MUSIC_SITUATION}}",
+    "",
+    "Commande: \"{{USER_COMMAND}}\"",
+    "{{REQUEST_METADATA}}"
+  ]
+}

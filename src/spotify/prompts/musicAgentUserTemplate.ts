@@ -1,9 +1,6 @@
-export const MUSIC_AGENT_USER_PROMPT_TEMPLATE = [
-  '{{MUSIC_SITUATION}}',
-  '',
-  'Commande: "{{USER_COMMAND}}"',
-  '{{REQUEST_METADATA}}',
-].join('\n');
+import userTemplateData from './musicAgentUserTemplate.json';
+
+const MUSIC_AGENT_USER_PROMPT_TEMPLATE = (userTemplateData.template_lines as string[]).join('\n');
 
 export function buildMusicAgentUserTemplate(input: {
   userText: string;
