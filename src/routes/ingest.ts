@@ -748,9 +748,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           break;
         }
 
-        // Step 2 – fetch audio bytes (up to 3 attempts on 500: HA generates audio async via ElevenLabs)
-        // Delays: 0ms → 1000ms → 2500ms (cumulative max ~3.5s extra wait)
-        const proxyDelays = [0, 1000, 2500];
+        // Step 2 – fetch audio bytes (single attempt — OpenAI races in parallel so retries are pointless here)
+        const proxyDelays = [0];
         let upstream: Response;
         for (let proxyAttempt = 0; proxyAttempt < proxyDelays.length; proxyAttempt += 1) {
           if (proxyDelays[proxyAttempt]! > 0) await sleepOrAbort(proxyDelays[proxyAttempt]!, haAbort.signal);
