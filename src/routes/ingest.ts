@@ -140,6 +140,7 @@ async function transcribeWithOpenAi(params: {
 async function synthesizeWithOpenAi(params: {
   env: AppDeps['env'];
   text: string;
+  externalSignal?: AbortSignal;
 }): Promise<{ bytes: Buffer; contentType: string; provider: string }> {
   const openAiApiKey = params.env.OPENAI_API_KEY?.trim();
   if (!openAiApiKey) {
@@ -152,6 +153,9 @@ async function synthesizeWithOpenAi(params: {
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_TTS_TIMEOUT_MS);
+  const onExternal = () => controller.abort();
+  params.externalSignal?.addEventListener('abort', onExternal, { once: true });
+
   const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
     method: 'POST',
     headers: {
@@ -165,7 +169,10 @@ async function synthesizeWithOpenAi(params: {
       format,
     }),
     signal: controller.signal,
-  }).finally(() => clearTimeout(timeoutId));
+  }).finally(() => {
+    clearTimeout(timeoutId);
+    params.externalSignal?.removeEventListener('abort', onExternal);
+  });
 
   if (!response.ok) {
     const errorBody = await response.text();
@@ -718,13 +725,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    try {
-      let selectedEngineId = candidateEngineIds[0] ?? primaryEngineId;
-      const attempts: Array<{ engineId: string; stage: 'tts_get_url' | 'audio_proxy'; status: number; message?: string }> = [];
+    // ── Parallel race: ElevenLabs (HA TTS) vs OpenAI TTS ────────────────────
+    // Both are launched simultaneously. First success wins; the loser is aborted.
+    type TtsWin = { bytes: Buffer; contentType: string; engineId: string; via: string };
+    const attempts: Array<{ engineId: string; stage: 'tts_get_url' | 'audio_proxy'; status: number; message?: string }> = [];
 
+    const haAbort = new AbortController();
+    const openAiAbort = new AbortController();
+
+    // ── HA TTS coroutine ──────────────────────────────────────────────────────
+    const doHaTts = async (): Promise<TtsWin> => {
       for (let index = 0; index < candidateEngineIds.length; index += 1) {
+        if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
         const engineId = candidateEngineIds[index]!;
-        selectedEngineId = engineId;
 
         if (isTtsCbOpen(engineId)) {
           app.log.warn({ engineId }, 'tts_circuit_open_skipping');
@@ -732,153 +745,121 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           continue;
         }
 
-        const ttsUrlController = new AbortController();
-        const ttsUrlTimeoutId = setTimeout(() => ttsUrlController.abort(), deps.env.HA_TIMEOUT_MS);
-        const ttsUrlResponse = await fetch(`${haBaseUrl}/api/tts_get_url`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${deps.env.HA_TOKEN}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            engine_id: engineId,
-            message: text,
-            cache: true,
-          }),
-          signal: ttsUrlController.signal,
-        }).finally(() => clearTimeout(ttsUrlTimeoutId));
+        // Step 1 – get URL
+        const urlCtrl = new AbortController();
+        const urlTimeout = setTimeout(() => urlCtrl.abort(), deps.env.HA_TIMEOUT_MS);
+        const onHaAbortUrl = () => urlCtrl.abort();
+        haAbort.signal.addEventListener('abort', onHaAbortUrl, { once: true });
+        let ttsUrlResponse: Response;
+        try {
+          ttsUrlResponse = await fetch(`${haBaseUrl}/api/tts_get_url`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ engine_id: engineId, message: text, cache: true }),
+            signal: urlCtrl.signal,
+          });
+        } finally {
+          clearTimeout(urlTimeout);
+          haAbort.signal.removeEventListener('abort', onHaAbortUrl);
+        }
 
         if (!ttsUrlResponse.ok) {
           const errorBody = await ttsUrlResponse.text();
-          attempts.push({
-            engineId,
-            stage: 'tts_get_url',
-            status: ttsUrlResponse.status,
-            message: errorBody.slice(0, 300),
-          });
+          attempts.push({ engineId, stage: 'tts_get_url', status: ttsUrlResponse.status, message: errorBody.slice(0, 300) });
           recordTtsFailure(engineId);
           app.log.warn(
             { engineId, stage: 'tts_get_url', status: ttsUrlResponse.status, body: errorBody.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
             'tts_ha_engine_failed'
           );
-
           const hasNext = index < candidateEngineIds.length - 1;
-          const shouldTryNext =
-            hasNext
-            && (isElevenLabsEngine(engineId)
-              ? shouldFallbackFromElevenLabs(ttsUrlResponse.status, errorBody)
-              : ttsUrlResponse.status === 404 || ttsUrlResponse.status === 429 || ttsUrlResponse.status >= 500);
-
-          if (!shouldTryNext) {
-            return reply.code(502).send({
-              error: 'ha_tts_get_url_failed',
-              status: ttsUrlResponse.status,
-              engineId,
-              attempts,
-              hint:
-                ttsUrlResponse.status === 500
-                  ? 'Check Home Assistant TTS engine id settings and fallback list. Example HA_TTS_ENTITY_ID=tts.elevenlabs_text_to_speech HA_TTS_FALLBACK_ENTITY_IDS=tts.elevenlabs_text_to_speech'
-                  : undefined,
-            });
-          }
-
+          const shouldTryNext = hasNext && (isElevenLabsEngine(engineId)
+            ? shouldFallbackFromElevenLabs(ttsUrlResponse.status, errorBody)
+            : ttsUrlResponse.status === 404 || ttsUrlResponse.status === 429 || ttsUrlResponse.status >= 500);
+          if (!shouldTryNext) break;
           continue;
         }
 
         const ttsPayload = (await ttsUrlResponse.json()) as { path?: string; url?: string };
         const proxyUrl = typeof ttsPayload.path === 'string' && ttsPayload.path.length > 0
-          ? `${haBaseUrl}${ttsPayload.path}`
-          : ttsPayload.url;
+          ? `${haBaseUrl}${ttsPayload.path}` : ttsPayload.url;
 
         if (!proxyUrl) {
-          attempts.push({
-            engineId,
-            stage: 'audio_proxy',
-            status: 502,
-            message: 'invalid_tts_response',
-          });
-
-          const hasNext = index < candidateEngineIds.length - 1;
-          if (hasNext) {
-            continue;
-          }
-
-          return reply.code(502).send({ error: 'ha_tts_invalid_response', attempts });
+          attempts.push({ engineId, stage: 'audio_proxy', status: 502, message: 'invalid_tts_response' });
+          if (index < candidateEngineIds.length - 1) continue;
+          break;
         }
 
-        const proxyController = new AbortController();
-        const proxyTimeoutId = setTimeout(() => proxyController.abort(), deps.env.HA_TIMEOUT_MS);
-        const upstream = await fetch(proxyUrl, {
-          method: 'GET',
-          headers: {
-            authorization: `Bearer ${deps.env.HA_TOKEN}`,
-          },
-          signal: proxyController.signal,
-        }).finally(() => clearTimeout(proxyTimeoutId));
+        // Step 2 – fetch audio bytes
+        if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
+        const proxyCtrl = new AbortController();
+        const proxyTimeout = setTimeout(() => proxyCtrl.abort(), deps.env.HA_TIMEOUT_MS);
+        const onHaAbortProxy = () => proxyCtrl.abort();
+        haAbort.signal.addEventListener('abort', onHaAbortProxy, { once: true });
+        let upstream: Response;
+        try {
+          upstream = await fetch(proxyUrl, {
+            method: 'GET',
+            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` },
+            signal: proxyCtrl.signal,
+          });
+        } finally {
+          clearTimeout(proxyTimeout);
+          haAbort.signal.removeEventListener('abort', onHaAbortProxy);
+        }
 
         if (!upstream.ok) {
           const errorText = await upstream.text();
-          attempts.push({
-            engineId,
-            stage: 'audio_proxy',
-            status: upstream.status,
-            message: errorText.slice(0, 300),
-          });
+          attempts.push({ engineId, stage: 'audio_proxy', status: upstream.status, message: errorText.slice(0, 300) });
           recordTtsFailure(engineId);
           app.log.warn(
             { engineId, stage: 'audio_proxy', status: upstream.status, body: errorText.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
             'tts_ha_engine_failed'
           );
           const hasNext = index < candidateEngineIds.length - 1;
-          const shouldTryNext =
-            hasNext
-            && (isElevenLabsEngine(engineId)
-              ? shouldFallbackFromElevenLabs(upstream.status, errorText)
-              : upstream.status === 404 || upstream.status === 429 || upstream.status >= 500);
-
-          if (shouldTryNext) {
-            continue;
-          }
-
-          break;
+          const shouldTryNext = hasNext && (isElevenLabsEngine(engineId)
+            ? shouldFallbackFromElevenLabs(upstream.status, errorText)
+            : upstream.status === 404 || upstream.status === 429 || upstream.status >= 500);
+          if (!shouldTryNext) break;
+          continue;
         }
 
         const contentType = upstream.headers.get('content-type') ?? 'audio/mpeg';
         const bytes = Buffer.from(await upstream.arrayBuffer());
-
-        recordTtsSuccess(selectedEngineId);
-        recordPerf('tts', Date.now() - t0);
-        app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-        return reply
-          .code(200)
-          .header('content-type', contentType)
-          .header('x-tts-provider', `ha:${selectedEngineId}`)
-          .send(bytes);
+        recordTtsSuccess(engineId);
+        return { bytes, contentType, engineId, via: `ha:${engineId}` };
       }
+      throw new Error('ha_tts_all_failed');
+    };
 
-      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_all_failed_openai_fallback');
-      try {
-        const openAiSpeech = await synthesizeWithOpenAi({ env: deps.env, text });
-        recordPerf('tts', Date.now() - t0);
-        app.log.info({ engineId: openAiSpeech.provider, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-        return reply
-          .code(200)
-          .header('content-type', openAiSpeech.contentType)
-          .header('x-tts-provider', openAiSpeech.provider)
-          .send(openAiSpeech.bytes);
-      } catch (err) {
-        app.log.warn({ err, attempts }, 'tts_openai_fallback_failed');
-      }
+    // ── OpenAI TTS coroutine ──────────────────────────────────────────────────
+    const doOpenAiTts = async (): Promise<TtsWin> => {
+      const r = await synthesizeWithOpenAi({ env: deps.env, text, externalSignal: openAiAbort.signal });
+      return { bytes: r.bytes, contentType: r.contentType, engineId: r.provider, via: r.provider };
+    };
 
-      return reply.code(502).send({
-        error: 'tts_failed_all_candidates',
-        engineId: selectedEngineId,
-        attempts,
+    // ── Race: first success wins, abort the loser ─────────────────────────────
+    let winner: TtsWin;
+    try {
+      const haPromise = doHaTts().then((v) => { openAiAbort.abort('race_winner_ha'); return v; });
+      const openAiPromise = doOpenAiTts().then((v) => { haAbort.abort('race_winner_openai'); return v; });
+      winner = await new Promise<TtsWin>((resolve, reject) => {
+        let remaining = 2;
+        const onFail = () => { remaining -= 1; if (remaining === 0) reject(new Error('tts_all_failed')); };
+        haPromise.then(resolve, onFail);
+        openAiPromise.then(resolve, onFail);
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'unknown_error';
-      return reply.code(502).send({ error: 'ha_tts_failed', message });
+    } catch {
+      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
+      return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
     }
+
+    recordPerf('tts', Date.now() - t0);
+    app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+    return reply
+      .code(200)
+      .header('content-type', winner.contentType)
+      .header('x-tts-provider', winner.via)
+      .send(winner.bytes);
   });
 
   app.get('/v1/threads', async (req, reply) => {
