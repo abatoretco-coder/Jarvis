@@ -1,4 +1,5 @@
 ﻿import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -54,6 +55,46 @@ type EntityStateLike = {
   entity_id: string;
   attributes?: Record<string, unknown>;
 };
+
+type AudioTransformOpts = { speed: number; pitchSemitones: number; clarity: boolean };
+
+function applyTtsTransforms(bytes: Buffer, opts: AudioTransformOpts): Promise<Buffer> {
+  const filters: string[] = [];
+
+  if (opts.pitchSemitones !== 0) {
+    const ratio = Math.pow(2, opts.pitchSemitones / 12);
+    // asetrate shifts pitch + speed; aresample normalises; atempo restores original speed
+    filters.push(`asetrate=44100*${ratio.toFixed(6)}`, 'aresample=44100', `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`);
+  }
+  if (opts.speed !== 1.0) {
+    filters.push(`atempo=${Math.max(0.5, Math.min(2.0, opts.speed)).toFixed(6)}`);
+  }
+  if (opts.clarity) {
+    // Cut low-frequency rumble; boost presence at 3 kHz for intelligibility
+    filters.push('highpass=f=100', 'equalizer=f=3000:width_type=o:width=2:g=2');
+  }
+
+  if (filters.length === 0) return Promise.resolve(bytes);
+
+  return new Promise<Buffer>((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-f', 'mp3', '-i', 'pipe:0',
+      '-filter:a', filters.join(','),
+      '-f', 'mp3', 'pipe:1',
+      '-loglevel', 'error',
+    ]);
+    const chunks: Buffer[] = [];
+    let stderr = '';
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d));
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('close', (code) => {
+      if (code === 0) resolve(Buffer.concat(chunks));
+      else reject(new Error(`ffmpeg_transform exit ${code}: ${stderr.slice(0, 200)}`));
+    });
+    proc.on('error', reject);
+    proc.stdin.end(bytes);
+  });
+}
 
 function uniqueNonEmpty(values: string[]): string[] {
   const seen = new Set<string>();
@@ -850,6 +891,21 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     recordPerf('tts', Date.now() - t0);
     app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+
+    // Apply audio post-processing (speed / pitch / clarity) when any param is non-default
+    if (deps.env.TTS_SPEED !== 1.0 || deps.env.TTS_PITCH_SEMITONES !== 0 || deps.env.TTS_CLARITY) {
+      try {
+        winner.bytes = await applyTtsTransforms(winner.bytes, {
+          speed: deps.env.TTS_SPEED,
+          pitchSemitones: deps.env.TTS_PITCH_SEMITONES,
+          clarity: deps.env.TTS_CLARITY,
+        });
+      } catch (err) {
+        app.log.warn({ err }, 'tts_transform_failed');
+        // Serve untransformed audio rather than failing the request
+      }
+    }
+
     return reply
       .code(200)
       .header('content-type', winner.contentType)

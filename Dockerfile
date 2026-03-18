@@ -19,6 +19,7 @@ RUN npm ci --omit=dev
 
 FROM base AS runtime
 ENV NODE_ENV=production
+RUN apk add --no-cache ffmpeg
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./package.json
