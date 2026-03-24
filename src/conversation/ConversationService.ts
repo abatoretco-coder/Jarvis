@@ -52,35 +52,6 @@ function parseAssistantTextFromHaResponse(data: unknown): string {
   return 'Je ne peux pas répondre correctement pour le moment.';
 }
 
-function buildAiGuidedInput(userText: string): string {
-  const clean = toSingleParagraphPlainText(userText);
-  const modeHint = inferModeHint(clean);
-  return [
-    'Tu es J.A.R.V.I.S. Ton ton : légèrement condescendant, impeccablement poli, humour sec. Une seule réponse en texte brut, une phrase.',
-    'Role: Home Assistant decide, Jarvis execute delegated actions only.',
-    'Rules: call HA action when available; never invent entities/services.',
-    'Guardrail: never decide or execute Spotify/music streaming intents here; Spotify is handled by a dedicated music agent running in parallel.',
-    'If this request is about Spotify or music streaming and you have no HA entity to control for it, say so briefly in one sentence and do nothing.',
-    'Reply: one short plain text sentence only — no markdown, no lists, no emojis.',
-    `Mode suggere: ${modeHint}`,
-    `Commande utilisateur: ${clean}`,
-  ].join('\n');
-}
-
-function inferModeHint(userText: string): 'control' | 'play' | 'search' | 'queue' | 'info' | 'clarify' {
-  const normalized = toSingleParagraphPlainText(userText)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-
-  if (/\b(file|queue|ajoute|ajouter)\b/.test(normalized)) return 'queue';
-  if (/\b(recherche|trouve|quel|quoi|infos?|en cours|now playing)\b/.test(normalized)) return 'info';
-  if (/\b(joue|lance|playlist|album|artiste|track|musique)\b/.test(normalized)) return 'play';
-  if (/\b(pause|play|reprend|suivant|precedent|volume|son|mute|stop)\b/.test(normalized)) return 'control';
-  if (normalized.length < 3) return 'clarify';
-  return 'search';
-}
-
 export class ConversationService {
   private lastHaCallAtMs = 0;
   private haGate: Promise<void> = Promise.resolve();
@@ -110,7 +81,7 @@ export class ConversationService {
   }
 
   async callHomeAssistantConversation(userText: string, threadId: string, externalSignal?: AbortSignal): Promise<string> {
-    const textForAgent = buildAiGuidedInput(userText);
+    const textForAgent = toSingleParagraphPlainText(userText);
     const maxAttempts = Math.max(1, this.options.retryCount + 1);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
