@@ -13,15 +13,25 @@
 import type { MessageRecord } from './repositories/MessageRepository';
 
 export type HaAgentEntry = {
-  /** HA conversation entity_id, e.g. "conversation.jarvis_search" */
+  /** HA conversation entity_id, e.g. "conversation.jarvis_search", or SPOTIFY_AGENT_ID */
   agentId: string;
   /** One-line hint used in the router prompt */
   hint: string;
 };
 
-export type RouterResult = {
+/**
+ * Special sentinel agentId returned by the router when the request should be
+ * handled by the Spotify executor (not an HA conversation entity).
+ */
+export const SPOTIFY_AGENT_ID = 'spotify' as const;
+
+export type RouterTarget = {
   agentId: string;
   confidence: number;
+};
+
+export type RouterResult = {
+  targets: RouterTarget[];
   reason: string;
 };
 
@@ -35,12 +45,12 @@ export type RouterOptions = {
 };
 
 // Minimal system prompt — token budget is tight.
-const SYSTEM_PROMPT = `You are a routing classifier. Given a user message and optional context, pick the best agent from the provided list.
-Return ONLY valid JSON matching the schema: {"agentId":"<id>","confidence":<0-1>,"reason":"<10 words max>"}.
+const SYSTEM_PROMPT = `You are a routing classifier. A user message may span one or multiple domains simultaneously.
+Return ONLY valid JSON: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"<10 words max>"}.
 Rules:
-- Pick the most specific agent when confident.
-- If unsure or the message spans multiple domains, pick the general agent.
-- confidence reflects your certainty (1.0=certain, 0.5=unsure).
+- Include one entry per domain/action in the message (e.g. music AND weather → two targets).
+- Only include targets with confidence ≥0.5. Omit uncertain ones.
+- confidence reflects certainty per target (1.0=certain, 0.5=unsure).
 - Do not explain. Do not add keys. Output only the JSON object.`;
 
 function buildUserPrompt(params: {
@@ -96,7 +106,7 @@ export async function routeToHaAgent(params: {
         body: JSON.stringify({
           model: options.model,
           temperature: 0,
-          max_tokens: 80,
+          max_tokens: 150,
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -122,17 +132,23 @@ export async function routeToHaAgent(params: {
     }
 
     const result = parsed as Record<string, unknown>;
-    const agentId = typeof result.agentId === 'string' ? result.agentId.trim() : '';
-    const confidence = typeof result.confidence === 'number' ? result.confidence : 0;
+    const rawTargets = Array.isArray(result.targets) ? result.targets : [];
     const reason = typeof result.reason === 'string' ? result.reason.trim() : '';
 
-    // Validate that the returned agentId is in our known list
     const knownIds = new Set(params.agents.map((a) => a.agentId));
-    if (!agentId || !knownIds.has(agentId)) {
-      throw new Error(`router_unknown_agent:${agentId}`);
+    const targets: RouterTarget[] = (rawTargets as unknown[])
+      .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+      .map((t) => ({
+        agentId: typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '',
+        confidence: typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0,
+      }))
+      .filter((t) => t.agentId && knownIds.has(t.agentId));
+
+    if (targets.length === 0) {
+      throw new Error('router_no_valid_targets');
     }
 
-    return { agentId, confidence, reason };
+    return { targets, reason };
   } finally {
     clearTimeout(timeoutId);
   }

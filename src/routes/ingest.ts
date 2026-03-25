@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/ConversationService';
-import { routeToHaAgent, parseAgentMap } from '../conversation/haAgentRouter';
+import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID } from '../conversation/haAgentRouter';
 import { resolveDeterministicIntentReply } from '../conversation/deterministicIntents';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import {
@@ -397,193 +397,195 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       committed.usedSummaryVersion ?? (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
 
     // ── Orchestrator layer ────────────────────────────────────────────────────
-    // Phase 1 (parallel): music planner + HA general agent both start immediately.
-    //   - If music planner → spotify: abort HA, execute Spotify.
-    //   - If music planner → none AND router agents configured: run HA router,
-    //     then call the winning specialized agent (general agent result discarded).
-    //   - If no router agents or router fails/low-confidence: HA general wins directly.
+    // Router + HA general start in parallel.
+    // Router returns a list of targets — supports multi-domain requests
+    // (e.g. "lance la musique ET dis-moi la météo" → [spotify, jarvis_assistant]).
+    //
+    // Outcomes:
+    //   - single spotify target   → abort HA general, music planner + executor, early return
+    //   - spotify + HA targets    → run both in parallel, combine text parts
+    //   - HA specialized only     → call those in parallel, combine, discard general
+    //   - general / fail / none   → use HA general directly
 
     const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
-    const routerEnabled = agentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
+    const spotifyEntry = Boolean(deps.spotifyWebApi)
+      ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale' }
+      : null;
+    const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...agentEntries];
+    const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
+    const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
+
+    const recentMessages = routerEnabled ? await messageRepository.getRecentMessages(threadId, 3) : [];
 
     const haAbort = new AbortController();
-    const [musicPlanResult, haGeneralResult] = await Promise.allSettled([
-      planSpotifyActionFromTextWithOpenAi({
-        env: deps.env,
-        spotifyWebApi: deps.spotifyWebApi,
-        text,
-        correlationId: correlationId || undefined,
-        userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
-      }).then((plan) => {
-        if (plan.route === 'spotify') haAbort.abort('music_route_confirmed');
-        return plan;
-      }),
+    const [routerResult, haGeneralResult] = await Promise.allSettled([
+      routerEnabled
+        ? routeToHaAgent({
+            text,
+            agents: allAgentEntries,
+            summary: threadBefore.summary?.trim() || undefined,
+            recentMessages,
+            options: {
+              openAiApiKey: deps.env.OPENAI_API_KEY!,
+              openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+              model: deps.env.OPENAI_MODEL_ROUTER,
+              timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+              confidenceThreshold: threshold,
+              generalAgentId: JARVIS_HA_AGENT_GENERAL,
+            },
+          }).then((route) => {
+            // Abort HA general only if Spotify is the sole confident target — saves the HA call.
+            const validTargets = route.targets.filter((t) => t.confidence >= threshold);
+            const spotifyOnly = validTargets.length === 1 && validTargets[0]?.agentId === SPOTIFY_AGENT_ID;
+            if (spotifyOnly) haAbort.abort('spotify_only_route');
+            return route;
+          })
+        : Promise.reject(new Error('router_disabled')),
       conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal, JARVIS_HA_AGENT_GENERAL),
     ]);
 
-    // ── Spotify branch ────────────────────────────────────────────────────────
-    if (musicPlanResult.status === 'fulfilled') {
-      const musicPlan = musicPlanResult.value;
-
-      if (musicPlan.route === 'spotify' && musicPlan.request) {
-        const spotifyPayload = ingestSpotifyRequestSchema.safeParse({
-          threadId,
-          correlation_id: correlationId || undefined,
-          user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
-          ...musicPlan.request,
-          text,
-        });
-
-        if (spotifyPayload.success) {
-          const spotifyResponse = await executeSpotifyCapability({
-            request: spotifyPayload.data,
-            spotifyWebApi: deps.spotifyWebApi,
-            env: deps.env,
-            log: app.log,
-          });
-
-          void conversationService.persistMessages(threadId, text, spotifyResponse.tts).then(async () => {
-            if (await summarizationService.shouldPresummarize(threadId)) {
-              summarizationService.startPresummarize(threadId);
-            }
-          });
-
-          app.log.info(
-            {
-              threadId,
-              requestId,
-              correlation_id: correlationId || undefined,
-              route: musicPlan.route,
-              reason: musicPlan.reason,
-              action: spotifyPayload.data.action,
-              status: spotifyResponse.status,
-            },
-            'ingest_spotify_capability_done'
-          );
-
-          return reply.code(200).send({
-            threadId,
-            responseText: spotifyResponse.tts,
-            status: spotifyResponse.status,
-            ...(spotifyResponse.data ? { data: spotifyResponse.data } : {}),
-            ...(spotifyResponse.options ? { options: spotifyResponse.options } : {}),
-            ...(spotifyResponse.error_code ? { error_code: spotifyResponse.error_code } : {}),
-            ...(correlationId ? { correlation_id: correlationId } : {}),
-            planner: {
-              source: 'openai_music_agent',
-              route: musicPlan.route,
-              reason: musicPlan.reason,
-            },
-          });
-        }
-
-        app.log.warn(
-          { threadId, requestId, correlation_id: correlationId || undefined, issues: spotifyPayload.error.issues },
-          'music_agent_generated_invalid_spotify_payload'
-        );
-      } else {
-        app.log.info(
-          { threadId, requestId, route: musicPlan.route, reason: musicPlan.reason, text },
-          'music_agent_route_none_ha_wins'
-        );
-      }
-    } else {
-      app.log.warn(
-        { threadId, requestId, correlation_id: correlationId || undefined, err: musicPlanResult.reason },
-        'music_agent_planning_failed'
-      );
+    if (routerResult.status === 'rejected' && routerEnabled) {
+      app.log.warn({ threadId, requestId, err: routerResult.reason }, 'ha_agent_router_failed_fallback_general');
     }
 
-    // ── HA orchestrator branch ────────────────────────────────────────────────
-    // Music route = none or failed. Now decide which HA agent to use.
-    // If router is enabled, run it with summary + 3 recent messages for context.
-    // On success with confidence >= threshold → call the specialized agent.
-    // On any failure or low confidence → fall through to haGeneralResult.
-
+    // ── Resolve targets ───────────────────────────────────────────────────────
     let assistantText: string | undefined;
 
-    if (routerEnabled) {
-      const thread = threadBefore; // already fetched above
-      const recentMessages = await messageRepository.getRecentMessages(threadId, 3);
+    if (routerResult.status === 'fulfilled') {
+      const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
+      const spotifyTarget = validTargets.find((t) => t.agentId === SPOTIFY_AGENT_ID);
+      const haSpecTargets = validTargets.filter(
+        (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== JARVIS_HA_AGENT_GENERAL,
+      );
 
-      let targetAgentId = JARVIS_HA_AGENT_GENERAL;
-      let routerUsed = false;
+      app.log.info(
+        {
+          threadId,
+          requestId,
+          router_targets: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
+          router_reason: routerResult.value.reason,
+        },
+        'ha_agent_router_result',
+      );
 
-      try {
-        const routeResult = await routeToHaAgent({
-          text,
-          agents: agentEntries,
-          summary: thread.summary?.trim() || undefined,
-          recentMessages,
-          options: {
-            openAiApiKey: deps.env.OPENAI_API_KEY!,
-            openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-            model: deps.env.OPENAI_MODEL_ROUTER,
-            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
-            confidenceThreshold: deps.env.ROUTER_CONFIDENCE_THRESHOLD,
-            generalAgentId: JARVIS_HA_AGENT_GENERAL,
-          },
-        });
+      if (validTargets.length > 0) {
+        type SpecializedResult =
+          | { kind: 'spotify_tts'; tts: string; musicPlanRoute: string; musicPlanReason?: string; spotifyPayload: object }
+          | { kind: 'ha_text'; agentId: string; text: string };
 
-        app.log.info(
-          {
-            threadId,
-            requestId,
-            router_agent: routeResult.agentId,
-            router_confidence: routeResult.confidence,
-            router_reason: routeResult.reason,
-          },
-          'ha_agent_router_result'
-        );
+        const tasks: Promise<SpecializedResult | null>[] = [];
 
-        if (routeResult.confidence >= deps.env.ROUTER_CONFIDENCE_THRESHOLD) {
-          targetAgentId = routeResult.agentId;
-          routerUsed = true;
-        } else {
-          app.log.info(
-            { threadId, requestId, confidence: routeResult.confidence, threshold: deps.env.ROUTER_CONFIDENCE_THRESHOLD },
-            'ha_agent_router_low_confidence_fallback_general'
+        // Spotify task
+        if (spotifyTarget) {
+          tasks.push(
+            planSpotifyActionFromTextWithOpenAi({
+              env: deps.env,
+              spotifyWebApi: deps.spotifyWebApi,
+              text,
+              correlationId: correlationId || undefined,
+              userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+            })
+              .then(async (musicPlan): Promise<SpecializedResult | null> => {
+                if (musicPlan.route !== 'spotify' || !musicPlan.request) {
+                  app.log.info({ threadId, requestId, reason: musicPlan.reason }, 'music_agent_route_none_despite_router');
+                  return null;
+                }
+                const spotifyPayload = ingestSpotifyRequestSchema.safeParse({
+                  threadId,
+                  correlation_id: correlationId || undefined,
+                  user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+                  ...musicPlan.request,
+                  text,
+                });
+                if (!spotifyPayload.success) {
+                  app.log.warn({ threadId, requestId, issues: spotifyPayload.error.issues }, 'music_agent_invalid_payload');
+                  return null;
+                }
+                const spotifyResp = await executeSpotifyCapability({
+                  request: spotifyPayload.data,
+                  spotifyWebApi: deps.spotifyWebApi,
+                  env: deps.env,
+                  log: app.log,
+                });
+                app.log.info(
+                  { threadId, requestId, action: spotifyPayload.data.action, status: spotifyResp.status },
+                  'ingest_spotify_capability_done',
+                );
+                return {
+                  kind: 'spotify_tts',
+                  tts: spotifyResp.tts,
+                  musicPlanRoute: musicPlan.route,
+                  musicPlanReason: musicPlan.reason,
+                  spotifyPayload: {
+                    status: spotifyResp.status,
+                    ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
+                    ...(spotifyResp.options ? { options: spotifyResp.options } : {}),
+                    ...(spotifyResp.error_code ? { error_code: spotifyResp.error_code } : {}),
+                  },
+                };
+              })
+              .catch((err) => {
+                app.log.warn({ threadId, requestId, err }, 'spotify_task_failed');
+                return null;
+              }),
           );
         }
-      } catch (routerErr) {
-        app.log.warn(
-          { threadId, requestId, err: routerErr },
-          'ha_agent_router_failed_fallback_general'
-        );
-      }
 
-      if (routerUsed && targetAgentId !== JARVIS_HA_AGENT_GENERAL) {
-        // Call the specialized agent — general result is discarded.
-        try {
-          const specializedText = await conversationService.callHomeAssistantConversation(
-            text,
-            threadId,
-            undefined,
-            targetAgentId,
+        // HA specialized tasks
+        for (const haTarget of haSpecTargets) {
+          tasks.push(
+            conversationService
+              .callHomeAssistantConversation(text, threadId, undefined, haTarget.agentId)
+              .then((txt): SpecializedResult | null => {
+                if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
+                  return null;
+                }
+                app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_done');
+                return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+              })
+              .catch((err) => {
+                app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'ha_specialized_agent_failed');
+                return null;
+              }),
+          );
+        }
+
+        const taskResults = await Promise.all(tasks);
+        const goodResults = taskResults.filter((r): r is SpecializedResult => r !== null);
+
+        if (goodResults.length > 0) {
+          const spotifyRes = goodResults.find(
+            (r): r is Extract<SpecializedResult, { kind: 'spotify_tts' }> => r.kind === 'spotify_tts',
           );
 
-          // Detect OUT_OF_SCOPE signal from specialized agent — fall back to general.
-          if (/^\s*OUT_OF_SCOPE\s*$/i.test(specializedText)) {
-            app.log.info(
-              { threadId, requestId, agent: targetAgentId },
-              'ha_specialized_agent_out_of_scope_fallback_general'
-            );
-            // Fall through to general result below
-          } else {
-            assistantText = specializedText;
-            app.log.info(
-              { threadId, requestId, agent: targetAgentId },
-              'ha_specialized_agent_done'
-            );
+          // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
+          if (spotifyRes && goodResults.length === 1) {
+            void conversationService.persistMessages(threadId, text, spotifyRes.tts).then(async () => {
+              if (await summarizationService.shouldPresummarize(threadId)) {
+                summarizationService.startPresummarize(threadId);
+              }
+            });
+            return reply.code(200).send({
+              threadId,
+              responseText: spotifyRes.tts,
+              ...spotifyRes.spotifyPayload,
+              ...(correlationId ? { correlation_id: correlationId } : {}),
+              planner: { source: 'openai_music_agent', route: spotifyRes.musicPlanRoute, reason: spotifyRes.musicPlanReason },
+            });
           }
-        } catch (specializedErr) {
-          app.log.warn(
-            { threadId, requestId, agent: targetAgentId, err: specializedErr },
-            'ha_specialized_agent_failed_fallback_general'
-          );
-          // Fall through to general result below
+
+          // Multi-target: join all response parts
+          const parts = goodResults.map((r) => (r.kind === 'spotify_tts' ? r.tts : r.text));
+          assistantText = parts
+            .map((p) => p.trim().replace(/\.?\s*$/, ''))
+            .join('. ')
+            .concat('.');
+          app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_combined');
         }
+        // All tasks failed/OUT_OF_SCOPE → assistantText stays undefined → HA general fallback
       }
+      // No valid targets above threshold → HA general fallback
     }
 
     // ── General HA fallback ───────────────────────────────────────────────────
