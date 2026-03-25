@@ -56,6 +56,11 @@ const envSchema = z
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
   OPENAI_MODEL_SUMMARY: z.string().default('gpt-4o-mini'),
   OPENAI_MODEL_MUSIC_AGENT: z.string().default('gpt-4o-mini'),
+  // Model used by the HA agent router (should be fast + cheap, e.g. gpt-4o-mini)
+  OPENAI_MODEL_ROUTER: z.string().default('gpt-4o-mini'),
+  // Router circuit breaker settings
+  ROUTER_TIMEOUT_MS: numberFromEnv.default('3500'),
+  ROUTER_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.70),
   OPENAI_TIMEOUT_MS: numberFromEnv.default('12000'),
   OPENAI_STT_TIMEOUT_MS: numberFromEnv.default('10000'),
   OPENAI_TTS_TIMEOUT_MS: numberFromEnv.default('7000'),
@@ -113,6 +118,12 @@ const envSchema = z
   SPOTIFY_WEBAPI_REFRESH_BLACKOUT_START: hhmmFromEnv.default('03:00'),
   SPOTIFY_WEBAPI_REFRESH_BLACKOUT_END: hhmmFromEnv.default('03:20'),
   SPOTIFY_WEBAPI_PRE_REFRESH_WINDOW_MS: numberFromEnv.default('1800000'),
+
+  // HA Agent Map — enables the LLM orchestrator router.
+  // Format: "key:entity_id:hint|key2:entity_id2:hint2"
+  // Example: "search:conversation.jarvis_search:Recherche internet|assistant:conversation.jarvis_assistant:Domotique météo et général"
+  // Leave empty to disable router and always use HA_AGENT_GENERAL (openai_conversation).
+  HA_AGENT_MAP: optionalNonEmptyString,
 
   // Persistent conversation memory (SQLite) - used by ThreadRepository/MessageRepository
   CONVERSATION_DB_PATH: z.string().default('/app/data/conversation-memory.sqlite'),

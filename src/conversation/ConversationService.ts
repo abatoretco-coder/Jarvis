@@ -11,7 +11,7 @@ export type ConversationServiceOptions = {
   retryDelayMs: number;
 };
 
-const JARVIS_HA_AGENT_ID = 'conversation.openai_conversation';
+export const JARVIS_HA_AGENT_GENERAL = 'conversation.openai_conversation';
 
 function sleep(ms: number): Promise<void> {
   const safeMs = Math.max(0, Math.floor(ms));
@@ -80,7 +80,12 @@ export class ConversationService {
     return respStatus === 429 || respStatus === 500 || respStatus === 502 || respStatus === 503 || respStatus === 504;
   }
 
-  async callHomeAssistantConversation(userText: string, threadId: string, externalSignal?: AbortSignal): Promise<string> {
+  async callHomeAssistantConversation(
+    userText: string,
+    threadId: string,
+    externalSignal?: AbortSignal,
+    agentId: string = JARVIS_HA_AGENT_GENERAL,
+  ): Promise<string> {
     const textForAgent = toSingleParagraphPlainText(userText);
     const maxAttempts = Math.max(1, this.options.retryCount + 1);
 
@@ -102,7 +107,7 @@ export class ConversationService {
             'content-type': 'application/json',
           },
           body: JSON.stringify({
-            agent_id: JARVIS_HA_AGENT_ID,
+            agent_id: agentId,
             text: textForAgent,
             conversation_id: threadId,
           }),

@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { ConversationService } from '../conversation/ConversationService';
+import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/ConversationService';
+import { routeToHaAgent, parseAgentMap } from '../conversation/haAgentRouter';
 import { resolveDeterministicIntentReply } from '../conversation/deterministicIntents';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import {
@@ -395,11 +396,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const usedSummaryVersion =
       committed.usedSummaryVersion ?? (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
 
-    // Both run in parallel — music planner (1 OpenAI call) + HA conversation simultaneously.
-    // If planner routes to Spotify the HA result is discarded. If route=none, HA result is used directly.
-    // haAbort: abort HA fetch early once planner confirms route=spotify (no need to wait for HA to finish).
+    // ── Orchestrator layer ────────────────────────────────────────────────────
+    // Phase 1 (parallel): music planner + HA general agent both start immediately.
+    //   - If music planner → spotify: abort HA, execute Spotify.
+    //   - If music planner → none AND router agents configured: run HA router,
+    //     then call the winning specialized agent (general agent result discarded).
+    //   - If no router agents or router fails/low-confidence: HA general wins directly.
+
+    const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
+    const routerEnabled = agentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
+
     const haAbort = new AbortController();
-    const [musicPlanResult, haResponseResult] = await Promise.allSettled([
+    const [musicPlanResult, haGeneralResult] = await Promise.allSettled([
       planSpotifyActionFromTextWithOpenAi({
         env: deps.env,
         spotifyWebApi: deps.spotifyWebApi,
@@ -410,10 +418,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         if (plan.route === 'spotify') haAbort.abort('music_route_confirmed');
         return plan;
       }),
-      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal),
+      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal, JARVIS_HA_AGENT_GENERAL),
     ]);
 
-    // If the music planner decided this is Spotify, execute and return immediately.
+    // ── Spotify branch ────────────────────────────────────────────────────────
     if (musicPlanResult.status === 'fulfilled') {
       const musicPlan = musicPlanResult.value;
 
@@ -486,21 +494,109 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       );
     }
 
-    // HA path wins — planner returned route=none, failed, or payload was invalid.
-    app.log.info(
-      { threadId, requestId, correlation_id: correlationId || undefined },
-      'ingest_home_assistant_conversation_start'
-    );
+    // ── HA orchestrator branch ────────────────────────────────────────────────
+    // Music route = none or failed. Now decide which HA agent to use.
+    // If router is enabled, run it with summary + 3 recent messages for context.
+    // On success with confidence >= threshold → call the specialized agent.
+    // On any failure or low confidence → fall through to haGeneralResult.
 
-    let assistantText: string;
-    if (haResponseResult.status === 'fulfilled') {
-      assistantText = haResponseResult.value;
-    } else {
-      app.log.warn(
-        { threadId, requestId, correlation_id: correlationId || undefined, err: haResponseResult.reason },
-        'ingest_home_assistant_call_failed'
-      );
-      assistantText = toDeterministicHaFailureMessage();
+    let assistantText: string | undefined;
+
+    if (routerEnabled) {
+      const thread = threadBefore; // already fetched above
+      const recentMessages = await messageRepository.getRecentMessages(threadId, 3);
+
+      let targetAgentId = JARVIS_HA_AGENT_GENERAL;
+      let routerUsed = false;
+
+      try {
+        const routeResult = await routeToHaAgent({
+          text,
+          agents: agentEntries,
+          summary: thread.summary?.trim() || undefined,
+          recentMessages,
+          options: {
+            openAiApiKey: deps.env.OPENAI_API_KEY!,
+            openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+            model: deps.env.OPENAI_MODEL_ROUTER,
+            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+            confidenceThreshold: deps.env.ROUTER_CONFIDENCE_THRESHOLD,
+            generalAgentId: JARVIS_HA_AGENT_GENERAL,
+          },
+        });
+
+        app.log.info(
+          {
+            threadId,
+            requestId,
+            router_agent: routeResult.agentId,
+            router_confidence: routeResult.confidence,
+            router_reason: routeResult.reason,
+          },
+          'ha_agent_router_result'
+        );
+
+        if (routeResult.confidence >= deps.env.ROUTER_CONFIDENCE_THRESHOLD) {
+          targetAgentId = routeResult.agentId;
+          routerUsed = true;
+        } else {
+          app.log.info(
+            { threadId, requestId, confidence: routeResult.confidence, threshold: deps.env.ROUTER_CONFIDENCE_THRESHOLD },
+            'ha_agent_router_low_confidence_fallback_general'
+          );
+        }
+      } catch (routerErr) {
+        app.log.warn(
+          { threadId, requestId, err: routerErr },
+          'ha_agent_router_failed_fallback_general'
+        );
+      }
+
+      if (routerUsed && targetAgentId !== JARVIS_HA_AGENT_GENERAL) {
+        // Call the specialized agent — general result is discarded.
+        try {
+          const specializedText = await conversationService.callHomeAssistantConversation(
+            text,
+            threadId,
+            undefined,
+            targetAgentId,
+          );
+
+          // Detect OUT_OF_SCOPE signal from specialized agent — fall back to general.
+          if (/^\s*OUT_OF_SCOPE\s*$/i.test(specializedText)) {
+            app.log.info(
+              { threadId, requestId, agent: targetAgentId },
+              'ha_specialized_agent_out_of_scope_fallback_general'
+            );
+            // Fall through to general result below
+          } else {
+            assistantText = specializedText;
+            app.log.info(
+              { threadId, requestId, agent: targetAgentId },
+              'ha_specialized_agent_done'
+            );
+          }
+        } catch (specializedErr) {
+          app.log.warn(
+            { threadId, requestId, agent: targetAgentId, err: specializedErr },
+            'ha_specialized_agent_failed_fallback_general'
+          );
+          // Fall through to general result below
+        }
+      }
+    }
+
+    // ── General HA fallback ───────────────────────────────────────────────────
+    if (assistantText === undefined) {
+      if (haGeneralResult.status === 'fulfilled') {
+        assistantText = haGeneralResult.value;
+      } else {
+        app.log.warn(
+          { threadId, requestId, correlation_id: correlationId || undefined, err: haGeneralResult.reason },
+          'ingest_home_assistant_call_failed'
+        );
+        assistantText = toDeterministicHaFailureMessage();
+      }
     }
 
     void conversationService.persistMessages(threadId, text, assistantText).then(async () => {
