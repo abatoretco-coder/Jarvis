@@ -99,8 +99,10 @@ describe('music agent planner', () => {
       expect(result.request?.domain).toBe('spotify');
       expect(result.request?.action).toBe('play');
       expect(result.request?.slots.device).toBe('alias:salon');
-      expect(result.request?.context.planner).toBe('openai_music_agent');
-      expect(result.request?.context.payload_version).toBe('music-agent-v1');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result.request as any)?.context?.planner).toBe('openai_music_agent');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((result.request as any)?.context?.payload_version).toBe('music-agent-v1');
     }
   });
 

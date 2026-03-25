@@ -29,6 +29,7 @@ describe('conversation services', () => {
       minDeltaM: 20,
       triggerEveryInteractions: 10,
       openAiApiKey: undefined,
+      openAiBaseUrl: 'https://api.openai.test/v1',
       openAiModelSummary: 'gpt-4',
       openAiTimeoutMs: 3000,
     });
