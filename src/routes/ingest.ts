@@ -406,8 +406,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // Router returns a list of targets — supports multi-domain requests
     // (e.g. "lance la musique ET dis-moi la météo" → [spotify, jarvis_assistant]).
     //
+    // HA general ALWAYS runs in parallel — it is the safety net.
+    // If all specialized tasks succeed → HA result is discarded (never sent).
+    // If any specialized task fails/returns null → HA general is the fallback.
+    //
     // Outcomes:
-    //   - single spotify target   → abort HA general, music planner + executor, early return
+    //   - single spotify target   → music planner + executor, early return (HA discarded)
     //   - spotify + HA targets    → run both in parallel, combine text parts
     //   - HA specialized only     → call those in parallel, combine, discard general
     //   - general / fail / none   → use HA general directly
@@ -428,7 +432,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
     }
 
-    const haAbort = new AbortController();
     const [routerResult, haGeneralResult] = await Promise.allSettled([
       routerEnabled
         ? routeToHaAgent({
@@ -445,15 +448,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               generalAgentId,
               log: app.log,
             },
-          }).then((route) => {
-            // Abort HA general only if Spotify is the sole confident target — saves the HA call.
-            const validTargets = route.targets.filter((t) => t.confidence >= threshold);
-            const spotifyOnly = validTargets.length === 1 && validTargets[0]?.agentId === SPOTIFY_AGENT_ID;
-            if (spotifyOnly) haAbort.abort('spotify_only_route');
-            return route;
           })
         : Promise.reject(new Error('router_disabled')),
-      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal, generalAgentId),
+      conversationService.callHomeAssistantConversation(text, threadId, undefined, generalAgentId),
     ]);
 
     if (routerResult.status === 'rejected' && routerEnabled) {
