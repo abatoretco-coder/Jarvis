@@ -12,6 +12,11 @@
 
 import type { MessageRecord } from './repositories/MessageRepository';
 
+type MinLogger = {
+  info: (obj: Record<string, unknown>, msg: string) => void;
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+};
+
 export type HaAgentEntry = {
   /** HA conversation entity_id, e.g. "conversation.jarvis_search", or SPOTIFY_AGENT_ID */
   agentId: string;
@@ -42,6 +47,7 @@ export type RouterOptions = {
   timeoutMs: number;
   confidenceThreshold: number;
   generalAgentId: string;
+  log?: MinLogger;
 };
 
 // Minimal system prompt — token budget is tight.
@@ -90,6 +96,13 @@ export async function routeToHaAgent(params: {
   options: RouterOptions;
 }): Promise<RouterResult> {
   const { options } = params;
+  const log = options.log;
+  const t0 = Date.now();
+
+  log?.info(
+    { model: options.model, agents: params.agents.map((a) => a.agentId), timeout_ms: options.timeoutMs },
+    'ha_agent_router_start',
+  );
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs);
@@ -118,6 +131,7 @@ export async function routeToHaAgent(params: {
     );
 
     if (!response.ok) {
+      log?.warn({ status: response.status, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_openai_http_error');
       throw new Error(`router_openai_http_${response.status}`);
     }
 
@@ -128,6 +142,7 @@ export async function routeToHaAgent(params: {
     try {
       parsed = JSON.parse(content);
     } catch {
+      log?.warn({ content: content.slice(0, 200), elapsed_ms: Date.now() - t0 }, 'ha_agent_router_invalid_json');
       throw new Error('router_invalid_json');
     }
 
@@ -145,9 +160,14 @@ export async function routeToHaAgent(params: {
       .filter((t) => t.agentId && knownIds.has(t.agentId));
 
     if (targets.length === 0) {
+      log?.warn({ rawTargets, knownIds: [...knownIds], elapsed_ms: Date.now() - t0 }, 'ha_agent_router_no_valid_targets');
       throw new Error('router_no_valid_targets');
     }
 
+    log?.info(
+      { targets: targets.map((t) => `${t.agentId}:${t.confidence}`), reason, elapsed_ms: Date.now() - t0 },
+      'ha_agent_router_done',
+    );
     return { targets, reason };
   } finally {
     clearTimeout(timeoutId);

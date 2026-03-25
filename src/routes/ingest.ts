@@ -391,6 +391,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
+    app.log.info(
+      { threadId, requestId, text_len: text.length, voice_turn_id: voiceTurnId || undefined, correlation_id: correlationId || undefined },
+      'ingest_start',
+    );
+
     const committed = await summarizationService.commitCandidateIfReady(threadId);
     const threadBefore = await threadRepository.getOrCreate(threadId);
     const usedSummaryVersion =
@@ -419,6 +424,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
 
+    if (!routerEnabled) {
+      app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
+    }
+
     const haAbort = new AbortController();
     const [routerResult, haGeneralResult] = await Promise.allSettled([
       routerEnabled
@@ -434,6 +443,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
               confidenceThreshold: threshold,
               generalAgentId,
+              log: app.log,
             },
           }).then((route) => {
             // Abort HA general only if Spotify is the sole confident target — saves the HA call.
@@ -593,6 +603,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // ── General HA fallback ───────────────────────────────────────────────────
     if (assistantText === undefined) {
       if (haGeneralResult.status === 'fulfilled') {
+        app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
         assistantText = haGeneralResult.value;
       } else {
         app.log.warn(
