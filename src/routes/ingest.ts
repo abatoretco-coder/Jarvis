@@ -417,6 +417,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const recentMessages = routerEnabled ? await messageRepository.getRecentMessages(threadId, 3) : [];
 
+    const generalAgentId = deps.env.HA_AGENT_GENERAL;
+
     const haAbort = new AbortController();
     const [routerResult, haGeneralResult] = await Promise.allSettled([
       routerEnabled
@@ -431,7 +433,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               model: deps.env.OPENAI_MODEL_ROUTER,
               timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
               confidenceThreshold: threshold,
-              generalAgentId: JARVIS_HA_AGENT_GENERAL,
+              generalAgentId,
             },
           }).then((route) => {
             // Abort HA general only if Spotify is the sole confident target — saves the HA call.
@@ -441,7 +443,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             return route;
           })
         : Promise.reject(new Error('router_disabled')),
-      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal, JARVIS_HA_AGENT_GENERAL),
+      conversationService.callHomeAssistantConversation(text, threadId, haAbort.signal, generalAgentId),
     ]);
 
     if (routerResult.status === 'rejected' && routerEnabled) {
@@ -455,7 +457,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
       const spotifyTarget = validTargets.find((t) => t.agentId === SPOTIFY_AGENT_ID);
       const haSpecTargets = validTargets.filter(
-        (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== JARVIS_HA_AGENT_GENERAL,
+        (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId,
       );
 
       app.log.info(

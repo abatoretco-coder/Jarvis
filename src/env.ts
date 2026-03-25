@@ -119,10 +119,13 @@ const envSchema = z
   SPOTIFY_WEBAPI_REFRESH_BLACKOUT_END: hhmmFromEnv.default('03:20'),
   SPOTIFY_WEBAPI_PRE_REFRESH_WINDOW_MS: numberFromEnv.default('1800000'),
 
-  // HA Agent Map — enables the LLM orchestrator router.
+  // General fallback HA conversation agent (used when router is disabled or returns no confident target).
+  // Override to point to your custom general agent instead of the default openai_conversation.
+  HA_AGENT_GENERAL: z.string().min(1).default('conversation.openai_conversation'),
+
+  // HA Agent Router — enables the LLM orchestrator router.
   // Format: "key:entity_id:hint|key2:entity_id2:hint2"
-  // Example: "search:conversation.jarvis_search:Recherche internet|assistant:conversation.jarvis_assistant:Domotique météo et général"
-  // Leave empty to disable router and always use HA_AGENT_GENERAL (openai_conversation).
+  // Leave empty to disable router and always use HA_AGENT_GENERAL.
   HA_AGENT_MAP: optionalNonEmptyString,
 
   // Persistent conversation memory (SQLite) - used by ThreadRepository/MessageRepository
