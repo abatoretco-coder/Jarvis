@@ -599,9 +599,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // ── General HA fallback ───────────────────────────────────────────────────
     if (assistantText === undefined) {
-      if (haGeneralResult.status === 'fulfilled') {
+      if (haGeneralResult.status === 'fulfilled' && !/^\s*OUT_OF_SCOPE\s*$/i.test(haGeneralResult.value)) {
         app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
         assistantText = haGeneralResult.value;
+      } else if (haGeneralResult.status === 'fulfilled') {
+        app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
+        assistantText = toDeterministicHaFailureMessage();
       } else {
         app.log.warn(
           { threadId, requestId, correlation_id: correlationId || undefined, err: haGeneralResult.reason },
