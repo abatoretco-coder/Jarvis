@@ -33,6 +33,10 @@ export const SPOTIFY_AGENT_ID = 'spotify' as const;
 export type RouterTarget = {
   agentId: string;
   confidence: number;
+  /** Spotify only: action to execute directly (skip music planner) */
+  action?: string;
+  /** Spotify only: action slots (device, query, etc.) */
+  slots?: Record<string, unknown>;
 };
 
 export type RouterResult = {
@@ -50,14 +54,14 @@ export type RouterOptions = {
   log?: MinLogger;
 };
 
-// Minimal system prompt — token budget is tight.
-const SYSTEM_PROMPT = `You are a routing classifier. A user message may span one or multiple domains simultaneously.
-Return ONLY valid JSON: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"<10 words max>"}.
-Rules:
-- Include one entry per domain/action in the message (e.g. music AND weather → two targets).
-- Only include targets with confidence ≥0.5. Omit uncertain ones.
-- confidence reflects certainty per target (1.0=certain, 0.5=unsure).
-- Do not explain. Do not add keys. Output only the JSON object.`;
+// System prompt — includes Spotify action catalog so the router can produce direct actions.
+const SYSTEM_PROMPT = `Routing classifier. A message may span multiple domains.
+Return ONLY: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"≤10 words"}.
+Rules: include entry per domain if confidence≥0.5; omit uncertain ones; no extra keys.
+For agentId="spotify": also add "action" (required) and "slots" (optional object).
+Spotify actions: pause; play (resume, no content); next; previous; volume_set{volume_percent:N or volume_delta:±N}; search_and_play{query,type?,device?}; transfer{device}; search{query}; queue_add{query}; now_playing; like_track; shuffle_set{state:on|off}; repeat_set{mode:track|context|off}; list_devices.
+Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→search_and_play+device; artiste|album|titre|playlist|genre→search_and_play; reprends|joue|lance sans device sans contenu→play; musique générique sans device→search_and_play{query:"musique"}.
+Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".`;
 
 function buildUserPrompt(params: {
   text: string;
@@ -119,7 +123,7 @@ export async function routeToHaAgent(params: {
         body: JSON.stringify({
           model: options.model,
           temperature: 0,
-          max_tokens: 150,
+          max_tokens: 250,
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -153,10 +157,20 @@ export async function routeToHaAgent(params: {
     const knownIds = new Set(params.agents.map((a) => a.agentId));
     const targets: RouterTarget[] = (rawTargets as unknown[])
       .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-      .map((t) => ({
-        agentId: typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '',
-        confidence: typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0,
-      }))
+      .map((t) => {
+        const agentId = typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '';
+        const confidence = typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0;
+        const entry: RouterTarget = { agentId, confidence };
+        if (agentId === SPOTIFY_AGENT_ID) {
+          if (typeof t['action'] === 'string' && t['action']) {
+            entry.action = (t['action'] as string).trim();
+          }
+          if (typeof t['slots'] === 'object' && t['slots'] !== null && !Array.isArray(t['slots'])) {
+            entry.slots = t['slots'] as Record<string, unknown>;
+          }
+        }
+        return entry;
+      })
       .filter((t) => t.agentId && knownIds.has(t.agentId));
 
     if (targets.length === 0) {

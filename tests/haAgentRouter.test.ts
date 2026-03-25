@@ -270,6 +270,91 @@ describe('routeToHaAgent', () => {
       }),
     ).rejects.toThrow();
   }, 10000);
+
+  test('extracts action and slots from spotify target (transfer with device)', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.95, action: 'transfer', slots: { device: 'alias:pc' } }],
+          reason: 'transfer to pc',
+        }),
+      )) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'lance la musique sur le PC',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    expect(result.targets).toHaveLength(1);
+    const target = result.targets[0]!;
+    expect(target.agentId).toBe(SPOTIFY_AGENT_ID);
+    expect(target.action).toBe('transfer');
+    expect(target.slots).toEqual({ device: 'alias:pc' });
+  });
+
+  test('extracts action without slots from spotify target (play)', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.97, action: 'play' }],
+          reason: 'resume playback',
+        }),
+      )) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'reprends la musique',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    const target = result.targets[0]!;
+    expect(target.action).toBe('play');
+    expect(target.slots).toBeUndefined();
+  });
+
+  test('does not attach action/slots to non-spotify targets', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: 'conversation.jarvis_search', confidence: 0.88, action: 'some_action', slots: { q: 'x' } }],
+          reason: 'search',
+        }),
+      )) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'cherche quelque chose',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    const target = result.targets[0]!;
+    expect(target.agentId).toBe('conversation.jarvis_search');
+    expect(target.action).toBeUndefined();
+    expect(target.slots).toBeUndefined();
+  });
+
+  test('backward-compat: spotify target without action still works', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(
+        JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.9 }], reason: 'music' }),
+      )) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'mets de la musique',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    const target = result.targets[0]!;
+    expect(target.agentId).toBe(SPOTIFY_AGENT_ID);
+    expect(target.action).toBeUndefined();
+    expect(target.slots).toBeUndefined();
+  });
 });
 
 // ─── OUT_OF_SCOPE detection (regex contract) ──────────────────────────────────

@@ -15,7 +15,7 @@ import {
 } from '../conversation/repositories/SqliteRepositories';
 import { SummarizationService } from '../conversation/SummarizationService';
 import type { AppDeps } from '../server';
-import { ingestSpotifyRequestSchema } from '../spotify/contracts';
+import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 
@@ -486,14 +486,30 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         // Spotify task
         if (spotifyTarget) {
+          // When the router already resolved the Spotify action directly, use it.
+          // Fall back to the music planner only when the router didn't specify an action.
+          const routerActionParsed = spotifyTarget.action ? spotifyActionSchema.safeParse(spotifyTarget.action) : null;
+          const resolveSpotifyPayload = (routerActionParsed?.success)
+            ? Promise.resolve({
+                route: 'spotify' as const,
+                reason: `router_direct:${routerActionParsed.data}`,
+                request: {
+                  domain: 'spotify' as const,
+                  action: routerActionParsed.data,
+                  slots: spotifyTarget.slots ?? {},
+                  text,
+                },
+              })
+            : planSpotifyActionFromTextWithOpenAi({
+                env: deps.env,
+                spotifyWebApi: deps.spotifyWebApi,
+                text,
+                correlationId: correlationId || undefined,
+                userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+              });
+
           tasks.push(
-            planSpotifyActionFromTextWithOpenAi({
-              env: deps.env,
-              spotifyWebApi: deps.spotifyWebApi,
-              text,
-              correlationId: correlationId || undefined,
-              userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
-            })
+            resolveSpotifyPayload
               .then(async (musicPlan): Promise<SpecializedResult | null> => {
                 if (musicPlan.route !== 'spotify' || !musicPlan.request) {
                   app.log.info({ threadId, requestId, reason: musicPlan.reason }, 'music_agent_route_none_despite_router');
