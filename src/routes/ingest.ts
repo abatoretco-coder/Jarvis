@@ -142,15 +142,18 @@ async function callOpenAiSearchDirect(params: {
   const dateStr = now.toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
   });
+  const fullDate = now.toLocaleDateString('fr-FR', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+  });
   const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
 
   const systemPrompt = [
     `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}.`,
-    `Ta requete de recherche DOIT inclure "${monthYear}" pour obtenir des resultats recents.`,
-    `Reponds toujours avec le resultat le plus recent trouve, en citant sa date.`,
-    `Si plusieurs resultats disponibles, privilegier celui dont la date est la plus proche d'aujourd'hui.`,
-    `Reponds en 1 phrase maximum. Texte brut, zero preamble, zero introduction.`,
-    `Si vraiment aucun resultat trouve: reponds uniquement "Je n'ai pas obtenu cette information."`,
+    `Ta requete de recherche DOIT inclure la date exacte "${fullDate}" pour trouver les evenements les plus recents.`,
+    `Si aucun resultat pour cette date, essaie avec la semaine precedente en gardant "${monthYear}" dans la requete.`,
+    `Retourne toujours le resultat le plus recent trouve, en citant sa date.`,
+    `Reponds en 1 phrase maximum. Texte brut. Zero introduction.`,
+    `Si vraiment aucun resultat: reponds uniquement "Je n'ai pas obtenu cette information."`,
   ].join(' ');
 
   const resp = await fetch(
