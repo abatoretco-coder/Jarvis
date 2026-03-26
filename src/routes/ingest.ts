@@ -582,6 +582,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const textForTarget = agentEntry?.key === 'search'
             ? `${buildSearchDateContext()}\n${text}`
             : text;
+          if (agentEntry?.key === 'search') {
+            app.log.info({ threadId, requestId, agent: haTarget.agentId, dateContext: buildSearchDateContext() }, 'search_agent_date_injected');
+          }
           tasks.push(
             conversationService
               .callHomeAssistantConversation(textForTarget, threadId, undefined, haTarget.agentId)
