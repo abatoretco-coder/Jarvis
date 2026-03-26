@@ -143,17 +143,14 @@ async function callOpenAiSearchDirect(params: {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
   });
   const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
-  const threshold = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
-  const thresholdStr = threshold.toLocaleDateString('fr-FR', {
-    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
-  });
 
   const systemPrompt = [
     `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}.`,
-    `Seuil de fraicheur: tout resultat anterieur au ${thresholdStr} est invalide.`,
-    `Ta requete de recherche DOIT inclure "${monthYear}" ou la date exacte pour obtenir des resultats recents.`,
+    `Ta requete de recherche DOIT inclure "${monthYear}" pour obtenir des resultats recents.`,
+    `Reponds toujours avec le resultat le plus recent trouve, en citant sa date.`,
+    `Si plusieurs resultats disponibles, privilegier celui dont la date est la plus proche d'aujourd'hui.`,
     `Reponds en 1 phrase maximum. Texte brut, zero preamble, zero introduction.`,
-    `Si tu ne trouves pas de resultat posterieur au ${thresholdStr}: reponds uniquement "Je n'ai pas obtenu cette information."`,
+    `Si vraiment aucun resultat trouve: reponds uniquement "Je n'ai pas obtenu cette information."`,
   ].join(' ');
 
   const resp = await fetch(
