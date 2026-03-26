@@ -136,6 +136,7 @@ async function callOpenAiSearchDirect(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
   timeoutMs: number;
+  log?: { info: (obj: Record<string, unknown>, msg: string) => void };
 }): Promise<string> {
   const now = new Date();
   const tz = 'Europe/Paris';
@@ -144,15 +145,10 @@ async function callOpenAiSearchDirect(params: {
   });
   const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
 
-  const systemPrompt = [
-    `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}.`,
-    `Construis toi-meme une requete optimale pour trouver les informations les plus recentes sur le sujet demande.`,
-    `Ta requete DOIT inclure "${monthYear}" pour cibler les resultats recents.`,
-    `Retourne toujours le resultat le plus recent trouve, meme s'il date de quelques jours.`,
-    `FORMAT STRICT: Reponds en une seule phrase naturelle, complete, lisible a voix haute.`,
-    `INTERDIT: tirets, listes, puces, markdown, URLs, liens, noms de sites.`,
-    `Si vraiment aucun resultat: reponds uniquement "Je n'ai pas obtenu cette information."`,
-  ].join(' ');
+  const systemPrompt =
+    `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}. ` +
+    `Cherche les informations les plus recentes sur le sujet demande en utilisant "${monthYear}" dans ta requete. ` +
+    `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
 
   const resp = await fetch(
     `${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
@@ -181,6 +177,7 @@ async function callOpenAiSearchDirect(params: {
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content?.trim();
+  params.log?.info({ content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
   return content || "Je n'ai pas obtenu cette information.";
 }
 
@@ -645,6 +642,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
                 timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                log: app.log,
               })
                 .then((txt): SpecializedResult | null => {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_done');
