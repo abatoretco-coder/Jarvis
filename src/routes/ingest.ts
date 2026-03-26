@@ -142,17 +142,15 @@ async function callOpenAiSearchDirect(params: {
   const dateStr = now.toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
   });
-  const fullDate = now.toLocaleDateString('fr-FR', {
-    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
-  });
   const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
 
   const systemPrompt = [
     `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}.`,
-    `Ta requete de recherche DOIT inclure la date exacte "${fullDate}" pour trouver les evenements les plus recents.`,
-    `Si aucun resultat pour cette date, essaie avec la semaine precedente en gardant "${monthYear}" dans la requete.`,
-    `Retourne toujours le resultat le plus recent trouve, en citant sa date.`,
-    `Reponds en 1 phrase maximum. Texte brut. Zero introduction.`,
+    `Construis toi-meme une requete optimale pour trouver les informations les plus recentes sur le sujet demande.`,
+    `Ta requete DOIT inclure "${monthYear}" pour cibler les resultats recents.`,
+    `Retourne toujours le resultat le plus recent trouve, meme s'il date de quelques jours.`,
+    `FORMAT STRICT: Reponds en une seule phrase naturelle, complete, lisible a voix haute.`,
+    `INTERDIT: tirets, listes, puces, markdown, URLs, liens, noms de sites.`,
     `Si vraiment aucun resultat: reponds uniquement "Je n'ai pas obtenu cette information."`,
   ].join(' ');
 
