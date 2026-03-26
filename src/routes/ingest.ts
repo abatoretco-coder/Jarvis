@@ -125,6 +125,25 @@ function uniqueNonEmpty(values: string[]): string[] {
   return out;
 }
 
+/**
+ * Builds a date/freshness context line injected at the top of messages sent to search agents.
+ * Computed server-side so the agent always receives concrete dates — no Jinja2/HA templates needed.
+ * Example: "[Date: jeudi 26 mars 2026 14:32 Paris. Seuil: apres le 19 mars 2026.]"
+ */
+function buildSearchDateContext(): string {
+  const now = new Date();
+  const tz = 'Europe/Paris';
+  const dateStr = now.toLocaleDateString('fr-FR', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+  });
+  const timeStr = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: tz });
+  const threshold = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+  const thresholdStr = threshold.toLocaleDateString('fr-FR', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+  });
+  return `[Date: ${dateStr} ${timeStr} Paris. Seuil de fraicheur: apres le ${thresholdStr}.]`;
+}
+
 function isElevenLabsEngine(engineId: string): boolean {
   return /elevenlabs/i.test(engineId);
 }
@@ -557,10 +576,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
 
         // HA specialized tasks
+        const agentEntryByAgentId = new Map(agentEntries.map((e) => [e.agentId, e]));
         for (const haTarget of haSpecTargets) {
+          const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
+          const textForTarget = agentEntry?.key === 'search'
+            ? `${buildSearchDateContext()}\n${text}`
+            : text;
           tasks.push(
             conversationService
-              .callHomeAssistantConversation(text, threadId, undefined, haTarget.agentId)
+              .callHomeAssistantConversation(textForTarget, threadId, undefined, haTarget.agentId)
               .then((txt): SpecializedResult | null => {
                 if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
