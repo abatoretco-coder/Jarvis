@@ -126,10 +126,66 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 /**
- * Builds a date/freshness context line injected at the top of messages sent to search agents.
- * Computed server-side so the agent always receives concrete dates — no Jinja2/HA templates needed.
- * Example: "[Date: jeudi 26 mars 2026 14:32 Paris. Seuil: apres le 19 mars 2026.]"
+ * Calls OpenAI gpt-4o-search-preview directly with web_search_options.
+ * Bypasses HA entirely — Jarvis controls the system prompt and embeds concrete dates.
+ * The model receives today's date + freshness threshold in the system prompt,
+ * and the user query is prefixed with the month+year to force a dated search query.
  */
+async function callOpenAiSearchDirect(params: {
+  text: string;
+  openAiApiKey: string;
+  openAiBaseUrl: string;
+  timeoutMs: number;
+}): Promise<string> {
+  const now = new Date();
+  const tz = 'Europe/Paris';
+  const dateStr = now.toLocaleDateString('fr-FR', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+  });
+  const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
+  const threshold = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+  const thresholdStr = threshold.toLocaleDateString('fr-FR', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+  });
+
+  const systemPrompt = [
+    `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}.`,
+    `Seuil de fraicheur: tout resultat anterieur au ${thresholdStr} est invalide.`,
+    `Ta requete de recherche DOIT inclure "${monthYear}" ou la date exacte pour obtenir des resultats recents.`,
+    `Reponds en 1 phrase maximum. Texte brut, zero preamble, zero introduction.`,
+    `Si tu ne trouves pas de resultat posterieur au ${thresholdStr}: reponds uniquement "Je n'ai pas obtenu cette information."`,
+  ].join(' ');
+
+  const resp = await fetch(
+    `${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${params.openAiApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-search-preview',
+        web_search_options: { search_context_size: 'high' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: params.text },
+        ],
+      }),
+      signal: AbortSignal.timeout(params.timeoutMs),
+    },
+  );
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => '');
+    throw new Error(`openai_search_direct_http_${resp.status}: ${body.slice(0, 200)}`);
+  }
+
+  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const content = data.choices?.[0]?.message?.content?.trim();
+  return content || "Je n'ai pas obtenu cette information.";
+}
+
 function buildSearchDateContext(): string {
   const now = new Date();
   const tz = 'Europe/Paris';
@@ -579,28 +635,53 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const agentEntryByAgentId = new Map(agentEntries.map((e) => [e.agentId, e]));
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
-          const textForTarget = agentEntry?.key === 'search'
-            ? `${buildSearchDateContext()}\n${text}`
-            : text;
-          if (agentEntry?.key === 'search') {
-            app.log.info({ threadId, requestId, agent: haTarget.agentId, dateContext: buildSearchDateContext() }, 'search_agent_date_injected');
-          }
-          tasks.push(
-            conversationService
-              .callHomeAssistantConversation(textForTarget, threadId, undefined, haTarget.agentId)
-              .then((txt): SpecializedResult | null => {
-                if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
-                  return null;
-                }
-                app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_done');
-                return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+          const isSearchAgent = agentEntry?.key === 'search';
+
+          if (isSearchAgent) {
+            // Search: call OpenAI directly (gpt-4o-search-preview) — bypass HA entirely.
+            // Jarvis controls the system prompt with concrete dates, forcing dated search queries.
+            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_openai');
+            tasks.push(
+              callOpenAiSearchDirect({
+                text,
+                openAiApiKey: deps.env.OPENAI_API_KEY!,
+                openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
               })
-              .catch((err) => {
-                app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'ha_specialized_agent_failed');
-                return null;
-              }),
-          );
+                .then((txt): SpecializedResult | null => {
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_done');
+                  return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'search_agent_direct_failed_fallback_ha');
+                  // Fallback to HA search agent if direct call fails
+                  return conversationService
+                    .callHomeAssistantConversation(`${buildSearchDateContext()}\n${text}`, threadId, undefined, haTarget.agentId)
+                    .then((txt): SpecializedResult | null => {
+                      if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) return null;
+                      return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                    })
+                    .catch(() => null);
+                }),
+            );
+          } else {
+            tasks.push(
+              conversationService
+                .callHomeAssistantConversation(text, threadId, undefined, haTarget.agentId)
+                .then((txt): SpecializedResult | null => {
+                  if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
+                    app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
+                    return null;
+                  }
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_done');
+                  return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'ha_specialized_agent_failed');
+                  return null;
+                }),
+            );
+          }
         }
 
         const taskResults = await Promise.all(tasks);
