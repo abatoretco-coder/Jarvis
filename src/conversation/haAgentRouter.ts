@@ -56,7 +56,7 @@ export type RouterOptions = {
 
 // System prompt — includes Spotify action catalog so the router can produce direct actions.
 const SYSTEM_PROMPT = `Routing classifier. A message may span multiple domains.
-Return ONLY: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"≤10 words"}.
+Return ONLY valid JSON: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"≤10 words"}.
 Rules: include entry per domain if confidence≥0.5; omit uncertain ones; no extra keys.
 For agentId="spotify": also add "action" (required) and "slots" (optional object).
 Spotify actions: pause; play (resume, no content); next; previous; volume_set{volume_percent:N or volume_delta:±N}; search_and_play{query,type?,device?}; transfer{device}; search{query}; queue_add{query}; now_playing; like_track; shuffle_set{state:on|off}; repeat_set{mode:track|context|off}; list_devices.
