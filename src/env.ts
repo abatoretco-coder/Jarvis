@@ -59,7 +59,7 @@ const envSchema = z
   // Model used by the HA agent router (should be fast + cheap, e.g. gpt-4o-mini)
   OPENAI_MODEL_ROUTER: z.string().default('gpt-4o-mini'),
   // Router circuit breaker settings
-  ROUTER_TIMEOUT_MS: numberFromEnv.default('3500'),
+  ROUTER_TIMEOUT_MS: numberFromEnv.default('6000'),
   ROUTER_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.70),
   OPENAI_TIMEOUT_MS: numberFromEnv.default('12000'),
   OPENAI_STT_TIMEOUT_MS: numberFromEnv.default('10000'),

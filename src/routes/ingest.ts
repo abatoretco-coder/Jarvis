@@ -792,6 +792,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         engineId: `openai:${openAiResult.model}`,
       });
     } catch (err) {
+      // Empty transcript = silence/noise. Skip the HA fallback — HA will also return empty.
+      // Only fall back to HA for real failures (network error, auth, etc.).
+      if (err instanceof Error && err.message === 'openai_stt_empty_transcript') {
+        app.log.info({ engineId: 'openai', voice_turn_id: voiceTurnId || undefined }, 'stt_openai_empty_silence_skip');
+        return reply.code(422).send({ error: 'ha_stt_empty_transcript', engineId: 'openai' });
+      }
       app.log.warn({ err }, 'stt_openai_failed_falling_back_to_ha');
     }
 
