@@ -144,11 +144,12 @@ async function callOpenAiSearchDirect(params: {
   const dateStr = now.toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
   });
-  const monthYear = now.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric', timeZone: tz });
+  const dayStr = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz });
 
   const systemPrompt =
-    `Tu es un assistant de recherche web. Aujourd'hui: ${dateStr}. ` +
-    `Cherche les informations les plus recentes sur le sujet demande en utilisant "${monthYear}" dans ta requete. ` +
+    `Tu es un assistant de recherche web. Nous sommes le ${dateStr}. ` +
+    `IMPORTANT: cherche l'evenement LE PLUS RECENT, le plus proche du ${dayStr}. ` +
+    `Ne retourne pas un ancien evenement si un plus recent existe. ` +
     `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
 
   const usePerplexity = Boolean(params.perplexityApiKey);
