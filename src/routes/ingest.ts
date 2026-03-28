@@ -126,15 +126,16 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 /**
- * Calls OpenAI gpt-4o-search-preview directly with web_search_options.
+ * Calls Perplexity sonar (primary) or OpenAI gpt-4o-search-preview (fallback) for web search.
  * Bypasses HA entirely — Jarvis controls the system prompt and embeds concrete dates.
- * The model receives today's date + freshness threshold in the system prompt,
- * and the user query is prefixed with the month+year to force a dated search query.
  */
 async function callOpenAiSearchDirect(params: {
   text: string;
   openAiApiKey: string;
   openAiBaseUrl: string;
+  perplexityApiKey?: string;
+  perplexityBaseUrl?: string;
+  perplexityModel?: string;
   timeoutMs: number;
   log?: { info: (obj: Record<string, unknown>, msg: string) => void };
 }): Promise<string> {
@@ -150,34 +151,50 @@ async function callOpenAiSearchDirect(params: {
     `Cherche les informations les plus recentes sur le sujet demande en utilisant "${monthYear}" dans ta requete. ` +
     `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
 
+  const usePerplexity = Boolean(params.perplexityApiKey);
+  const apiKey = usePerplexity ? params.perplexityApiKey! : params.openAiApiKey;
+  const baseUrl = usePerplexity
+    ? (params.perplexityBaseUrl ?? 'https://api.perplexity.ai')
+    : params.openAiBaseUrl;
+  const model = usePerplexity
+    ? (params.perplexityModel ?? 'sonar')
+    : 'gpt-4o-search-preview';
+
+  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model }, 'search_agent_provider');
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: params.text },
+    ],
+  };
+  // OpenAI search-preview requires web_search_options; Perplexity does search natively
+  if (!usePerplexity) {
+    body['web_search_options'] = { search_context_size: 'high' };
+  }
+
   const resp = await fetch(
-    `${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
+    `${baseUrl.replace(/\/$/, '')}/chat/completions`,
     {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${params.openAiApiKey}`,
+        authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model: 'gpt-4o-search-preview',
-        web_search_options: { search_context_size: 'high' },
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: params.text },
-        ],
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(params.timeoutMs),
     },
   );
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`openai_search_direct_http_${resp.status}: ${body.slice(0, 200)}`);
+    const rawBody = await resp.text().catch(() => '');
+    throw new Error(`search_direct_http_${resp.status}: ${rawBody.slice(0, 200)}`);
   }
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content?.trim();
-  params.log?.info({ content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
+  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
   return content || "Je n'ai pas obtenu cette information.";
 }
 
@@ -633,7 +650,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const isSearchAgent = agentEntry?.key === 'search';
 
           if (isSearchAgent) {
-            // Search: call OpenAI directly (gpt-4o-search-preview) — bypass HA entirely.
+            // Search: Perplexity sonar (if key configured) or OpenAI gpt-4o-search-preview — bypass HA entirely.
             // Jarvis controls the system prompt with concrete dates, forcing dated search queries.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_openai');
             tasks.push(
@@ -641,6 +658,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 text,
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
+                perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
+                perplexityModel: deps.env.PERPLEXITY_SEARCH_MODEL,
                 timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
                 log: app.log,
               })
