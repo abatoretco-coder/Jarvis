@@ -205,7 +205,14 @@ async function callSearchAgent(
   }
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim();
+  const raw = data.choices?.[0]?.message?.content?.trim();
+  // Strip Perplexity citation markers [1], [2][3], bold markers **, and leftover markdown
+  const content = raw
+    ?.replace(/\[\d+\]/g, '')       // [1] [2] [3]
+    ?.replace(/\*\*(.+?)\*\*/g, '$1') // **bold** → bold
+    ?.replace(/\*(.+?)\*/g, '$1')    // *italic* → italic
+    ?.replace(/\s{2,}/g, ' ')        // multiple spaces
+    ?.trim();
   params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey, content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
   return content || "Je n'ai pas obtenu cette information.";
 }
