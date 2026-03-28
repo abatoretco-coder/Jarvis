@@ -148,9 +148,12 @@ async function callOpenAiSearchDirect(params: {
 
   const systemPrompt =
     `Tu es un assistant de recherche web. Nous sommes le ${dateStr}. ` +
-    `IMPORTANT: cherche l'evenement LE PLUS RECENT, le plus proche du ${dayStr}. ` +
-    `Ne retourne pas un ancien evenement si un plus recent existe. ` +
+    `Retourne UNIQUEMENT l'evenement le plus recent disponible dans tes resultats. ` +
     `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
+
+  // Inject date into the user query — Perplexity builds its web search query from the user message.
+  // Appending the date forces the search engine to anchor on recent results.
+  const userQuery = `${params.text} (en date du ${dayStr})`;
 
   const usePerplexity = Boolean(params.perplexityApiKey);
   const apiKey = usePerplexity ? params.perplexityApiKey! : params.openAiApiKey;
@@ -167,11 +170,14 @@ async function callOpenAiSearchDirect(params: {
     model,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: params.text },
+      { role: 'user', content: userQuery },
     ],
   };
-  // OpenAI search-preview requires web_search_options; Perplexity does search natively
-  if (!usePerplexity) {
+  // Perplexity: restrict index to the last month for freshness
+  if (usePerplexity) {
+    body['search_recency_filter'] = 'month';
+  } else {
+    // OpenAI search-preview requires web_search_options
     body['web_search_options'] = { search_context_size: 'high' };
   }
 
