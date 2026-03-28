@@ -27,10 +27,15 @@ export interface SearchAgentConfig {
   languagePreference?: string;
 }
 
-const FORMAT_SHORT =
-  'Reponds en une ou deux phrases naturelles. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
-const FORMAT_LONG =
-  'Reponds de facon detaillee mais concise. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
+const FORMAT_STRICT =
+  'Reponds en UNE SEULE phrase courte. ' +
+  'Reponds UNIQUEMENT a ce qui est demande, rien de plus. ' +
+  'Pas de contexte supplementaire, pas de match suivant, pas de classement, pas de details non demandes. ' +
+  'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
+const FORMAT_DETAILED =
+  'Reponds en deux ou trois phrases maximum. ' +
+  'Reponds uniquement a ce qui est demande, sans ajouter d\'information non sollicitee. ' +
+  'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
 
 const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   /**
@@ -44,10 +49,10 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     temperature: 0.1,
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant avec acces au web en temps reel. Nous sommes le ${dateStr}. ` +
-      `Effectue une recherche web et rapporte l'evenement LE PLUS RECENT disponible. ` +
-      FORMAT_SHORT,
+      `Effectue une recherche web et rapporte L'INFORMATION LA PLUS RECENTE disponible. ` +
+      FORMAT_STRICT,
     buildUserQuery: (text, dayStr) =>
-      `${text} (actualite recente, en date du ${dayStr})`,
+      `${text} (en date du ${dayStr}, resultat le plus recent uniquement)`,
     searchAfterDays: 7,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
@@ -64,7 +69,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant avec acces au web. Nous sommes le ${dateStr}. ` +
       `Reponds de facon precise et factuelle. ` +
-      FORMAT_SHORT,
+      FORMAT_STRICT,
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
@@ -82,7 +87,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant expert avec acces au web. Nous sommes le ${dateStr}. ` +
       `Analyse en profondeur et synthetise les informations disponibles sur plusieurs sources. ` +
-      FORMAT_LONG,
+      FORMAT_DETAILED,
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
