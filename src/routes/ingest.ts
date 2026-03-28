@@ -210,19 +210,6 @@ async function callSearchAgent(
   return content || "Je n'ai pas obtenu cette information.";
 }
 
-function buildSearchDateContext(): string {
-  const now = new Date();
-  const tz = 'Europe/Paris';
-  const dateStr = now.toLocaleDateString('fr-FR', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
-  });
-  const timeStr = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: tz });
-  const threshold = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
-  const thresholdStr = threshold.toLocaleDateString('fr-FR', {
-    day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
-  });
-  return `[Date: ${dateStr} ${timeStr} Paris. Seuil de fraicheur: apres le ${thresholdStr}.]`;
-}
 
 function isElevenLabsEngine(engineId: string): boolean {
   return /elevenlabs/i.test(engineId);
@@ -680,15 +667,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                 })
                 .catch((err) => {
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'search_agent_direct_failed_fallback_ha');
-                  // Fallback to HA search agent if direct call fails
-                  return conversationService
-                    .callHomeAssistantConversation(`${buildSearchDateContext()}\n${text}`, threadId, undefined, haTarget.agentId)
-                    .then((txt): SpecializedResult | null => {
-                      if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) return null;
-                      return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
-                    })
-                    .catch(() => null);
+                  // Search agents bypass HA entirely — no HA entity exists for them.
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, searchAgentKey, err }, 'search_agent_direct_failed');
+                  return null;
                 }),
             );
           } else {

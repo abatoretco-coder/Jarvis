@@ -1,12 +1,15 @@
 /**
- * Search agent registry — each entry defines a Perplexity/OpenAI search strategy.
- * The agent key matches HA_AGENT_MAP entries (key.startsWith('search')).
+ * Search agent registry.
+ *
+ * Each entry defines a Perplexity/OpenAI search strategy keyed by the
+ * HA_AGENT_MAP `key` field. Any key equal to "search" or starting with
+ * "search." is handled as a direct search agent (bypasses Home Assistant).
  *
  * Agents:
- *   search.news  — recent events, sport, weather, live results  (sonar)
- *   search.web   — factual quick lookups, definitions, prices   (sonar)
- *   search.deep  — in-depth analysis, history, comparisons       (sonar-pro)
- *   search       — backward-compat alias for search.web
+ *   search.news  — very recent events, sport, weather, live results     (sonar)
+ *   search.web   — factual quick lookups, definitions, prices, people    (sonar)
+ *   search.deep  — in-depth analysis, history, comparisons, biographies  (sonar-pro)
+ *   search       — legacy backward-compat alias → search.web
  */
 
 export interface SearchAgentConfig {
@@ -86,17 +89,20 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   },
 };
 
-// Backward-compat: bare 'search' key → same behaviour as search.web
+// Legacy backward-compat: bare 'search' key behaves like search.web.
 SEARCH_AGENTS_MAP['search'] = { ...SEARCH_AGENTS_MAP['search.web']!, key: 'search' };
 
-export const SEARCH_AGENTS: Readonly<Record<string, SearchAgentConfig>> = SEARCH_AGENTS_MAP;
+const SEARCH_AGENTS: Readonly<Record<string, SearchAgentConfig>> = SEARCH_AGENTS_MAP;
 
-/** Returns config for a given agent key; falls back to search.web if unknown. */
+/** Returns config for a given agent key; falls back to search.web for unknown keys. */
 export function getSearchAgentConfig(key: string): SearchAgentConfig {
   return SEARCH_AGENTS[key] ?? SEARCH_AGENTS['search.web']!;
 }
 
-/** Returns true for any key that should be handled as a direct search agent (bypasses HA). */
+/**
+ * Returns true for any HA_AGENT_MAP key that should be handled as a direct
+ * Perplexity/OpenAI search agent (bypasses Home Assistant).
+ */
 export function isSearchAgentKey(key: string | undefined): key is string {
   if (!key) return false;
   return key === 'search' || key.startsWith('search.');

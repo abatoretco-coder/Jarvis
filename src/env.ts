@@ -55,9 +55,9 @@ const envSchema = z
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
 
-  // Perplexity — used for real-time search (sonar / sonar-pro). Takes priority over gpt-4o-search-preview.
+  // Perplexity — used for real-time search (sonar/sonar-pro per agent config). Takes priority over gpt-4o-search-preview.
+  // Model is selected per search agent in src/search/agents.ts — no global override needed.
   PERPLEXITY_API_KEY: optionalNonEmptyString,
-  PERPLEXITY_SEARCH_MODEL: z.string().default('sonar-pro'),
   PERPLEXITY_BASE_URL: z.string().url().default('https://api.perplexity.ai'),
   OPENAI_MODEL_SUMMARY: z.string().default('gpt-4o-mini'),
   OPENAI_MODEL_MUSIC_AGENT: z.string().default('gpt-4o-mini'),
