@@ -28,13 +28,12 @@ export interface SearchAgentConfig {
 }
 
 const FORMAT_STRICT =
-  'Reponds en UNE SEULE phrase courte. ' +
-  'Reponds UNIQUEMENT a ce qui est demande, rien de plus. ' +
-  'Pas de contexte supplementaire, pas de match suivant, pas de classement, pas de details non demandes. ' +
+  'Reponds en UNE phrase tres courte (max 15 mots). ' +
+  'Uniquement ce qui est demande, rien d\'autre. ' +
   'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
 const FORMAT_DETAILED =
-  'Reponds en deux ou trois phrases maximum. ' +
-  'Reponds uniquement a ce qui est demande, sans ajouter d\'information non sollicitee. ' +
+  'Reponds en deux phrases maximum. ' +
+  'Uniquement ce qui est demande, sans information non sollicitee. ' +
   'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
 
 const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
