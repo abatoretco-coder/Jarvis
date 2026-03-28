@@ -28,7 +28,7 @@ export interface SearchAgentConfig {
 }
 
 const FORMAT_STRICT =
-  'Reponds en UNE phrase tres courte (max 15 mots). ' +
+  'Reponds en une phrase naturelle et concise (max 20 mots). ' +
   'Uniquement ce qui est demande, rien d\'autre. ' +
   'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
 const FORMAT_DETAILED =
