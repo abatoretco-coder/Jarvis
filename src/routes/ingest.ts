@@ -8,6 +8,7 @@ import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/Co
 import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID } from '../conversation/haAgentRouter';
 import { resolveDeterministicIntentReply } from '../conversation/deterministicIntents';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
+import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import {
   createConversationDb,
   SqliteMessageRepository,
@@ -126,19 +127,22 @@ function uniqueNonEmpty(values: string[]): string[] {
 }
 
 /**
- * Calls Perplexity sonar (primary) or OpenAI gpt-4o-search-preview (fallback) for web search.
- * Bypasses HA entirely — Jarvis controls the system prompt and embeds concrete dates.
+ * Calls the appropriate Perplexity/OpenAI search agent based on a SearchAgentConfig.
+ * Bypasses HA entirely — config controls model, prompt, and filters per agent type.
  */
-async function callOpenAiSearchDirect(params: {
-  text: string;
-  openAiApiKey: string;
-  openAiBaseUrl: string;
-  perplexityApiKey?: string;
-  perplexityBaseUrl?: string;
-  perplexityModel?: string;
-  timeoutMs: number;
-  log?: { info: (obj: Record<string, unknown>, msg: string) => void };
-}): Promise<string> {
+async function callSearchAgent(
+  agentKey: string,
+  params: {
+    text: string;
+    openAiApiKey: string;
+    openAiBaseUrl: string;
+    perplexityApiKey?: string;
+    perplexityBaseUrl?: string;
+    timeoutMs: number;
+    log?: { info: (obj: Record<string, unknown>, msg: string) => void };
+  },
+): Promise<string> {
+  const config = getSearchAgentConfig(agentKey);
   const now = new Date();
   const tz = 'Europe/Paris';
   const dateStr = now.toLocaleDateString('fr-FR', {
@@ -146,50 +150,41 @@ async function callOpenAiSearchDirect(params: {
   });
   const dayStr = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz });
 
-  const systemPrompt =
-    `Tu es un assistant avec acces au web en temps reel. Nous sommes le ${dateStr}. ` +
-    `Effectue une recherche web et rapporte le resultat le plus recent que tu trouves. ` +
-    `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
-
-  // Inject date into the user query — Perplexity builds its web search query from the user message.
-  const userQuery = `${params.text} (resultats les plus recents, en date du ${dayStr})`;
+  const systemPrompt = config.buildSystemPrompt(dateStr);
+  const userQuery = config.buildUserQuery(params.text, dayStr);
 
   const usePerplexity = Boolean(params.perplexityApiKey);
   const apiKey = usePerplexity ? params.perplexityApiKey! : params.openAiApiKey;
   const baseUrl = usePerplexity
     ? (params.perplexityBaseUrl ?? 'https://api.perplexity.ai')
     : params.openAiBaseUrl;
-  const model = usePerplexity
-    ? (params.perplexityModel ?? 'sonar')
-    : 'gpt-4o-search-preview';
+  const model = usePerplexity ? config.model : config.openAiModel;
 
-  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model }, 'search_agent_provider');
+  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey }, 'search_agent_provider');
 
   const body: Record<string, unknown> = {
     model,
-    temperature: 0.1,
+    temperature: config.temperature,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userQuery },
     ],
   };
+
   if (usePerplexity) {
-    // search_after_date_filter: concrete date 30 days ago (MM/DD/YYYY) — more precise than recency bucket
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
-    const mm = String(thirtyDaysAgo.getMonth() + 1).padStart(2, '0');
-    const dd = String(thirtyDaysAgo.getDate()).padStart(2, '0');
-    const yyyy = thirtyDaysAgo.getFullYear();
-    body['search_after_date_filter'] = `${mm}/${dd}/${yyyy}`;
-    // Prefer French and English sources for sports news
-    body['search_language_filter'] = ['fr', 'en'];
-    // Prefer French responses
-    body['language_preference'] = 'fr';
+    if (config.searchAfterDays != null) {
+      const cutoff = new Date(Date.now() - config.searchAfterDays * 24 * 3600 * 1000);
+      const mm = String(cutoff.getMonth() + 1).padStart(2, '0');
+      const dd = String(cutoff.getDate()).padStart(2, '0');
+      body['search_after_date_filter'] = `${mm}/${dd}/${cutoff.getFullYear()}`;
+    }
+    if (config.searchLanguageFilter) body['search_language_filter'] = config.searchLanguageFilter;
+    if (config.languagePreference) body['language_preference'] = config.languagePreference;
   } else {
-    // OpenAI search-preview requires web_search_options
     body['web_search_options'] = { search_context_size: 'high' };
   }
 
-  // Perplexity native endpoint: /v1/sonar  |  OpenAI-compat fallback: /chat/completions
+  // Perplexity native endpoint: /v1/sonar  |  OpenAI-compat: /chat/completions
   const chatPath = usePerplexity ? '/v1/sonar' : '/chat/completions';
   const resp = await fetch(
     `${baseUrl.replace(/\/$/, '')}${chatPath}`,
@@ -211,7 +206,7 @@ async function callOpenAiSearchDirect(params: {
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content?.trim();
-  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
+  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey, content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
   return content || "Je n'ai pas obtenu cette information.";
 }
 
@@ -664,20 +659,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const agentEntryByAgentId = new Map(agentEntries.map((e) => [e.agentId, e]));
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
-          const isSearchAgent = agentEntry?.key === 'search';
+          const isSearchAgent = isSearchAgentKey(agentEntry?.key);
 
           if (isSearchAgent) {
-            // Search: Perplexity sonar (if key configured) or OpenAI gpt-4o-search-preview — bypass HA entirely.
-            // Jarvis controls the system prompt with concrete dates, forcing dated search queries.
-            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_openai');
+            // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
+            const searchAgentKey = agentEntry!.key ?? 'search';
+            app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
             tasks.push(
-              callOpenAiSearchDirect({
+              callSearchAgent(searchAgentKey, {
                 text,
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
                 perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
                 perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
-                perplexityModel: deps.env.PERPLEXITY_SEARCH_MODEL,
                 timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
                 log: app.log,
               })
