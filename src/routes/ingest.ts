@@ -147,13 +147,12 @@ async function callOpenAiSearchDirect(params: {
   const dayStr = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz });
 
   const systemPrompt =
-    `Tu es un assistant de recherche web. Nous sommes le ${dateStr}. ` +
-    `Retourne UNIQUEMENT l'evenement le plus recent disponible dans tes resultats. ` +
+    `Tu es un assistant avec acces au web en temps reel. Nous sommes le ${dateStr}. ` +
+    `Effectue une recherche web et rapporte le resultat le plus recent que tu trouves. ` +
     `Reponds en une seule phrase naturelle. Pas de tirets, pas de listes, pas de liens, pas de noms de sites.`;
 
   // Inject date into the user query — Perplexity builds its web search query from the user message.
-  // Appending the date forces the search engine to anchor on recent results.
-  const userQuery = `${params.text} (en date du ${dayStr})`;
+  const userQuery = `${params.text} (resultats les plus recents, en date du ${dayStr})`;
 
   const usePerplexity = Boolean(params.perplexityApiKey);
   const apiKey = usePerplexity ? params.perplexityApiKey! : params.openAiApiKey;
@@ -168,21 +167,32 @@ async function callOpenAiSearchDirect(params: {
 
   const body: Record<string, unknown> = {
     model,
+    temperature: 0.1,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userQuery },
     ],
   };
-  // Perplexity: restrict index to the last month for freshness
   if (usePerplexity) {
-    body['search_recency_filter'] = 'month';
+    // search_after_date_filter: concrete date 30 days ago (MM/DD/YYYY) — more precise than recency bucket
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const mm = String(thirtyDaysAgo.getMonth() + 1).padStart(2, '0');
+    const dd = String(thirtyDaysAgo.getDate()).padStart(2, '0');
+    const yyyy = thirtyDaysAgo.getFullYear();
+    body['search_after_date_filter'] = `${mm}/${dd}/${yyyy}`;
+    // Prefer French and English sources for sports news
+    body['search_language_filter'] = ['fr', 'en'];
+    // Prefer French responses
+    body['language_preference'] = 'fr';
   } else {
     // OpenAI search-preview requires web_search_options
     body['web_search_options'] = { search_context_size: 'high' };
   }
 
+  // Perplexity native endpoint: /v1/sonar  |  OpenAI-compat fallback: /chat/completions
+  const chatPath = usePerplexity ? '/v1/sonar' : '/chat/completions';
   const resp = await fetch(
-    `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+    `${baseUrl.replace(/\/$/, '')}${chatPath}`,
     {
       method: 'POST',
       headers: {
