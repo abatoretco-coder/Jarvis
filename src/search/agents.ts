@@ -33,13 +33,30 @@ export interface SearchAgentConfig {
   languagePreference?: string;
 }
 
+/**
+ * Anti-hallucination clause — appended to every system prompt.
+ * Doc Perplexity: instruct the model to acknowledge when information is not found
+ * rather than speculating. The search component ignores the system prompt;
+ * only the generation component reads it, which is exactly where this matters.
+ */
+const NO_HALLUCINATION =
+  'Si l\'information n\'est pas disponible dans les resultats de recherche, ' +
+  'indique-le clairement plutot que de speculer.';
+
+/**
+ * FORMAT_STRICT — one natural sentence, no formatting noise.
+ * Note: do NOT include search-control instructions here (date, domain, etc.);
+ * those are handled by dedicated API parameters, not by the system prompt.
+ */
 const FORMAT_STRICT =
   'Reponds en une phrase naturelle et concise (max 20 mots). ' +
   'Uniquement ce qui est demande, rien d\'autre. ' +
   'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
+
+/** FORMAT_DETAILED — two sentences max, factual synthesis. */
 const FORMAT_DETAILED =
-  'Reponds en deux phrases maximum. ' +
-  'Uniquement ce qui est demande, sans information non sollicitee. ' +
+  'Reponds en deux phrases maximum, precises et factuelles. ' +
+  'Uniquement ce qui est demande. ' +
   'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
 
 const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
@@ -54,12 +71,16 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     temperature: 0.1,
     topP: 0.9,
     maxTokens: 120,
+    // NOTE: system prompt is read by the generation component only — NOT the search
+    // component. Search freshness is enforced by searchAfterDays + searchRecencyFilter.
     buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant avec acces au web en temps reel. Nous sommes le ${dateStr}. ` +
-      `Effectue une recherche web et rapporte L'INFORMATION LA PLUS RECENTE disponible. ` +
-      FORMAT_STRICT,
-    buildUserQuery: (text, dayStr) =>
-      `${text} (en date du ${dayStr}, resultat le plus recent uniquement)`,
+      `Tu es un assistant factuel informe des evenements recents. Nous sommes le ${dateStr}. ` +
+      `Utilise uniquement les informations disponibles dans les resultats de recherche. ` +
+      NO_HALLUCINATION + ' ' + FORMAT_STRICT,
+    // Pass the user query as-is — API params (search_after_date_filter, search_recency_filter)
+    // already constrain the search index to recent content. Adding date suffixes to the
+    // user query is explicitly discouraged by Perplexity (prompt-based search control is ineffective).
+    buildUserQuery: (text) => text,
     searchAfterDays: 7,
     searchRecencyFilter: 'week',
     searchLanguageFilter: ['fr', 'en'],
@@ -77,9 +98,9 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     topP: 0.9,
     maxTokens: 120,
     buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant avec acces au web. Nous sommes le ${dateStr}. ` +
-      `Reponds de facon precise et factuelle. ` +
-      FORMAT_STRICT,
+      `Tu es un assistant factuel. Nous sommes le ${dateStr}. ` +
+      `Utilise uniquement les informations disponibles dans les resultats de recherche. ` +
+      NO_HALLUCINATION + ' ' + FORMAT_STRICT,
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
@@ -96,10 +117,13 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     temperature: 0.3,
     topP: 0.9,
     maxTokens: 400,
+    // sonar-pro performs multi-source synthesis natively. The system prompt focuses
+    // on generation quality: synthesis, factuality, and clear uncertainty disclosure.
     buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant expert avec acces au web. Nous sommes le ${dateStr}. ` +
-      `Analyse en profondeur et synthetise les informations disponibles sur plusieurs sources. ` +
-      FORMAT_DETAILED,
+      `Tu es un assistant expert en recherche approfondie. Nous sommes le ${dateStr}. ` +
+      `Synthetise les informations de plusieurs sources en donnant une reponse complete et nuancee. ` +
+      `Mets en avant les elements cles, les dates importantes et les chiffres pertinents si disponibles. ` +
+      NO_HALLUCINATION + ' ' + FORMAT_DETAILED,
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
