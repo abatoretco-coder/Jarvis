@@ -19,10 +19,16 @@ export interface SearchAgentConfig {
   /** OpenAI fallback model used when no Perplexity key */
   openAiModel: string;
   temperature: number;
+  /** Nucleus sampling — use 0.9 for factual, higher for creative */
+  topP: number;
+  /** Hard cap on completion tokens — enforces conciseness at API level */
+  maxTokens: number;
   buildSystemPrompt: (dateStr: string) => string;
   buildUserQuery: (text: string, dayStr: string) => string;
   /** Restrict index to results after this many days ago (Perplexity only) */
   searchAfterDays?: number;
+  /** Perplexity recency bucket filter — complementary to searchAfterDays */
+  searchRecencyFilter?: 'hour' | 'day' | 'week' | 'month' | 'year';
   searchLanguageFilter?: string[];
   languagePreference?: string;
 }
@@ -46,6 +52,8 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     model: 'sonar',
     openAiModel: 'gpt-4o-search-preview',
     temperature: 0.1,
+    topP: 0.9,
+    maxTokens: 120,
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant avec acces au web en temps reel. Nous sommes le ${dateStr}. ` +
       `Effectue une recherche web et rapporte L'INFORMATION LA PLUS RECENTE disponible. ` +
@@ -53,6 +61,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     buildUserQuery: (text, dayStr) =>
       `${text} (en date du ${dayStr}, resultat le plus recent uniquement)`,
     searchAfterDays: 7,
+    searchRecencyFilter: 'week',
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
   },
@@ -64,7 +73,9 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     key: 'search.web',
     model: 'sonar',
     openAiModel: 'gpt-4o-search-preview',
-    temperature: 0.2,
+    temperature: 0.1,
+    topP: 0.9,
+    maxTokens: 120,
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant avec acces au web. Nous sommes le ${dateStr}. ` +
       `Reponds de facon precise et factuelle. ` +
@@ -83,6 +94,8 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     model: 'sonar-pro',
     openAiModel: 'gpt-4o-search-preview',
     temperature: 0.3,
+    topP: 0.9,
+    maxTokens: 400,
     buildSystemPrompt: (dateStr) =>
       `Tu es un assistant expert avec acces au web. Nous sommes le ${dateStr}. ` +
       `Analyse en profondeur et synthetise les informations disponibles sur plusieurs sources. ` +

@@ -165,6 +165,8 @@ async function callSearchAgent(
   const body: Record<string, unknown> = {
     model,
     temperature: config.temperature,
+    top_p: config.topP,
+    max_tokens: config.maxTokens,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userQuery },
@@ -172,12 +174,14 @@ async function callSearchAgent(
   };
 
   if (usePerplexity) {
+    body['return_related_questions'] = false;
     if (config.searchAfterDays != null) {
       const cutoff = new Date(Date.now() - config.searchAfterDays * 24 * 3600 * 1000);
       const mm = String(cutoff.getMonth() + 1).padStart(2, '0');
       const dd = String(cutoff.getDate()).padStart(2, '0');
       body['search_after_date_filter'] = `${mm}/${dd}/${cutoff.getFullYear()}`;
     }
+    if (config.searchRecencyFilter) body['search_recency_filter'] = config.searchRecencyFilter;
     if (config.searchLanguageFilter) body['search_language_filter'] = config.searchLanguageFilter;
     if (config.languagePreference) body['language_preference'] = config.languagePreference;
   } else {
