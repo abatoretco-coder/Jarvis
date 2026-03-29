@@ -6,7 +6,6 @@ import { z } from 'zod';
 
 import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/ConversationService';
 import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID } from '../conversation/haAgentRouter';
-import { resolveDeterministicIntentReply } from '../conversation/deterministicIntents';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import {
@@ -452,40 +451,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (!text) {
       return reply.code(400).send({ error: 'invalid_body', message: 'text is required when domain/action is not provided' });
-    }
-
-    const deterministicReply = resolveDeterministicIntentReply(text);
-    if (deterministicReply) {
-      await conversationService.persistMessages(threadId, text, deterministicReply.responseText);
-
-      if (await summarizationService.shouldPresummarize(threadId)) {
-        summarizationService.startPresummarize(threadId);
-      }
-
-      recordPerf('ingest', Date.now() - t0);
-      app.log.info(
-        {
-          threadId,
-          requestId,
-          correlation_id: correlationId || undefined,
-          voice_turn_id: voiceTurnId || undefined,
-          intent: deterministicReply.intent,
-          target: deterministicReply.target,
-          elapsed_ms: Date.now() - t0,
-        },
-        'ingest_deterministic_reply_done'
-      );
-
-      return reply.code(200).send({
-        threadId,
-        responseText: deterministicReply.responseText,
-        status: 'success',
-        deterministic: {
-          intent: deterministicReply.intent,
-          ...(deterministicReply.target ? { target: deterministicReply.target } : {}),
-        },
-        ...(correlationId ? { correlation_id: correlationId } : {}),
-      });
     }
 
     app.log.info(
