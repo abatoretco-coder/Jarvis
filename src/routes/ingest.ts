@@ -548,16 +548,26 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         // Spotify task
         if (spotifyTarget) {
-          // When the router already resolved the Spotify action directly, use it.
-          // Fall back to the music planner only when the router didn't specify an action.
+          // When the router already resolved the Spotify action directly, use it —
+          // EXCEPT for search_and_play without a query slot: the router reliably picks
+          // the action but often omits the query. Fall through to the music planner
+          // in that case so it can extract the proper search terms from the text.
           const routerActionParsed = spotifyTarget.action ? spotifyActionSchema.safeParse(spotifyTarget.action) : null;
-          const resolveSpotifyPayload = (routerActionParsed?.success)
+          const routerHasUsableSearchAndPlay =
+            routerActionParsed?.success &&
+            routerActionParsed.data === 'search_and_play' &&
+            typeof (spotifyTarget.slots as Record<string, unknown> | undefined)?.['query'] === 'string' &&
+            ((spotifyTarget.slots as Record<string, unknown>)['query'] as string).trim().length > 0;
+          const routerDirectUsable =
+            routerActionParsed?.success &&
+            (routerActionParsed.data !== 'search_and_play' || routerHasUsableSearchAndPlay);
+          const resolveSpotifyPayload = routerDirectUsable
             ? Promise.resolve({
                 route: 'spotify' as const,
-                reason: `router_direct:${routerActionParsed.data}`,
+                reason: `router_direct:${routerActionParsed!.data}`,
                 request: {
                   domain: 'spotify' as const,
-                  action: routerActionParsed.data,
+                  action: routerActionParsed!.data,
                   slots: spotifyTarget.slots ?? {},
                   text,
                 },
