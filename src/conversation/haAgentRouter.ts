@@ -62,7 +62,8 @@ Return ONLY valid JSON: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reas
 Rules: include entry per domain if confidence≥0.5; omit uncertain ones; no extra keys.
 For agentId="spotify": also add "action" (required) and "slots" (optional object).
 Spotify actions: pause; play (resume, no content); next; previous; volume_set{volume_percent:N or volume_delta:±N}; search_and_play{query,type?,device?}; transfer{device}; search{query}; queue_add{query}; now_playing; like_track; shuffle_set{state:on|off}; repeat_set{mode:track|context|off}; list_devices.
-Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→search_and_play+device; artiste|album|titre|playlist|genre→search_and_play; reprends|joue|lance sans device sans contenu→play; musique générique sans device→search_and_play{query:"musique"}.
+Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→search_and_play+device; artiste|album|titre|playlist|genre→search_and_play; reprends|joue|lance sans device sans contenu→play; toute demande musicale avec style/ambiance/genre/humeur→search_and_play{query:<termes extraits>}; musique générique sans aucun terme→search_and_play{query:"musique"}.
+search_and_play query rules: ALWAYS populate "query" with the most relevant extracted search terms from the user message (genre, mood, artist, style, etc.). NEVER emit search_and_play with an empty or missing query — if unsure, use the raw user text as query.
 Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".`;
 
 function buildUserPrompt(params: {
