@@ -139,6 +139,32 @@ const envSchema = z
 
   // Optional: expose a minimal Home Assistant entity index for mapping/disambiguation
   EXPOSE_HA_INDEX: booleanFromEnv.default('false'),
+
+  // ── Microsoft Graph — Todo agent + Outlook mail agent ───────────────────────
+  // Required for todo.* and mail.* (outlook) sub-agents.
+  // Register an app at https://portal.azure.com → Azure Active Directory → App registrations.
+  // Scopes needed: Tasks.ReadWrite, Mail.ReadWrite, Mail.Send, offline_access
+  // MICROSOFT_TENANT_ID: use "common" for personal accounts, your tenant UUID for corporate.
+  MICROSOFT_TENANT_ID:     z.string().default('common'),
+  MICROSOFT_CLIENT_ID:     optionalNonEmptyString,
+  MICROSOFT_CLIENT_SECRET: optionalNonEmptyString,
+  MICROSOFT_REFRESH_TOKEN: optionalNonEmptyString,
+
+  // ── Google — Gmail mail agent ────────────────────────────────────────────────
+  // Required for mail.* (gmail) sub-agent.
+  // Create OAuth2 credentials at https://console.cloud.google.com → APIs & Services → Credentials.
+  // Scopes needed: https://mail.google.com/ (full access) or granular send/read scopes.
+  GOOGLE_CLIENT_ID:     optionalNonEmptyString,
+  GOOGLE_CLIENT_SECRET: optionalNonEmptyString,
+  GOOGLE_REFRESH_TOKEN: optionalNonEmptyString,
+
+  // ── Mail provider override ────────────────────────────────────────────────────
+  // When both Google and Microsoft credentials are set, force a specific provider.
+  // Values: "gmail" | "outlook" — default: auto (Gmail takes priority).
+  MAIL_PROVIDER: z.preprocess(
+    (v) => (typeof v === 'string' ? v.trim().toLowerCase() || undefined : v),
+    z.enum(['gmail', 'outlook']).optional(),
+  ),
 })
   .transform((value) => ({
     ...value,

@@ -64,7 +64,10 @@ For agentId="spotify": also add "action" (required) and "slots" (optional object
 Spotify actions: pause; play (resume, no content); next; previous; volume_set{volume_percent:N or volume_delta:±N}; search_and_play{query,type?,device?}; transfer{device}; search{query}; queue_add{query}; now_playing; like_track; shuffle_set{state:on|off}; repeat_set{mode:track|context|off}; list_devices.
 Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→search_and_play+device; artiste|album|titre|playlist|genre→search_and_play; reprends|joue|lance sans device sans contenu→play; toute demande musicale avec style/ambiance/genre/humeur→search_and_play{query:<termes extraits>}; musique générique sans aucun terme→search_and_play{query:"musique"}.
 search_and_play query rules: ALWAYS populate "query" with the most relevant extracted search terms from the user message (genre, mood, artist, style, etc.). NEVER emit search_and_play with an empty or missing query — if unsure, use the raw user text as query.
-Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".`;
+Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".
+Action vs search disambiguation: imperative verbs (met, mets, crée, règle, programme, allume, éteins, démarre, active, lance, exécute) targeting home automation objects (rappel, minuteur, timer, alarme, script, lumière, prise, appareil, scène) → executors agent, NOT search agents. NEVER route action commands to search.news/search.web/search.deep.
+todo agent (if present) → Microsoft To Do CRUD only (ajouter/lister/modifier/terminer tâches et sous-tâches To Do, listes To Do). NOT executors.
+mail agent (if present) → email read/send/reply/forward/trash (Gmail or Outlook). NOT executors. NOT search agents.`;
 
 function buildUserPrompt(params: {
   text: string;
@@ -126,7 +129,7 @@ export async function routeToHaAgent(params: {
         body: JSON.stringify({
           model: options.model,
           temperature: 0,
-          max_tokens: 250,
+          max_tokens: 400,
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -217,4 +220,89 @@ export function parseAgentMap(raw: string | undefined): HaAgentEntry[] {
       return { agentId, hint, ...(key ? { key } : {}) };
     })
     .filter((e): e is HaAgentEntry => e !== null);
+}
+
+/**
+ * Synthesize multiple sub-agent responses into a single coherent French reply.
+ *
+ * Called by the orchestrator when ≥2 specialized agents returned results for
+ * the same user message (e.g. "joue du jazz et donne-moi les nouvelles").
+ * Falls back to a plain join when the LLM call fails.
+ */
+export async function synthesizeAgentResponses(params: {
+  userText: string;
+  parts: { agentId: string; text: string }[];
+  options: {
+    openAiApiKey: string;
+    openAiBaseUrl: string;
+    model: string;
+    timeoutMs: number;
+    log?: MinLogger;
+  };
+}): Promise<string> {
+  const { options } = params;
+
+  const agentLines = params.parts
+    .map((p, i) => `[Sous-agent ${i + 1}]: ${p.text.trim()}`)
+    .join('\n');
+
+  const systemPrompt =
+    'Tu es un assistant vocal français. ' +
+    'Plusieurs sous-agents ont chacun traité une partie de la demande de l\'utilisateur. ' +
+    'Synthétise leurs réponses en une seule réponse naturelle, fluide et concise. ' +
+    'Ne répète pas les réponses mot pour mot — fusionne-les intelligemment. ' +
+    'Ne mentionne jamais les noms d\'agents ni les termes techniques. ' +
+    'Réponds uniquement par la synthèse, sans phrase d\'introduction ni de conclusion.';
+
+  const userPrompt =
+    `Demande originale de l'utilisateur : "${params.userText}"\n\n` +
+    `Réponses des sous-agents :\n${agentLines}\n\nSynthèse :`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs);
+
+  try {
+    const response = await fetch(
+      `${options.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${options.openAiApiKey}`,
+        },
+        body: JSON.stringify({
+          model: options.model,
+          temperature: 0.3,
+          max_tokens: 350,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) {
+      options.log?.warn({ status: response.status }, 'synthesize_agent_responses_http_error');
+      throw new Error(`synthesizer_http_${response.status}`);
+    }
+
+    const raw = (await response.json()) as Record<string, unknown>;
+    const content =
+      (raw?.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? '';
+    return content.trim() || fallbackJoin(params.parts);
+  } catch (err) {
+    options.log?.warn({ err }, 'synthesize_agent_responses_failed_fallback');
+    return fallbackJoin(params.parts);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function fallbackJoin(parts: { text: string }[]): string {
+  return parts
+    .map((p) => p.text.trim().replace(/\.?\s*$/, ''))
+    .join('. ')
+    .concat('.');
 }

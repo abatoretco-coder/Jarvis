@@ -5,9 +5,11 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/ConversationService';
-import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID } from '../conversation/haAgentRouter';
+import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentResponses } from '../conversation/haAgentRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
+import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
+import { callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import {
   createConversationDb,
   SqliteMessageRepository,
@@ -174,13 +176,17 @@ async function callSearchAgent(
 
   if (usePerplexity) {
     body['return_related_questions'] = false;
+    let hasAbsoluteDateFilter = false;
     if (config.searchAfterDays != null) {
       const cutoff = new Date(Date.now() - config.searchAfterDays * 24 * 3600 * 1000);
       const mm = String(cutoff.getMonth() + 1).padStart(2, '0');
       const dd = String(cutoff.getDate()).padStart(2, '0');
       body['search_after_date_filter'] = `${mm}/${dd}/${cutoff.getFullYear()}`;
+      hasAbsoluteDateFilter = true;
     }
-    if (config.searchRecencyFilter) body['search_recency_filter'] = config.searchRecencyFilter;
+    if (!hasAbsoluteDateFilter && config.searchRecencyFilter) {
+      body['search_recency_filter'] = config.searchRecencyFilter;
+    }
     if (config.searchLanguageFilter) body['search_language_filter'] = config.searchLanguageFilter;
     if (config.languagePreference) body['language_preference'] = config.languagePreference;
   } else {
@@ -317,6 +323,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
+
+  // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
+  const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+  const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // run once per day
+  const runRetentionCleanup = async () => {
+    try {
+      const cutoff = Date.now() - RETENTION_MS;
+      const deleted = await threadRepository.purgeThreadsOlderThan(cutoff);
+      if (deleted > 0) {
+        app.log.info({ deleted }, 'conversation_retention_purge');
+      }
+    } catch (err) {
+      app.log.warn({ err }, 'conversation_retention_purge_error');
+    }
+  };
+  void runRetentionCleanup();
+  const retentionTimer = setInterval(() => { void runRetentionCleanup(); }, CLEANUP_INTERVAL_MS);
+  retentionTimer.unref();
 
   const summarizationService = new SummarizationService(threadRepository, messageRepository, {
     hotWindowK: deps.env.LIMIT_K,
@@ -479,7 +503,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     //   - general / fail / none   → use HA general directly
 
     const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
-    const spotifyEntry = Boolean(deps.spotifyWebApi)
+    const spotifyEntry = deps.spotifyWebApi.isConfigured()
       ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale' }
       : null;
     const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...agentEntries];
@@ -633,6 +657,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
           const isSearchAgent = isSearchAgentKey(agentEntry?.key);
+          const isTodoAgent   = isTodoAgentKey(agentEntry?.key);
+          const isMailAgent   = isMailAgentKey(agentEntry?.key);
 
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
@@ -655,6 +681,54 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 .catch((err) => {
                   // Search agents bypass HA entirely — no HA entity exists for them.
                   app.log.warn({ threadId, requestId, agent: haTarget.agentId, searchAgentKey, err }, 'search_agent_direct_failed');
+                  return null;
+                }),
+            );
+          } else if (isTodoAgent) {
+            // Todo agent: LLM planner → Microsoft Graph Tasks — bypass HA entirely.
+            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct');
+            tasks.push(
+              callTodoAgent(text, {
+                MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
+                MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
+                MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
+                MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
+                OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
+                OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
+                OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+              }, app.log)
+                .then((txt): SpecializedResult | null => {
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct_done');
+                  return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'todo_agent_direct_failed');
+                  return null;
+                }),
+            );
+          } else if (isMailAgent) {
+            // Mail agent: LLM planner → Gmail / Outlook Graph — bypass HA entirely.
+            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct');
+            tasks.push(
+              callMailAgent(text, {
+                GOOGLE_CLIENT_ID:         deps.env.GOOGLE_CLIENT_ID,
+                GOOGLE_CLIENT_SECRET:     deps.env.GOOGLE_CLIENT_SECRET,
+                GOOGLE_REFRESH_TOKEN:     deps.env.GOOGLE_REFRESH_TOKEN,
+                MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
+                MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
+                MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
+                MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
+                MAIL_PROVIDER:            deps.env.MAIL_PROVIDER,
+                OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
+                OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
+                OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+              }, app.log)
+                .then((txt): SpecializedResult | null => {
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct_done');
+                  return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'mail_agent_direct_failed');
                   return null;
                 }),
             );
@@ -702,13 +776,29 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             });
           }
 
-          // Multi-target: join all response parts
-          const parts = goodResults.map((r) => (r.kind === 'spotify_tts' ? r.tts : r.text));
-          assistantText = parts
-            .map((p) => p.trim().replace(/\.?\s*$/, ''))
-            .join('. ')
-            .concat('.');
-          app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_combined');
+          // Multi-target: LLM aggregation of all response parts
+          const parts = goodResults.map((r) => ({
+            agentId: r.kind === 'spotify_tts' ? SPOTIFY_AGENT_ID : r.agentId,
+            text: r.kind === 'spotify_tts' ? r.tts : r.text,
+          }));
+          if (parts.length === 1) {
+            // Single non-Spotify result — no synthesis needed
+            assistantText = parts[0].text;
+          } else {
+            app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesizing');
+            assistantText = await synthesizeAgentResponses({
+              userText: text,
+              parts,
+              options: {
+                openAiApiKey: deps.env.OPENAI_API_KEY!,
+                openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                model: deps.env.OPENAI_MODEL_ROUTER,
+                timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                log: app.log,
+              },
+            });
+            app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesized');
+          }
         }
         // All tasks failed/OUT_OF_SCOPE → assistantText stays undefined → HA general fallback
       }
