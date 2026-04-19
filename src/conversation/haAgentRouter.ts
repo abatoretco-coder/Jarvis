@@ -250,7 +250,7 @@ export function parseAgentMap(raw: string | undefined): HaAgentEntry[] {
       const firstColon = segment.indexOf(':');
       const secondColon = segment.indexOf(':', firstColon + 1);
       if (firstColon === -1 || secondColon === -1) return null;
-      const key = segment.slice(0, firstColon).trim() || undefined;
+      const key = segment.slice(0, firstColon).trim().replace(/^=+/, '') || undefined;
       const agentId = segment.slice(firstColon + 1, secondColon).trim();
       const hint = segment.slice(secondColon + 1).trim();
       if (!agentId || !hint) return null;
