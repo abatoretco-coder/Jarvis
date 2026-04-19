@@ -1,5 +1,6 @@
 ﻿import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -311,6 +312,22 @@ function toEntityStates(input: unknown): EntityStateLike[] {
 
 
 
+/**
+ * Pick a short TTS-safe ack phrase based on the slow-agent keys that were selected.
+ * Returns null when no ack is appropriate (e.g. no slow agents).
+ */
+function getIngestAckText(keys: (string | undefined)[]): string | null {
+  if (keys.length === 0) return null;
+  const ks = keys.map((k) => k ?? '');
+  const hasMail   = ks.some((k) => k === 'mail'  || k.startsWith('mail.'));
+  const hasTodo   = ks.some((k) => k === 'todo'  || k.startsWith('todo.'));
+  const hasSearch = ks.some((k) => k.startsWith('search'));
+  if (hasMail  && !hasTodo && !hasSearch) return 'Deux secondes, je consulte vos emails.';
+  if (hasTodo  && !hasMail && !hasSearch) return 'Deux secondes, je regarde vos taches.';
+  if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return 'Je cherche ca, une seconde.';
+  return 'Deux secondes, je traite votre demande.';
+}
+
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   app.addContentTypeParser(/^audio\/.+$/u, { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
@@ -481,6 +498,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       { threadId, requestId, text_len: text.length, voice_turn_id: voiceTurnId || undefined, correlation_id: correlationId || undefined },
       'ingest_start',
     );
+
+    // SSE — open the event stream immediately so the client receives ack before agent results arrive
+    const wantsSSE = typeof req.headers['accept'] === 'string' && req.headers['accept'].includes('text/event-stream');
+    let sseStream: Readable | null = null;
+    if (wantsSSE) {
+      sseStream = new Readable({ read() {} });
+      void reply
+        .header('Content-Type', 'text/event-stream; charset=utf-8')
+        .header('Cache-Control', 'no-cache')
+        .header('X-Accel-Buffering', 'no')
+        .send(sseStream);
+    }
+    const pushSseAck      = (text: string): void => { sseStream?.push(`event: ack\ndata: ${JSON.stringify({ text })}\n\n`); };
+    const pushSseResponse = (data: unknown): void => { sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`); sseStream?.push(null); };
 
     const committed = await summarizationService.commitCandidateIfReady(threadId);
     const threadBefore = await threadRepository.getOrCreate(threadId);
@@ -752,6 +783,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           }
         }
 
+        // SSE ack — sent as soon as slow agents are identified, before awaiting their results
+        if (sseStream !== null && haSpecTargets.length > 0) {
+          const ackText = getIngestAckText(haSpecTargets.map((t) => agentEntryByAgentId.get(t.agentId)?.key));
+          if (ackText) pushSseAck(ackText);
+        }
+
         const taskResults = await Promise.all(tasks);
         const goodResults = taskResults.filter((r): r is SpecializedResult => r !== null);
 
@@ -767,13 +804,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 summarizationService.startPresummarize(threadId);
               }
             });
-            return reply.code(200).send({
+            const spotifyOnlyPayload = {
               threadId,
               responseText: spotifyRes.tts,
               ...spotifyRes.spotifyPayload,
               ...(correlationId ? { correlation_id: correlationId } : {}),
               planner: { source: 'openai_music_agent', route: spotifyRes.musicPlanRoute, reason: spotifyRes.musicPlanReason },
-            });
+            };
+            if (sseStream !== null) { pushSseResponse(spotifyOnlyPayload); return reply; }
+            return reply.code(200).send(spotifyOnlyPayload);
           }
 
           // Multi-target: LLM aggregation of all response parts
@@ -836,11 +875,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const validated = responseSchema.safeParse(payload);
     if (!validated.success) {
+      if (sseStream !== null) { sseStream.push(null); return reply; }
       return reply.code(500).send({ error: 'response_validation_failed' });
     }
 
     recordPerf('ingest', Date.now() - t0);
     app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_complete');
+    if (sseStream !== null) { pushSseResponse(payload); return reply; }
     return reply.code(200).send(payload);
   });
 
