@@ -586,10 +586,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }).catch(() => { /* ack is best-effort — main flow handles the real result */ });
     }
 
-    const [routerResult, haGeneralResult] = await Promise.allSettled([
-      routerPromise,
-      conversationService.callHomeAssistantConversation(text, threadId, undefined, generalAgentId),
-    ]);
+    const [routerResult] = await Promise.allSettled([routerPromise]);
 
     if (routerResult.status === 'rejected' && routerEnabled) {
       app.log.warn({ threadId, requestId, err: routerResult.reason }, 'ha_agent_router_failed_fallback_general');
@@ -852,17 +849,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       // No valid targets above threshold → HA general fallback
     }
 
-    // ── General HA fallback ───────────────────────────────────────────────────
+    // ── General HA fallback (only when router failed or produced no usable result) ─
     if (assistantText === undefined) {
-      if (haGeneralResult.status === 'fulfilled' && !/^\s*OUT_OF_SCOPE\s*$/i.test(haGeneralResult.value)) {
+      try {
         app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
-        assistantText = haGeneralResult.value;
-      } else if (haGeneralResult.status === 'fulfilled') {
-        app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
-        assistantText = toDeterministicHaFailureMessage();
-      } else {
+        const haText = await conversationService.callHomeAssistantConversation(text, threadId, undefined, generalAgentId);
+        if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
+          app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
+          assistantText = toDeterministicHaFailureMessage();
+        } else {
+          assistantText = haText;
+        }
+      } catch (err) {
         app.log.warn(
-          { threadId, requestId, correlation_id: correlationId || undefined, err: haGeneralResult.reason },
+          { threadId, requestId, correlation_id: correlationId || undefined, err },
           'ingest_home_assistant_call_failed'
         );
         assistantText = toDeterministicHaFailureMessage();
