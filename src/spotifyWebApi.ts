@@ -228,8 +228,12 @@ export class SpotifyWebApiClient {
       if (typeof parsed.refreshToken === 'string' && parsed.refreshToken.trim()) {
         this.refreshTokenOverride = parsed.refreshToken.trim();
       }
-    } catch {
-      // Ignore errors (file may not exist or be invalid)
+    } catch (err) {
+      // ENOENT on first run is expected — warn only on unexpected errors
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        this.log('warn', 'token_load_failed', { code: code ?? 'unknown', err: String(err) });
+      }
     }
   }
 

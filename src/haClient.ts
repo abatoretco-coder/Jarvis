@@ -73,8 +73,8 @@ export class HomeAssistantClient {
       }
       return { status: resp.status, data };
     } catch (err) {
-      const e = err as Error;
-      throw new Error(`Home Assistant request failed: ${e.name}: ${e.message}`);
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }
@@ -102,8 +102,8 @@ export class HomeAssistantClient {
       }
       return data;
     } catch (err) {
-      const e = err as Error;
-      throw new Error(`Home Assistant request failed: ${e.name}: ${e.message}`);
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }
@@ -131,8 +131,8 @@ export class HomeAssistantClient {
       }
       return data;
     } catch (err) {
-      const e = err as Error;
-      throw new Error(`Home Assistant request failed: ${e.name}: ${e.message}`);
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }
@@ -168,8 +168,8 @@ export class HomeAssistantClient {
       }
       return { status: resp.status, data };
     } catch (err) {
-      const e = err as Error;
-      throw new Error(`Home Assistant request failed: ${e.name}: ${e.message}`);
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`);
     } finally {
       clearTimeout(timeout);
     }

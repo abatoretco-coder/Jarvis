@@ -898,7 +898,13 @@ export async function callMailAgent(
     const successful = results
       .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
       .map(r => r.value);
-    if (successful.length === 0) return 'Impossible de récupérer les emails pour le moment.';
+    if (successful.length === 0) {
+      const failures = results
+        .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+        .map(r => r.reason instanceof Error ? r.reason.message : String(r.reason));
+      log?.warn({ action: action.action, failures }, 'mail_agent_all_accounts_failed');
+      return 'Impossible de récupérer les emails pour le moment.';
+    }
     const combined = successful.join(' | ');
     log?.info({ action: action.action, result_len: combined.length }, 'mail_agent_done');
     return combined;
