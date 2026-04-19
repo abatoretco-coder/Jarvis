@@ -25,34 +25,93 @@
 
 // ─── Action types ─────────────────────────────────────────────────────────────
 
-type ListInboxAction  = { action: 'list_inbox';        max?: number; unread_only?: boolean };
-type SearchAction     = { action: 'search_emails';     query: string; max?: number };
-type SendAction       = { action: 'send_email';        to: string; subject: string; body: string; cc?: string; bcc?: string; importance?: 'low' | 'normal' | 'high' };
-type MarkReadAction   = { action: 'mark_read';         subject?: string; sender?: string };
-type MarkUnreadAction = { action: 'mark_unread';       subject?: string; sender?: string };
-type ReplyAction      = { action: 'reply_email';       sender?: string; subject?: string; body: string };
-type ForwardAction    = { action: 'forward_email';     to: string; sender?: string; subject?: string; comment?: string };
-type TrashAction      = { action: 'trash_email';       subject?: string; sender?: string };
-type GetEmailAction   = { action: 'get_email';         subject?: string; sender?: string };
-type FlagAction       = { action: 'flag_email';        subject?: string; sender?: string; flagged?: boolean };
+type ListInboxAction  = { action: 'list_inbox';        max?: number; unread_only?: boolean; account?: string };
+type SearchAction     = { action: 'search_emails';     query: string; max?: number; account?: string };
+type SendAction       = { action: 'send_email';        to: string; subject: string; body: string; cc?: string; bcc?: string; importance?: 'low' | 'normal' | 'high'; account?: string };
+type MarkReadAction   = { action: 'mark_read';         subject?: string; sender?: string; account?: string };
+type MarkUnreadAction = { action: 'mark_unread';       subject?: string; sender?: string; account?: string };
+type ReplyAction      = { action: 'reply_email';       sender?: string; subject?: string; body: string; account?: string };
+type ForwardAction    = { action: 'forward_email';     to: string; sender?: string; subject?: string; comment?: string; account?: string };
+type TrashAction      = { action: 'trash_email';       subject?: string; sender?: string; account?: string };
+type GetEmailAction   = { action: 'get_email';         subject?: string; sender?: string; account?: string };
+type FlagAction       = { action: 'flag_email';        subject?: string; sender?: string; flagged?: boolean; account?: string };
 
 type MailAction = ListInboxAction | SearchAction | SendAction | MarkReadAction |
   MarkUnreadAction | ReplyAction | ForwardAction | TrashAction | GetEmailAction | FlagAction;
 
-// ─── Minimal env surface ──────────────────────────────────────────────────────
+// ─── Multi-account types ──────────────────────────────────────────────────────
 
-export type MailEnv = {
-  // Google Gmail
+export interface MailAccount {
+  label: string;
+  provider: 'gmail' | 'outlook';
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+  tenantId?: string;
+}
+
+// Env surface required by buildMailAccounts() — a subset of the full zod env.
+export interface MailAccountsEnv {
+  // Legacy single-account vars (backward compat)
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REFRESH_TOKEN?: string;
-  // Microsoft Outlook
   MICROSOFT_CLIENT_ID?: string;
   MICROSOFT_CLIENT_SECRET?: string;
   MICROSOFT_REFRESH_TOKEN?: string;
   MICROSOFT_TENANT_ID?: string;
-  // Provider override
   MAIL_PROVIDER?: string;
+  // Indexed multi-account (takes priority when any LABEL_1 is set)
+  MAIL_ACCOUNT_1_LABEL?: string; MAIL_ACCOUNT_1_PROVIDER?: string; MAIL_ACCOUNT_1_CLIENT_ID?: string; MAIL_ACCOUNT_1_CLIENT_SECRET?: string; MAIL_ACCOUNT_1_REFRESH_TOKEN?: string; MAIL_ACCOUNT_1_TENANT_ID?: string;
+  MAIL_ACCOUNT_2_LABEL?: string; MAIL_ACCOUNT_2_PROVIDER?: string; MAIL_ACCOUNT_2_CLIENT_ID?: string; MAIL_ACCOUNT_2_CLIENT_SECRET?: string; MAIL_ACCOUNT_2_REFRESH_TOKEN?: string; MAIL_ACCOUNT_2_TENANT_ID?: string;
+  MAIL_ACCOUNT_3_LABEL?: string; MAIL_ACCOUNT_3_PROVIDER?: string; MAIL_ACCOUNT_3_CLIENT_ID?: string; MAIL_ACCOUNT_3_CLIENT_SECRET?: string; MAIL_ACCOUNT_3_REFRESH_TOKEN?: string; MAIL_ACCOUNT_3_TENANT_ID?: string;
+  MAIL_ACCOUNT_4_LABEL?: string; MAIL_ACCOUNT_4_PROVIDER?: string; MAIL_ACCOUNT_4_CLIENT_ID?: string; MAIL_ACCOUNT_4_CLIENT_SECRET?: string; MAIL_ACCOUNT_4_REFRESH_TOKEN?: string; MAIL_ACCOUNT_4_TENANT_ID?: string;
+  MAIL_ACCOUNT_5_LABEL?: string; MAIL_ACCOUNT_5_PROVIDER?: string; MAIL_ACCOUNT_5_CLIENT_ID?: string; MAIL_ACCOUNT_5_CLIENT_SECRET?: string; MAIL_ACCOUNT_5_REFRESH_TOKEN?: string; MAIL_ACCOUNT_5_TENANT_ID?: string;
+}
+
+/**
+ * Builds the list of configured mail accounts from env vars.
+ * Indexed MAIL_ACCOUNT_N_* vars take priority over legacy GOOGLE_* / MICROSOFT_* vars.
+ * Call this once per request in ingest.ts and pass the result in MailEnv.mailAccounts.
+ */
+export function buildMailAccounts(env: MailAccountsEnv): MailAccount[] {
+  const accounts: MailAccount[] = [];
+  const e = env as Record<string, string | undefined>;
+
+  for (let i = 1; i <= 5; i++) {
+    const label         = e[`MAIL_ACCOUNT_${i}_LABEL`];
+    const provider      = e[`MAIL_ACCOUNT_${i}_PROVIDER`];
+    const clientId      = e[`MAIL_ACCOUNT_${i}_CLIENT_ID`];
+    const clientSecret  = e[`MAIL_ACCOUNT_${i}_CLIENT_SECRET`];
+    const refreshToken  = e[`MAIL_ACCOUNT_${i}_REFRESH_TOKEN`];
+    const tenantId      = e[`MAIL_ACCOUNT_${i}_TENANT_ID`];
+    if (!label || !provider || !clientId || !clientSecret || !refreshToken) continue;
+    if (provider !== 'gmail' && provider !== 'outlook') continue;
+    accounts.push({ label, provider: provider as 'gmail' | 'outlook', clientId, clientSecret, refreshToken, tenantId });
+  }
+
+  if (accounts.length > 0) return accounts;
+
+  // Legacy single-account fallback
+  const override = env.MAIL_PROVIDER?.trim().toLowerCase();
+  if (override === 'outlook' && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
+    return [{ label: 'outlook', provider: 'outlook', clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET, refreshToken: env.MICROSOFT_REFRESH_TOKEN, tenantId: env.MICROSOFT_TENANT_ID }];
+  }
+  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN) {
+    return [{ label: 'gmail', provider: 'gmail', clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN }];
+  }
+  if (env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
+    return [{ label: 'outlook', provider: 'outlook', clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET, refreshToken: env.MICROSOFT_REFRESH_TOKEN, tenantId: env.MICROSOFT_TENANT_ID }];
+  }
+  return [];
+}
+
+// ─── Minimal env surface ──────────────────────────────────────────────────────
+
+export type MailEnv = MailAccountsEnv & {
+  // Pre-parsed account list (built by buildMailAccounts in ingest.ts).
+  // When provided, overrides legacy GOOGLE_*/MICROSOFT_* detection.
+  mailAccounts?: MailAccount[];
   // OpenAI planner
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
@@ -64,22 +123,22 @@ type MinLogger = {
   warn: (obj: Record<string, unknown>, msg: string) => void;
 };
 
-// ─── Provider selection ───────────────────────────────────────────────────────
+// ─── Account token helper ─────────────────────────────────────────────────────
 
-type MailProvider = 'gmail' | 'outlook';
-
-function selectProvider(env: MailEnv): MailProvider | null {
-  const override = env.MAIL_PROVIDER?.trim().toLowerCase();
-  if (override === 'outlook' && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
-    return 'outlook';
+async function getAccountToken(acc: MailAccount): Promise<string> {
+  if (acc.provider === 'gmail') {
+    return refreshGoogleToken({
+      GOOGLE_CLIENT_ID:     acc.clientId,
+      GOOGLE_CLIENT_SECRET: acc.clientSecret,
+      GOOGLE_REFRESH_TOKEN: acc.refreshToken,
+    });
   }
-  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN) {
-    return 'gmail';
-  }
-  if (env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
-    return 'outlook';
-  }
-  return null;
+  return refreshMicrosoftToken({
+    MICROSOFT_TENANT_ID:     acc.tenantId,
+    MICROSOFT_CLIENT_ID:     acc.clientId,
+    MICROSOFT_CLIENT_SECRET: acc.clientSecret,
+    MICROSOFT_REFRESH_TOKEN: acc.refreshToken,
+  });
 }
 
 // ─── Access token cache (in-memory, per process) ─────────────────────────────
@@ -214,7 +273,11 @@ async function refreshMicrosoftToken(env: {
 
 // ─── LLM planner ─────────────────────────────────────────────────────────────
 
-const _PLANNER_SYSTEM = `Tu es un assistant de gestion des emails.
+function buildPlannerSystem(accountLabels: string[]): string {
+  const accountField = accountLabels.length > 1
+    ? `\n  account       → "account" (optionnel) : label du compte parmi ${accountLabels.map(l => `"${l}"`).join(' | ')} si l'utilisateur le précise explicitement.`
+    : '';
+  return `Tu es un assistant de gestion des emails.
 Analyse la commande vocale en français et retourne un JSON correspondant à une seule action email.
 
 Champ obligatoire "action" parmi :
@@ -234,7 +297,7 @@ Champs conditionnels :
                   "subject" (mots-clés, optionnel), "comment" (message d'accompagnement, optionnel)
   trash_email   → "subject" (mots-clés, optionnel), "sender" (nom ou email, optionnel)
   get_email     → "subject" (mots-clés, optionnel), "sender" (nom ou email, optionnel)
-  flag_email    → "subject" (mots-clés, optionnel), "sender" (nom ou email, optionnel), "flagged" (bool, défaut true)
+  flag_email    → "subject" (mots-clés, optionnel), "sender" (nom ou email, optionnel), "flagged" (bool, défaut true)${accountField}
 
 Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire.
 Exemples :
@@ -250,13 +313,16 @@ Exemples :
   "lis l'email de Marie"                         → {"action":"get_email","sender":"Marie"}
   "flagge l'email de la banque"                  → {"action":"flag_email","sender":"banque"}
 `.trim();
+}
 
 async function planMailAction(
   text: string,
   openAiApiKey: string,
   openAiBaseUrl: string,
   timeoutMs: number,
+  accountLabels: string[] = [],
 ): Promise<MailAction> {
+  const _PLANNER_SYSTEM = buildPlannerSystem(accountLabels);
   const resp = await fetch(`${openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -806,38 +872,47 @@ export async function callMailAgent(
   env: MailEnv,
   log?: MinLogger,
 ): Promise<string> {
-  const provider = selectProvider(env);
-  if (!provider) {
+  const accounts = env.mailAccounts?.length ? env.mailAccounts : buildMailAccounts(env);
+  if (accounts.length === 0) {
     return 'La gestion des emails n\'est pas configurée (identifiants Gmail ou Outlook manquants).';
   }
   if (!env.OPENAI_API_KEY) {
     return 'Agent mail non disponible : clé OpenAI manquante.';
   }
 
-  const action = await planMailAction(
-    text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS,
-  );
-  log?.info({ action: action.action, provider }, 'mail_agent_planned');
+  const labels = accounts.map(a => a.label);
+  const action = await planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, labels);
+  log?.info({ action: action.action, accounts: labels.length }, 'mail_agent_planned');
 
-  if (provider === 'gmail') {
-    const token = await refreshGoogleToken({
-      GOOGLE_CLIENT_ID:     env.GOOGLE_CLIENT_ID!,
-      GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET!,
-      GOOGLE_REFRESH_TOKEN: env.GOOGLE_REFRESH_TOKEN!,
-    });
-    const result = await executeGmail(action, token);
-    log?.info({ action: action.action, provider, result_len: result.length }, 'mail_agent_done');
-    return result;
+  // list_inbox and search_emails aggregate across all accounts (unless a specific account is requested)
+  if ((action.action === 'list_inbox' || action.action === 'search_emails') && accounts.length > 1 && !action.account) {
+    const results = await Promise.allSettled(
+      accounts.map(async (acc) => {
+        const token = await getAccountToken(acc);
+        const result = acc.provider === 'gmail'
+          ? await executeGmail(action, token)
+          : await executeOutlook(action, token);
+        return accounts.length > 1 ? `[${acc.label}] ${result}` : result;
+      }),
+    );
+    const successful = results
+      .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+      .map(r => r.value);
+    if (successful.length === 0) return 'Impossible de récupérer les emails pour le moment.';
+    const combined = successful.join(' | ');
+    log?.info({ action: action.action, result_len: combined.length }, 'mail_agent_done');
+    return combined;
   }
 
-  // provider === 'outlook'
-  const token = await refreshMicrosoftToken({
-    MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
-    MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID!,
-    MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET!,
-    MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN!,
-  });
-  const result = await executeOutlook(action, token);
-  log?.info({ action: action.action, provider, result_len: result.length }, 'mail_agent_done');
+  // Single-account action — match by requested label or use first configured account
+  const target = action.account
+    ? (accounts.find(a => a.label.toLowerCase() === (action.account as string).toLowerCase()) ?? accounts[0])
+    : accounts[0];
+
+  const token = await getAccountToken(target);
+  const result = target.provider === 'gmail'
+    ? await executeGmail(action, token)
+    : await executeOutlook(action, token);
+  log?.info({ action: action.action, account: target.label, result_len: result.length }, 'mail_agent_done');
   return result;
 }

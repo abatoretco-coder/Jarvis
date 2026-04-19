@@ -165,6 +165,45 @@ const envSchema = z
     (v) => (typeof v === 'string' ? v.trim().toLowerCase() || undefined : v),
     z.enum(['gmail', 'outlook']).optional(),
   ),
+
+  // ── Multi-account mail (indexed, up to 5) ────────────────────────────────────
+  // When set, these override the single-account GOOGLE_*/MICROSOFT_* vars above.
+  // MAIL_ACCOUNT_N_PROVIDER: "gmail" | "outlook"
+  // MAIL_ACCOUNT_N_TENANT_ID: only for Outlook (default: "common")
+  MAIL_ACCOUNT_1_LABEL:         optionalNonEmptyString,
+  MAIL_ACCOUNT_1_PROVIDER:      optionalNonEmptyString,
+  MAIL_ACCOUNT_1_CLIENT_ID:     optionalNonEmptyString,
+  MAIL_ACCOUNT_1_CLIENT_SECRET: optionalNonEmptyString,
+  MAIL_ACCOUNT_1_REFRESH_TOKEN: optionalNonEmptyString,
+  MAIL_ACCOUNT_1_TENANT_ID:     optionalNonEmptyString,
+
+  MAIL_ACCOUNT_2_LABEL:         optionalNonEmptyString,
+  MAIL_ACCOUNT_2_PROVIDER:      optionalNonEmptyString,
+  MAIL_ACCOUNT_2_CLIENT_ID:     optionalNonEmptyString,
+  MAIL_ACCOUNT_2_CLIENT_SECRET: optionalNonEmptyString,
+  MAIL_ACCOUNT_2_REFRESH_TOKEN: optionalNonEmptyString,
+  MAIL_ACCOUNT_2_TENANT_ID:     optionalNonEmptyString,
+
+  MAIL_ACCOUNT_3_LABEL:         optionalNonEmptyString,
+  MAIL_ACCOUNT_3_PROVIDER:      optionalNonEmptyString,
+  MAIL_ACCOUNT_3_CLIENT_ID:     optionalNonEmptyString,
+  MAIL_ACCOUNT_3_CLIENT_SECRET: optionalNonEmptyString,
+  MAIL_ACCOUNT_3_REFRESH_TOKEN: optionalNonEmptyString,
+  MAIL_ACCOUNT_3_TENANT_ID:     optionalNonEmptyString,
+
+  MAIL_ACCOUNT_4_LABEL:         optionalNonEmptyString,
+  MAIL_ACCOUNT_4_PROVIDER:      optionalNonEmptyString,
+  MAIL_ACCOUNT_4_CLIENT_ID:     optionalNonEmptyString,
+  MAIL_ACCOUNT_4_CLIENT_SECRET: optionalNonEmptyString,
+  MAIL_ACCOUNT_4_REFRESH_TOKEN: optionalNonEmptyString,
+  MAIL_ACCOUNT_4_TENANT_ID:     optionalNonEmptyString,
+
+  MAIL_ACCOUNT_5_LABEL:         optionalNonEmptyString,
+  MAIL_ACCOUNT_5_PROVIDER:      optionalNonEmptyString,
+  MAIL_ACCOUNT_5_CLIENT_ID:     optionalNonEmptyString,
+  MAIL_ACCOUNT_5_CLIENT_SECRET: optionalNonEmptyString,
+  MAIL_ACCOUNT_5_REFRESH_TOKEN: optionalNonEmptyString,
+  MAIL_ACCOUNT_5_TENANT_ID:     optionalNonEmptyString,
 })
   .transform((value) => ({
     ...value,

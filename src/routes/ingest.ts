@@ -10,7 +10,7 @@ import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentRespons
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
-import { callMailAgent, isMailAgentKey } from '../mail/mailAgent';
+import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import {
   createConversationDb,
   SqliteMessageRepository,
@@ -742,6 +742,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct');
             tasks.push(
               callMailAgent(text, {
+                mailAccounts:             buildMailAccounts(deps.env),
                 GOOGLE_CLIENT_ID:         deps.env.GOOGLE_CLIENT_ID,
                 GOOGLE_CLIENT_SECRET:     deps.env.GOOGLE_CLIENT_SECRET,
                 GOOGLE_REFRESH_TOKEN:     deps.env.GOOGLE_REFRESH_TOKEN,
