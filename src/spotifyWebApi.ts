@@ -172,8 +172,15 @@ type SpotifyPlaylist = {
 
 const MISSING_TARGET_DEVICE_SENTINEL = '__missing_target_device__';
 
+type SpotifyLogger = {
+  info(obj: Record<string, unknown>, msg: string): void;
+  warn(obj: Record<string, unknown>, msg: string): void;
+  error(obj: Record<string, unknown>, msg: string): void;
+};
+
 export class SpotifyWebApiClient {
   private env: Env;
+  private logger?: SpotifyLogger;
   private cached?: { token: string; expiresAtMs: number };
   private discoveredPreferredDevice?: { id: string; name: string; discoveredAtMs: number };
   private readonly discoveredPreferredDeviceTtlMs = 5 * 60_000;
@@ -186,8 +193,9 @@ export class SpotifyWebApiClient {
   private readonly shortCacheTtlMs = 65_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
 
-  constructor(env: Env) {
+  constructor(env: Env, logger?: SpotifyLogger) {
     this.env = env;
+    this.logger = logger;
     this.tokenFilePath = '/app/data/spotify-token.json';
     // Load persisted token on startup (non-blocking)
     this.loadTokenFromDisk().catch(() => {
@@ -195,13 +203,15 @@ export class SpotifyWebApiClient {
     });
   }
 
-  private log(level: 'info' | 'warn', message: string, details?: Record<string, unknown>): void {
-    const payload = details ? ` ${JSON.stringify(details)}` : '';
-    const line = `[spotify-webapi] ${message}${payload}`;
-    if (level === 'warn') {
-      console.warn(line);
+  private log(level: 'info' | 'warn' | 'error', message: string, details?: Record<string, unknown>): void {
+    if (this.logger) {
+      this.logger[level]({ ...(details ?? {}), spotify_module: 'webapi' }, message);
       return;
     }
+    const payload = details ? ` ${JSON.stringify(details)}` : '';
+    const line = `[spotify-webapi] ${message}${payload}`;
+    if (level === 'warn') { console.warn(line); return; }
+    if (level === 'error') { console.error(line); return; }
     console.info(line);
   }
 
@@ -231,7 +241,7 @@ export class SpotifyWebApiClient {
       await writeFile(this.tokenFilePath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
       // Log but don't fail (persistence is best-effort)
-      console.error('[spotify-token] Failed to save token to disk:', err);
+      this.log('error', 'token_save_failed', { err: String(err) });
     }
   }
 

@@ -17,8 +17,6 @@ export type AppDeps = {
 
 export function buildApp(env: Env): FastifyInstance {
   const ha = env.HA_BASE_URL && env.HA_TOKEN ? new HomeAssistantClient(env) : undefined;
-  const spotifyWebApi = new SpotifyWebApiClient(env);
-  spotifyWebApi.startSituationPrefetch();
 
   const app = Fastify({
     logger: {
@@ -42,6 +40,9 @@ export function buildApp(env: Env): FastifyInstance {
     },
     bodyLimit: env.BODY_LIMIT_BYTES,
   });
+
+  const spotifyWebApi = new SpotifyWebApiClient(env, app.log);
+  spotifyWebApi.startSituationPrefetch();
 
   const deps: AppDeps = { env, ha, spotifyWebApi };
 

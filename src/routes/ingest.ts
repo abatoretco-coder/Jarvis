@@ -747,18 +747,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct');
             tasks.push(
               callMailAgent(text, {
-                mailAccounts:             buildMailAccounts(deps.env),
-                GOOGLE_CLIENT_ID:         deps.env.GOOGLE_CLIENT_ID,
-                GOOGLE_CLIENT_SECRET:     deps.env.GOOGLE_CLIENT_SECRET,
-                GOOGLE_REFRESH_TOKEN:     deps.env.GOOGLE_REFRESH_TOKEN,
-                MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
-                MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
-                MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
-                MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
-                MAIL_PROVIDER:            deps.env.MAIL_PROVIDER,
-                OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
-                OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
-                OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+                mailAccounts:    buildMailAccounts(deps.env),
+                OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
+                OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+                OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
               }, app.log)
                 .then((txt): SpecializedResult | null => {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct_done');
