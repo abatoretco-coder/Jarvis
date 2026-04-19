@@ -500,7 +500,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     );
 
     // SSE — open the event stream immediately so the client receives ack before agent results arrive
-    const wantsSSE = typeof req.headers['accept'] === 'string' && req.headers['accept'].includes('text/event-stream');
+    const rawAccept = req.headers['accept'];
+    const acceptHeader = typeof rawAccept === 'string' ? rawAccept : Array.isArray(rawAccept) ? (rawAccept as string[]).join(',') : '';
+    const wantsSSE = acceptHeader.includes('text/event-stream');
+    app.log.info({ threadId, requestId, wantsSSE, accept: acceptHeader.slice(0, 80) }, 'ingest_sse_check');
     let sseStream: Readable | null = null;
     if (wantsSSE) {
       sseStream = new Readable({ read() {} });
