@@ -194,8 +194,8 @@ async function callSearchAgent(
     body['web_search_options'] = { search_context_size: 'high' };
   }
 
-  // Perplexity native endpoint: /v1/sonar  |  OpenAI-compat: /chat/completions
-  const chatPath = usePerplexity ? '/v1/sonar' : '/chat/completions';
+  // Both Perplexity and OpenAI use /chat/completions — model name selects search capability.
+  const chatPath = '/chat/completions';
   const resp = await fetch(
     `${baseUrl.replace(/\/$/, '')}${chatPath}`,
     {
