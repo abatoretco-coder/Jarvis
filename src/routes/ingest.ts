@@ -554,24 +554,40 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
     }
 
+    const routerPromise = routerEnabled
+      ? routeToHaAgent({
+          text,
+          agents: allAgentEntries,
+          summary: threadBefore.summary?.trim() || undefined,
+          recentMessages,
+          options: {
+            openAiApiKey: deps.env.OPENAI_API_KEY!,
+            openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+            model: deps.env.OPENAI_MODEL_ROUTER,
+            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+            confidenceThreshold: threshold,
+            generalAgentId,
+            log: app.log,
+          },
+        })
+      : Promise.reject(new Error('router_disabled'));
+
+    // Early SSE ack: fire as soon as the router decides, without waiting for HA general.
+    // This gives the user immediate feedback ("Je cherche...") before Perplexity/todo/mail respond.
+    if (sseStream !== null && routerEnabled) {
+      const _earlyAckEntryMap = new Map(agentEntries.map((e) => [e.agentId, e]));
+      routerPromise.then((routerRes) => {
+        const validTargets = routerRes.targets.filter((t) => t.confidence >= threshold);
+        const specTargets = validTargets.filter((t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId);
+        if (specTargets.length > 0) {
+          const ackText = getIngestAckText(specTargets.map((t) => _earlyAckEntryMap.get(t.agentId)?.key));
+          if (ackText) pushSseAck(ackText);
+        }
+      }).catch(() => { /* ack is best-effort — main flow handles the real result */ });
+    }
+
     const [routerResult, haGeneralResult] = await Promise.allSettled([
-      routerEnabled
-        ? routeToHaAgent({
-            text,
-            agents: allAgentEntries,
-            summary: threadBefore.summary?.trim() || undefined,
-            recentMessages,
-            options: {
-              openAiApiKey: deps.env.OPENAI_API_KEY!,
-              openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-              model: deps.env.OPENAI_MODEL_ROUTER,
-              timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
-              confidenceThreshold: threshold,
-              generalAgentId,
-              log: app.log,
-            },
-          })
-        : Promise.reject(new Error('router_disabled')),
+      routerPromise,
       conversationService.callHomeAssistantConversation(text, threadId, undefined, generalAgentId),
     ]);
 
@@ -779,12 +795,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 }),
             );
           }
-        }
-
-        // SSE ack — sent as soon as slow agents are identified, before awaiting their results
-        if (sseStream !== null && haSpecTargets.length > 0) {
-          const ackText = getIngestAckText(haSpecTargets.map((t) => agentEntryByAgentId.get(t.agentId)?.key));
-          if (ackText) pushSseAck(ackText);
         }
 
         const taskResults = await Promise.all(tasks);
