@@ -66,6 +66,9 @@ Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→sea
 search_and_play query rules: ALWAYS populate "query" with the most relevant extracted search terms from the user message (genre, mood, artist, style, etc.). NEVER emit search_and_play with an empty or missing query — if unsure, use the raw user text as query.
 Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".
 Action vs search disambiguation: imperative verbs (met, mets, crée, règle, programme, allume, éteins, démarre, active, lance, exécute) targeting home automation objects (rappel, minuteur, timer, alarme, script, lumière, prise, appareil, scène) → executors agent, NOT search agents. NEVER route action commands to search.news/search.web/search.deep.
+search.news rules (if present): ALWAYS use for sports scores/results (score, résultat, match, but, classement, OM, PSG, NBA, etc.), live news, weather, recent events — even when phrased as imperative ("dis-moi", "dit", "donne-moi", "c'est quoi"). These are information queries, NOT home automation actions.
+search.web rules (if present): factual lookups, definitions, prices, encyclopedia questions.
+search.deep rules (if present): in-depth analysis, history, biographies, complex topics.
 todo agent (if present) → Microsoft To Do CRUD only (ajouter/lister/modifier/terminer tâches et sous-tâches To Do, listes To Do). NOT executors.
 mail agent (if present) → email read/send/reply/forward/trash (Gmail or Outlook). NOT executors. NOT search agents.`;
 

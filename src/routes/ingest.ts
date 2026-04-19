@@ -322,10 +322,10 @@ function getIngestAckText(keys: (string | undefined)[]): string | null {
   const hasMail   = ks.some((k) => k === 'mail'  || k.startsWith('mail.'));
   const hasTodo   = ks.some((k) => k === 'todo'  || k.startsWith('todo.'));
   const hasSearch = ks.some((k) => k.startsWith('search'));
-  if (hasMail  && !hasTodo && !hasSearch) return 'Deux secondes, je consulte vos emails.';
-  if (hasTodo  && !hasMail && !hasSearch) return 'Deux secondes, je regarde vos taches.';
+  if (hasMail  && !hasTodo && !hasSearch) return 'Deux secondes, je consulte tes emails.';
+  if (hasTodo  && !hasMail && !hasSearch) return 'Deux secondes, je regarde tes taches.';
   if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return 'Je cherche ca, une seconde.';
-  return 'Deux secondes, je traite votre demande.';
+  return 'Deux secondes, je traite ta demande.';
 }
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
