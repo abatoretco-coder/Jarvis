@@ -57,20 +57,51 @@ export type RouterOptions = {
 };
 
 // System prompt — includes Spotify action catalog so the router can produce direct actions.
-const SYSTEM_PROMPT = `Routing classifier. A message may span multiple domains.
-Return ONLY valid JSON: {"targets":[{"agentId":"<id>","confidence":<0-1>}],"reason":"≤10 words"}.
-Rules: include entry per domain if confidence≥0.5; omit uncertain ones; no extra keys.
-For agentId="spotify": also add "action" (required) and "slots" (optional object).
-Spotify actions: pause; play (resume, no content); next; previous; volume_set{volume_percent:N or volume_delta:±N}; search_and_play{query,type?,device?}; transfer{device}; search{query}; queue_add{query}; now_playing; like_track; shuffle_set{state:on|off}; repeat_set{mode:track|context|off}; list_devices.
-Routing rules: lance|joue+device sans contenu→transfer; [contenu]+device→search_and_play+device; artiste|album|titre|playlist|genre→search_and_play; reprends|joue|lance sans device sans contenu→play; toute demande musicale avec style/ambiance/genre/humeur→search_and_play{query:<termes extraits>}; musique générique sans aucun terme→search_and_play{query:"musique"}.
-search_and_play query rules: ALWAYS populate "query" with the most relevant extracted search terms from the user message (genre, mood, artist, style, etc.). NEVER emit search_and_play with an empty or missing query — if unsure, use the raw user text as query.
-Device slots: pc/ordinateur/jarvis/vm400→"alias:pc"; salon/enceinte/haut-parleur→"alias:salon"; tel/mobile/téléphone→"alias:phone".
-Action vs search disambiguation: imperative verbs (met, mets, crée, règle, programme, allume, éteins, démarre, active, lance, exécute) targeting home automation objects (rappel, minuteur, timer, alarme, script, lumière, prise, appareil, scène) → executors agent, NOT search agents. NEVER route action commands to search.news/search.web/search.deep.
-search.news rules (if present): ALWAYS use for sports scores/results (score, résultat, match, but, classement, OM, PSG, NBA, etc.), live news, weather, recent events — even when phrased as imperative ("dis-moi", "dit", "donne-moi", "c'est quoi"). These are information queries, NOT home automation actions.
-search.web rules (if present): factual lookups, definitions, prices, encyclopedia questions.
-search.deep rules (if present): in-depth analysis, history, biographies, complex topics.
-todo agent (if present) → Microsoft To Do CRUD only (ajouter/lister/modifier/terminer tâches et sous-tâches To Do, listes To Do). NOT executors.
-mail agent (if present) → email read/send/reply/forward/trash (Gmail or Outlook). NOT executors. NOT search agents.`;
+const SYSTEM_PROMPT = `You are a routing classifier. The user message may span multiple domains.
+Return ONLY valid JSON — no markdown, no prose:
+{"targets":[{"agentId":"<id>","confidence":<0.0-1.0>},...],"reason":"≤10 words"}
+
+Rules:
+- Include one entry per relevant domain when confidence ≥ 0.5.
+- Omit uncertain domains entirely — do not guess.
+- A message can legitimately target 2+ agents simultaneously.
+
+## SPOTIFY
+agentId = "spotify". Also include "action" (required) and "slots" (optional object).
+Actions:
+  pause | play | next | previous | now_playing | like_track | list_devices
+  volume_set       → slots: {volume_percent:N} or {volume_delta:±N}
+  search_and_play  → slots: {query:"<terms>", type?:"track|album|artist|playlist", device?}
+  transfer         → slots: {device:"<name>"}
+  search           → slots: {query:"<terms>"}
+  queue_add        → slots: {query:"<terms>"}
+  shuffle_set      → slots: {state:"on"|"off"}
+  repeat_set       → slots: {mode:"track"|"context"|"off"}
+Routing:
+  device only, no content → transfer
+  content + device → search_and_play + device slot
+  artist/album/title/playlist/genre/mood/style → search_and_play
+  resume/play/launch without device/content → play
+  generic music request → search_and_play{query:"musique"}
+  RULE: search_and_play MUST always have a non-empty query.
+Device aliases: pc/ordinateur/jarvis/vm400→"alias:pc" | salon/enceinte→"alias:salon" | tel/mobile→"alias:phone"
+
+## SEARCH AGENTS
+  search.news  → live/recent: scores de sport, résultats de match, classements, météo, actualités du jour, événements récents.
+               Phrases comme "dis-moi", "c'est quoi", "quel est" + sujet temps-réel → search.news.
+  search.web   → lookup factuel: définitions, prix, personnes, conversions, questions encyclopédiques.
+  search.deep  → analyse approfondie: histoire, biographies, comparaisons, sujets complexes.
+  ⚠ Information queries ("dis-moi X", "donne-moi X", "c'est quoi X") are NOT home automation — never route them to executors.
+
+## EXECUTORS (home automation)
+  Action verbs (allume, éteins, mets, crée, programme, règle, active, démarre) + home object (lumière, prise, minuteur, rappel, timer, alarme, script, scène, appareil) → executors.
+  ⚠ NEVER route executors to search agents.
+
+## TODO (if listed)
+  Microsoft To Do only: créer/lister/modifier/terminer des tâches To Do. NOT executors. NOT search.
+
+## MAIL (if listed)
+  Email: lire/envoyer/répondre/transférer/supprimer des emails Gmail ou Outlook. NOT executors. NOT search.`.trim();
 
 function buildUserPrompt(params: {
   text: string;
@@ -80,23 +111,26 @@ function buildUserPrompt(params: {
 }): string {
   const parts: string[] = [];
 
+  parts.push(`Date: ${new Date().toISOString().slice(0, 10)}`);
+
   if (params.summary?.trim()) {
-    parts.push(`Context summary: ${params.summary.trim()}`);
+    parts.push(`Conversation summary: ${params.summary.trim()}`);
   }
 
   if (params.recentMessages.length > 0) {
     const recent = params.recentMessages
-      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+      .slice(-3)
+      .map((m) => `${m.role === 'user' ? 'U' : 'A'}: ${m.content.slice(0, 120)}`)
       .join('\n');
-    parts.push(`Recent:\n${recent}`);
+    parts.push(`Recent messages:\n${recent}`);
   }
 
   const agentList = params.agents
-    .map((a) => `- ${a.agentId}: ${a.hint}`)
+    .map((a) => `  ${a.agentId}: ${a.hint}`)
     .join('\n');
-  parts.push(`Agents:\n${agentList}`);
+  parts.push(`Available agents:\n${agentList}`);
 
-  parts.push(`Message: ${params.text}`);
+  parts.push(`User message: ${params.text}`);
 
   return parts.join('\n\n');
 }
