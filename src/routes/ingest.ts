@@ -524,19 +524,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       committed.usedSummaryVersion ?? (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
 
     // ── Orchestrator layer ────────────────────────────────────────────────────
-    // Router + HA general start in parallel.
-    // Router returns a list of targets — supports multi-domain requests
-    // (e.g. "lance la musique ET dis-moi la météo" → [spotify, jarvis_assistant]).
-    //
-    // HA general ALWAYS runs in parallel — it is the safety net.
-    // If all specialized tasks succeed → HA result is discarded (never sent).
-    // If any specialized task fails/returns null → HA general is the fallback.
+    // Router runs first (sequential). Targets can include spotify, search agents,
+    // or HA specialized agents (executors/mail/todo). HA general is called ONLY
+    // when no specialized result is produced (router failure, no valid targets,
+    // or all specialized tasks returned null).
     //
     // Outcomes:
-    //   - single spotify target   → music planner + executor, early return (HA discarded)
-    //   - spotify + HA targets    → run both in parallel, combine text parts
-    //   - HA specialized only     → call those in parallel, combine, discard general
-    //   - general / fail / none   → use HA general directly
+    //   - single spotify target   → music planner + executor, early return
+    //   - spotify + HA targets    → run both, combine text parts
+    //   - HA specialized only     → call those, combine
+    //   - router fails / none     → HA general called as fallback
 
     const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
     const spotifyEntry = deps.spotifyWebApi.isConfigured()
@@ -586,7 +583,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }).catch(() => { /* ack is best-effort — main flow handles the real result */ });
     }
 
-    const [routerResult] = await Promise.allSettled([routerPromise]);
+    const routerResult = await routerPromise.then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason: unknown) => ({ status: 'rejected' as const, reason }),
+    );
 
     if (routerResult.status === 'rejected' && routerEnabled) {
       app.log.warn({ threadId, requestId, err: routerResult.reason }, 'ha_agent_router_failed_fallback_general');
