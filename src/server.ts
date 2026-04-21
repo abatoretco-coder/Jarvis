@@ -4,6 +4,7 @@ import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
+import { registerDashboardRoute } from './routes/dashboard';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerIngestRoute } from './routes/ingest';
@@ -73,6 +74,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerApiKeyHook(app, env);
 
   registerCapabilitiesRoute(app, deps);
+  registerDashboardRoute(app, deps);
   registerHaIndexRoute(app, deps);
 
   registerIngestRoute(app, deps);
