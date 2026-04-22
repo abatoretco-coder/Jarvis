@@ -8,6 +8,7 @@ import { registerDashboardRoute } from './routes/dashboard';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerIngestRoute } from './routes/ingest';
+import { registerNewsSummaryRoute } from './routes/newsSummary';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 
 export type AppDeps = {
@@ -76,6 +77,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerCapabilitiesRoute(app, deps);
   registerDashboardRoute(app, deps);
   registerHaIndexRoute(app, deps);
+  registerNewsSummaryRoute(app, deps);
 
   registerIngestRoute(app, deps);
 

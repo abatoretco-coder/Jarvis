@@ -25,6 +25,7 @@ import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 const ingestSchema = z.object({
   threadId: z.string().min(1),
   text: z.string().optional(),
+  contextNote: z.string().optional(),
   clientContext: z.record(z.unknown()).optional(),
   domain: z.string().optional(),
   action: z.string().optional(),
@@ -437,6 +438,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const threadId = parsed.data.threadId.trim();
     const text = toSingleParagraphPlainText(parsed.data.text ?? '');
+    const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
+    const assistantInputText = contextNote
+      ? toSingleParagraphPlainText(`Contexte d actualite: ${contextNote}. Question utilisateur: ${text}`)
+      : text;
     const requestId = randomUUID();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
@@ -553,7 +558,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const routerPromise = routerEnabled
       ? routeToHaAgent({
-          text,
+          text: assistantInputText,
           agents: allAgentEntries,
           summary: threadBefore.summary?.trim() || undefined,
           recentMessages,
@@ -648,7 +653,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             : planSpotifyActionFromTextWithOpenAi({
                 env: deps.env,
                 spotifyWebApi: deps.spotifyWebApi,
-                text,
+                text: assistantInputText,
                 correlationId: correlationId || undefined,
                 userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
               });
@@ -715,7 +720,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
             tasks.push(
               callSearchAgent(searchAgentKey, {
-                text,
+                text: assistantInputText,
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
                 perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
@@ -737,7 +742,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             // Todo agent: LLM planner → Microsoft Graph Tasks — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct');
             tasks.push(
-              callTodoAgent(text, {
+              callTodoAgent(assistantInputText, {
                 MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
                 MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
                 MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
@@ -759,7 +764,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             // Mail agent: LLM planner → Gmail / Outlook Graph — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct');
             tasks.push(
-              callMailAgent(text, {
+              callMailAgent(assistantInputText, {
                 mailAccounts:    buildMailAccounts(deps.env),
                 OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
@@ -777,7 +782,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           } else {
             tasks.push(
               conversationService
-                .callHomeAssistantConversation(text, threadId, undefined, haTarget.agentId)
+                .callHomeAssistantConversation(assistantInputText, threadId, undefined, haTarget.agentId)
                 .then((txt): SpecializedResult | null => {
                   if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
                     app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
@@ -831,7 +836,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           } else {
             app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesizing');
             assistantText = await synthesizeAgentResponses({
-              userText: text,
+              userText: assistantInputText,
               parts,
               options: {
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
@@ -853,7 +858,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (assistantText === undefined) {
       try {
         app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
-        const haText = await conversationService.callHomeAssistantConversation(text, threadId, undefined, generalAgentId);
+        const haText = await conversationService.callHomeAssistantConversation(assistantInputText, threadId, undefined, generalAgentId);
         if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
           app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
           assistantText = toDeterministicHaFailureMessage();
