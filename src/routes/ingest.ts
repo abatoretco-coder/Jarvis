@@ -129,6 +129,14 @@ function uniqueNonEmpty(values: string[]): string[] {
   return out;
 }
 
+function normalizeClientChannel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!normalized) return undefined;
+  if (!/^[a-z0-9._-]{2,64}$/.test(normalized)) return undefined;
+  return normalized;
+}
+
 /**
  * Calls the appropriate Perplexity/OpenAI search agent based on a SearchAgentConfig.
  * Bypasses HA entirely — config controls model, prompt, and filters per agent type.
@@ -439,6 +447,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const threadId = parsed.data.threadId.trim();
     const text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
+    const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
+    const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
+    const clientChannel = clientContextChannel ?? headerChannel;
     const assistantInputText = contextNote
       ? toSingleParagraphPlainText(`Contexte d actualite: ${contextNote}. Question utilisateur: ${text}`)
       : text;
@@ -446,6 +457,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
     const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
+
+    await threadRepository.getOrCreate(threadId, { channel: clientChannel ?? null });
 
     const toDeterministicHaFailureMessage = (): string => (
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
@@ -500,7 +513,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     app.log.info(
-      { threadId, requestId, text_len: text.length, voice_turn_id: voiceTurnId || undefined, correlation_id: correlationId || undefined },
+      {
+        threadId,
+        requestId,
+        text_len: text.length,
+        client_channel: clientChannel,
+        voice_turn_id: voiceTurnId || undefined,
+        correlation_id: correlationId || undefined,
+      },
       'ingest_start',
     );
 
@@ -747,6 +767,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
                 MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
                 MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
+                OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
                 OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
                 OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
@@ -766,6 +787,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             tasks.push(
               callMailAgent(assistantInputText, {
                 mailAccounts:    buildMailAccounts(deps.env),
+                OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
                 OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
                 OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
@@ -1310,6 +1332,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   app.get('/v1/threads', async (req, reply) => {
     const listQuerySchema = z.object({
       limit: z.coerce.number().int().min(1).max(200).optional(),
+      channel: z.string().min(2).max(64).optional(),
     });
 
     const parsedQuery = listQuerySchema.safeParse(req.query ?? {});
@@ -1318,7 +1341,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const limit = parsedQuery.data.limit ?? 40;
-    const items = await threadRepository.listRecent(limit);
+    const channel = normalizeClientChannel(parsedQuery.data.channel);
+    const items = await threadRepository.listRecent(limit, { channel: channel ?? null });
 
     return reply.code(200).send({ items });
   });

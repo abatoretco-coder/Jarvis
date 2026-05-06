@@ -23,26 +23,34 @@ function assertSummaryStatus(value: string): SummaryStatus {
 export class SqliteThreadRepository implements ThreadRepository {
   constructor(private readonly db: Database.Database) {}
 
-  async getOrCreate(threadId: string): Promise<ThreadRecord> {
+  async getOrCreate(threadId: string, options?: { channel?: string | null }): Promise<ThreadRecord> {
     const now = Date.now();
+    const incomingChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
     this.db
       .prepare(
         `INSERT INTO conversation_threads (
-          thread_id, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, created_at_ms, updated_at_ms
-        ) VALUES (?, '', 0, 0, NULL, NULL, 'idle', 0, ?, ?)
+          thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, '', 0, 0, NULL, NULL, 'idle', 0, ?, ?)
         ON CONFLICT(thread_id) DO NOTHING`
       )
-      .run(threadId, now, now);
+      .run(threadId, incomingChannel || null, now, now);
+
+    if (incomingChannel) {
+      this.db
+        .prepare("UPDATE conversation_threads SET channel = ?, updated_at_ms = ? WHERE thread_id = ? AND (channel IS NULL OR channel = '' OR channel <> ?)")
+        .run(incomingChannel, now, threadId, incomingChannel);
+    }
 
     const row = this.db
       .prepare(
-        `SELECT thread_id, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count
+        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count
          FROM conversation_threads
          WHERE thread_id = ?`
       )
       .get(threadId) as
       | {
           thread_id: string;
+          channel: string | null;
           summary: string;
           summary_upto_seq: number;
           summary_version: number;
@@ -59,6 +67,7 @@ export class SqliteThreadRepository implements ThreadRepository {
 
     return {
       threadId: row.thread_id,
+      channel: row.channel,
       summary: row.summary ?? '',
       summaryUptoSeq: Number(row.summary_upto_seq ?? 0),
       summaryVersion: Number(row.summary_version ?? 0),
@@ -177,21 +186,35 @@ export class SqliteThreadRepository implements ThreadRepository {
     return tx();
   }
 
-  async listRecent(limit: number): Promise<ThreadListItem[]> {
+  async listRecent(limit: number, options?: { channel?: string | null }): Promise<ThreadListItem[]> {
     const safeLimit = Math.max(1, Math.min(limit, 200));
-    const rows = this.db
-      .prepare(
-        `SELECT 
+    const filterChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
+    const selectSql = filterChannel
+      ? `SELECT
           t.thread_id,
+          t.channel,
+          t.summary,
+          t.updated_at_ms,
+          (SELECT COUNT(*) FROM conversation_messages m WHERE m.thread_id = t.thread_id) as message_count
+         FROM conversation_threads t
+         WHERE t.channel = ?
+         ORDER BY t.updated_at_ms DESC
+         LIMIT ?`
+      : `SELECT
+          t.thread_id,
+          t.channel,
           t.summary,
           t.updated_at_ms,
           (SELECT COUNT(*) FROM conversation_messages m WHERE m.thread_id = t.thread_id) as message_count
          FROM conversation_threads t
          ORDER BY t.updated_at_ms DESC
-         LIMIT ?`
-      )
-      .all(safeLimit) as Array<{
+         LIMIT ?`;
+
+    const rows = this.db
+      .prepare(selectSql)
+      .all(...(filterChannel ? [filterChannel, safeLimit] : [safeLimit])) as Array<{
       thread_id: string;
+      channel: string | null;
       summary: string;
       updated_at_ms: number;
       message_count: number;
@@ -199,6 +222,7 @@ export class SqliteThreadRepository implements ThreadRepository {
 
     return rows.map((row) => ({
       threadId: row.thread_id,
+      channel: row.channel,
       summary: row.summary || `Conversation ${row.thread_id.slice(-8)}`,
       lastActivityMs: Number(row.updated_at_ms),
       messageCount: Number(row.message_count),
@@ -341,6 +365,7 @@ export function createConversationDb(dbPath: string): Database.Database {
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversation_threads (
       thread_id TEXT PRIMARY KEY,
+      channel TEXT,
       summary TEXT NOT NULL DEFAULT '',
       summary_upto_seq INTEGER NOT NULL DEFAULT 0,
       summary_version INTEGER NOT NULL DEFAULT 0,
@@ -369,5 +394,19 @@ export function createConversationDb(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_conversation_threads_updated_at
       ON conversation_threads(updated_at_ms DESC);
   `);
+
+  const threadColumns = db
+    .prepare('PRAGMA table_info(conversation_threads)')
+    .all() as Array<{ name: string }>;
+  const hasChannelColumn = threadColumns.some((column) => column.name === 'channel');
+  if (!hasChannelColumn) {
+    db.exec('ALTER TABLE conversation_threads ADD COLUMN channel TEXT;');
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_conversation_threads_channel_updated
+      ON conversation_threads(channel, updated_at_ms DESC);
+  `);
+
   return db;
 }

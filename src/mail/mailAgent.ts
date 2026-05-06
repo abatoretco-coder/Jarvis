@@ -1,3 +1,5 @@
+import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+
 /**
  * Mail agent — Gmail (Google) + Outlook (Microsoft Graph) sub-agent.
  *
@@ -52,6 +54,10 @@ export interface MailAccount {
 
 // Env surface required by buildMailAccounts() — a subset of the full zod env.
 export interface MailAccountsEnv {
+  // Optional unlimited JSON config
+  MAIL_ACCOUNTS_JSON?: string;
+  // Optional persistent rotated refresh-token store
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
   // Legacy single-account vars (backward compat)
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
@@ -77,6 +83,35 @@ export interface MailAccountsEnv {
 export function buildMailAccounts(env: MailAccountsEnv): MailAccount[] {
   const accounts: MailAccount[] = [];
   const e = env as Record<string, string | undefined>;
+
+  // Unlimited mode via a single JSON env var.
+  // Example:
+  // MAIL_ACCOUNTS_JSON=[{"label":"perso","provider":"gmail","clientId":"...","clientSecret":"...","refreshToken":"..."}]
+  const jsonRaw = env.MAIL_ACCOUNTS_JSON?.trim();
+  if (jsonRaw) {
+    try {
+      const parsed = JSON.parse(jsonRaw) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const row of parsed) {
+          if (typeof row !== 'object' || row === null) continue;
+          const candidate = row as Record<string, unknown>;
+          const label = typeof candidate.label === 'string' ? candidate.label.trim() : '';
+          const provider = typeof candidate.provider === 'string' ? candidate.provider.trim().toLowerCase() : '';
+          const clientId = typeof candidate.clientId === 'string' ? candidate.clientId.trim() : '';
+          const clientSecret = typeof candidate.clientSecret === 'string' ? candidate.clientSecret.trim() : '';
+          const refreshToken = typeof candidate.refreshToken === 'string' ? candidate.refreshToken.trim() : '';
+          const tenantId = typeof candidate.tenantId === 'string' ? candidate.tenantId.trim() : undefined;
+          if (!label || !clientId || !clientSecret || !refreshToken) continue;
+          if (provider !== 'gmail' && provider !== 'outlook') continue;
+          accounts.push({ label, provider, clientId, clientSecret, refreshToken, tenantId });
+        }
+      }
+    } catch {
+      // Invalid JSON is ignored on purpose, fallback modes remain available.
+    }
+  }
+
+  if (accounts.length > 0) return accounts;
 
   for (let i = 1; i <= 5; i++) {
     const label         = e[`MAIL_ACCOUNT_${i}_LABEL`];
@@ -125,12 +160,17 @@ type MinLogger = {
 
 // ─── Account token helper ─────────────────────────────────────────────────────
 
-async function getAccountToken(acc: MailAccount): Promise<string> {
+async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: string): Promise<string> {
+  const cacheBase = `${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
+  const storeBase = `mail:${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
   if (acc.provider === 'gmail') {
     return refreshGoogleToken({
       GOOGLE_CLIENT_ID:     acc.clientId,
       GOOGLE_CLIENT_SECRET: acc.clientSecret,
       GOOGLE_REFRESH_TOKEN: acc.refreshToken,
+      cacheKey:             cacheBase,
+      storeKey:             storeBase,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: refreshStorePath,
     });
   }
   return refreshMicrosoftToken({
@@ -138,6 +178,9 @@ async function getAccountToken(acc: MailAccount): Promise<string> {
     MICROSOFT_CLIENT_ID:     acc.clientId,
     MICROSOFT_CLIENT_SECRET: acc.clientSecret,
     MICROSOFT_REFRESH_TOKEN: acc.refreshToken,
+    cacheKey:                cacheBase,
+    storeKey:                storeBase,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: refreshStorePath,
   });
 }
 
@@ -169,12 +212,19 @@ async function refreshGoogleToken(env: {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GOOGLE_REFRESH_TOKEN: string;
+  cacheKey?: string;
+  storeKey?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
 }): Promise<string> {
-  const cacheKey = env.GOOGLE_CLIENT_ID;
+  const cacheKey = env.cacheKey?.trim() || env.GOOGLE_CLIENT_ID;
+  const storeKey = env.storeKey?.trim() || `mail:gmail:${env.GOOGLE_CLIENT_ID}`;
   const cached = _googleTokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
 
-  const refreshToken = _googleLiveRefreshToken.get(cacheKey) ?? env.GOOGLE_REFRESH_TOKEN;
+  const refreshToken =
+    _googleLiveRefreshToken.get(cacheKey)
+    ?? await getStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey)
+    ?? env.GOOGLE_REFRESH_TOKEN;
   const resp = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -194,7 +244,10 @@ async function refreshGoogleToken(env: {
   const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
   if (!data.access_token) throw new Error('mail_google_token_refresh_no_token');
 
-  if (data.refresh_token) _googleLiveRefreshToken.set(cacheKey, data.refresh_token);
+  if (data.refresh_token) {
+    _googleLiveRefreshToken.set(cacheKey, data.refresh_token);
+    await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
+  }
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
   _googleTokenCache.set(cacheKey, {
@@ -221,12 +274,19 @@ async function refreshMicrosoftToken(env: {
   MICROSOFT_CLIENT_ID: string;
   MICROSOFT_CLIENT_SECRET: string;
   MICROSOFT_REFRESH_TOKEN: string;
+  cacheKey?: string;
+  storeKey?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
 }): Promise<string> {
-  const cacheKey = env.MICROSOFT_CLIENT_ID;
+  const cacheKey = env.cacheKey?.trim() || env.MICROSOFT_CLIENT_ID;
+  const storeKey = env.storeKey?.trim() || `mail:outlook:${env.MICROSOFT_CLIENT_ID}`;
   const cached = _msTokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
 
-  const refreshToken = _msLiveRefreshToken.get(cacheKey) ?? env.MICROSOFT_REFRESH_TOKEN;
+  const refreshToken =
+    _msLiveRefreshToken.get(cacheKey)
+    ?? await getStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey)
+    ?? env.MICROSOFT_REFRESH_TOKEN;
   const tenantId = env.MICROSOFT_TENANT_ID?.trim() || 'common';
   const resp = await fetch(
     `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
@@ -251,7 +311,10 @@ async function refreshMicrosoftToken(env: {
   const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
   if (!data.access_token) throw new Error('mail_ms_token_refresh_no_token');
 
-  if (data.refresh_token) _msLiveRefreshToken.set(cacheKey, data.refresh_token);
+  if (data.refresh_token) {
+    _msLiveRefreshToken.set(cacheKey, data.refresh_token);
+    await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
+  }
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
   _msTokenCache.set(cacheKey, {
@@ -888,7 +951,7 @@ export async function callMailAgent(
   if ((action.action === 'list_inbox' || action.action === 'search_emails') && accounts.length > 1 && !action.account) {
     const results = await Promise.allSettled(
       accounts.map(async (acc) => {
-        const token = await getAccountToken(acc);
+        const token = await getAccountTokenWithStore(acc, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
         const result = acc.provider === 'gmail'
           ? await executeGmail(action, token)
           : await executeOutlook(action, token);
@@ -915,7 +978,7 @@ export async function callMailAgent(
     ? (accounts.find(a => a.label.toLowerCase() === (action.account as string).toLowerCase()) ?? accounts[0])
     : accounts[0];
 
-  const token = await getAccountToken(target);
+  const token = await getAccountTokenWithStore(target, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
   const result = target.provider === 'gmail'
     ? await executeGmail(action, token)
     : await executeOutlook(action, token);

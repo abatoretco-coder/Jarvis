@@ -2,6 +2,7 @@ export type SummaryStatus = 'idle' | 'running' | 'ready' | 'failed';
 
 export type ThreadRecord = {
   threadId: string;
+  channel: string | null;
   summary: string;
   summaryUptoSeq: number;
   summaryVersion: number;
@@ -18,20 +19,21 @@ export type CommitCandidateResult = {
 
 export type ThreadListItem = {
   threadId: string;
+  channel: string | null;
   summary: string;
   lastActivityMs: number;
   messageCount: number;
 };
 
 export interface ThreadRepository {
-  getOrCreate(threadId: string): Promise<ThreadRecord>;
+  getOrCreate(threadId: string, options?: { channel?: string | null }): Promise<ThreadRecord>;
   incrementInteractionCount(threadId: string): Promise<number>;
   tryStartSummary(threadId: string): Promise<boolean>;
   markSummaryCandidateReady(threadId: string, candidate: string, uptoSeq: number): Promise<void>;
   markSummaryFailed(threadId: string, reason: string): Promise<void>;
   resetSummaryStatus(threadId: string): Promise<void>;
   commitCandidateIfReady(threadId: string): Promise<CommitCandidateResult>;
-  listRecent(limit: number): Promise<ThreadListItem[]>;
+  listRecent(limit: number, options?: { channel?: string | null }): Promise<ThreadListItem[]>;
   deleteThread(threadId: string): Promise<boolean>;
   purgeThreadsOlderThan(cutoffMs: number): Promise<number>;
 }

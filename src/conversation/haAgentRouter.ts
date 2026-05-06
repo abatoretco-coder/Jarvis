@@ -84,6 +84,7 @@ Routing:
   resume/play/launch without device/content → play
   generic music request → search_and_play{query:"musique"}
   RULE: search_and_play MUST always have a non-empty query.
+  NEVER route home automation intents (timer/minuteur/rappel/alarme/lumière/prise/scène/script) to spotify.
 Device aliases: pc/ordinateur/jarvis/vm400→"alias:pc" | salon/enceinte→"alias:salon" | tel/mobile→"alias:phone"
 
 ## SEARCH AGENTS
@@ -95,6 +96,7 @@ Device aliases: pc/ordinateur/jarvis/vm400→"alias:pc" | salon/enceinte→"alia
 
 ## EXECUTORS (home automation)
   Action verbs (allume, éteins, mets, crée, programme, règle, active, démarre) + home object (lumière, prise, minuteur, rappel, timer, alarme, script, scène, appareil) → executors.
+  Examples: "mets un minuteur 3 minutes", "démarre un timer", "programme un rappel" → executors only.
   ⚠ NEVER route executors to search agents.
 
 ## TODO (if listed)

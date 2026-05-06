@@ -15,6 +15,7 @@ type DashboardSection = {
   lines: string[];
   source: string;
   status: 'ok' | 'empty' | 'error';
+  items?: TodoTaskItem[];
 };
 
 type CalendarPreview = {
@@ -26,10 +27,25 @@ type CalendarPreview = {
 type DashboardTask = {
   id: string;
   title: string;
+  status?: 'notStarted' | 'inProgress' | 'completed' | 'waitingOnOthers' | 'deferred';
   importance?: 'low' | 'normal' | 'high';
   dueDateTime?: { dateTime: string; timeZone: string } | null;
   createdDateTime?: string;
+  recurrence?: { pattern?: Record<string, unknown>; range?: Record<string, unknown> } | null;
+  listId: string;
   listName: string;
+};
+
+type TodoTaskItem = {
+  id: string;
+  title: string;
+  listId: string;
+  listName: string;
+  status: 'notStarted' | 'inProgress' | 'completed' | 'waitingOnOthers' | 'deferred';
+  importance: 'low' | 'normal' | 'high';
+  dueDateTime?: { dateTime: string; timeZone: string } | null;
+  createdDateTime?: string;
+  recurrence?: { pattern?: Record<string, unknown>; range?: Record<string, unknown> } | null;
 };
 
 type DashboardMailItem = {
@@ -47,6 +63,11 @@ type MicrosoftAccessTokenEnv = {
 };
 
 type MsTaskList = {
+  id: string;
+  displayName: string;
+};
+
+type TodoListItem = {
   id: string;
   displayName: string;
 };
@@ -254,9 +275,9 @@ function buildAgendaSection(states: HaState[], now = new Date()): DashboardSecti
 
   const lines = calendars.map((item) => {
     const headline = item.message && item.message.toLowerCase() !== item.title.toLowerCase()
-      ? `${item.title} — ${item.message}`
+      ? `${item.title} | ${item.message}`
       : item.title;
-    return `${formatDateForLine(item.start)} — ${headline}`;
+    return `${formatDateForLine(item.start)} | ${headline}`;
   });
 
   return {
@@ -343,6 +364,112 @@ async function graphGet<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function graphPost<T>(path: string, token: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`${MS_GRAPH_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8_000),
+  });
+
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`graph_post_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+async function graphPatch(path: string, token: string, body: Record<string, unknown>): Promise<void> {
+  const response = await fetch(`${MS_GRAPH_BASE}${path}`, {
+    method: 'PATCH',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8_000),
+  });
+
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`graph_patch_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+}
+
+async function fetchMicrosoftTodoLists(env: AppDeps['env']): Promise<{ token: string; lists: MsTaskList[] }> {
+  if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
+    throw new Error('microsoft_todo_not_configured');
+  }
+
+  const token = await refreshMicrosoftAccessToken(env, 'Tasks.ReadWrite offline_access');
+  const listsPayload = await graphGet<{ value?: MsTaskList[] }>('/me/todo/lists?$top=50', token);
+  return { token, lists: listsPayload.value ?? [] };
+}
+
+function mapTodoListItem(list: MsTaskList): TodoListItem {
+  return {
+    id: list.id,
+    displayName: list.displayName,
+  };
+}
+
+function toGraphDateTimeFromDateOnly(dateOnly: string): { dateTime: string; timeZone: string } | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return undefined;
+  const [year, month, day] = dateOnly.split('-').map((value) => Number(value));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return undefined;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  return {
+    // Graph accepts date-time paired with timezone. Keep UTC explicit for stability.
+    dateTime: `${dateOnly}T09:00:00.0000000`,
+    timeZone: 'UTC',
+  };
+}
+
+function mapTodoTaskItem(task: DashboardTask): TodoTaskItem {
+  return {
+    id: task.id,
+    title: task.title,
+    listId: task.listId,
+    listName: task.listName,
+    status: task.status ?? 'notStarted',
+    importance: task.importance ?? 'normal',
+    dueDateTime: task.dueDateTime,
+    createdDateTime: task.createdDateTime,
+    recurrence: task.recurrence,
+  };
+}
+
+async function fetchMicrosoftTodoTasks(env: AppDeps['env']): Promise<TodoTaskItem[]> {
+  const { token, lists } = await fetchMicrosoftTodoLists(env);
+  if (lists.length === 0) return [];
+
+  const taskResults = await Promise.allSettled(
+    lists.map(async (list) => {
+      const payload = await graphGet<{ value?: Array<Omit<DashboardTask, 'listName' | 'listId'>> }>(
+        `/me/todo/lists/${list.id}/tasks?$orderby=createdDateTime desc&$top=100`,
+        token,
+      );
+      return (payload.value ?? []).map((task) => ({
+        ...task,
+        listId: list.id,
+        listName: list.displayName,
+      }));
+    }),
+  );
+
+  return taskResults
+    .filter((result): result is PromiseFulfilledResult<DashboardTask[]> => result.status === 'fulfilled')
+    .flatMap((result) => result.value)
+    .filter((task) => task.title?.trim())
+    .map(mapTodoTaskItem);
+}
+
 async function gmailGet<T>(path: string, token: string): Promise<T> {
   const response = await fetch(`${GMAIL_BASE}${path}`, {
     headers: {
@@ -362,13 +489,26 @@ async function gmailGet<T>(path: string, token: string): Promise<T> {
 
 function isTaskOverdue(task: DashboardTask, now: Date): boolean {
   const dueDate = parseDate(task.dueDateTime?.dateTime);
-  return dueDate !== null && dueDate.getTime() < now.getTime();
+  if (!dueDate) return false;
+  const todayStart = startOfToday(now);
+  return dueDate.getTime() < todayStart.getTime();
+}
+
+function isTaskDueToday(task: DashboardTask, now: Date): boolean {
+  const dueDate = parseDate(task.dueDateTime?.dateTime);
+  if (!dueDate) return false;
+  const todayStart = startOfToday(now);
+  const tomorrowStart = addDays(todayStart, 1);
+  return dueDate.getTime() >= todayStart.getTime() && dueDate.getTime() < tomorrowStart.getTime();
 }
 
 function isTaskDueThisWeek(task: DashboardTask, now: Date): boolean {
   const dueDate = parseDate(task.dueDateTime?.dateTime);
   if (!dueDate) return false;
-  return dueDate.getTime() >= now.getTime() && dueDate.getTime() < addDays(now, 7).getTime();
+  const todayStart = startOfToday(now);
+  const tomorrowStart = addDays(todayStart, 1);
+  const weekLimit = addDays(todayStart, 7);
+  return dueDate.getTime() >= tomorrowStart.getTime() && dueDate.getTime() < weekLimit.getTime();
 }
 
 function isRecentlyCreatedWithoutDueDate(task: DashboardTask, now: Date): boolean {
@@ -378,16 +518,58 @@ function isRecentlyCreatedWithoutDueDate(task: DashboardTask, now: Date): boolea
   return createdDate.getTime() >= addDays(now, -7).getTime();
 }
 
+function taskPriorityBucket(task: DashboardTask, now: Date): number {
+  if (isTaskOverdue(task, now)) return 0;
+  if (isTaskDueToday(task, now)) return 1;
+  if (isTaskDueThisWeek(task, now)) return 2;
+  if (isRecentlyCreatedWithoutDueDate(task, now)) return 3;
+  if (task.dueDateTime?.dateTime) return 4;
+  return 5;
+}
+
+function importanceRank(value: DashboardTask['importance']): number {
+  if (value === 'high') return 0;
+  if (value === 'normal') return 1;
+  return 2;
+}
+
+function compareDashboardTasks(left: DashboardTask, right: DashboardTask, now: Date): number {
+  const leftBucket = taskPriorityBucket(left, now);
+  const rightBucket = taskPriorityBucket(right, now);
+  if (leftBucket !== rightBucket) return leftBucket - rightBucket;
+
+  const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  if (leftDue !== rightDue) return leftDue - rightDue;
+
+  const leftImportance = importanceRank(left.importance);
+  const rightImportance = importanceRank(right.importance);
+  if (leftImportance !== rightImportance) return leftImportance - rightImportance;
+
+  const leftCreated = parseDate(left.createdDateTime)?.getTime() ?? 0;
+  const rightCreated = parseDate(right.createdDateTime)?.getTime() ?? 0;
+  if (leftCreated !== rightCreated) return rightCreated - leftCreated;
+
+  return left.title.localeCompare(right.title, 'fr', { sensitivity: 'base' });
+}
+
 function formatTaskLine(label: string, task: DashboardTask): string {
   const dueDate = parseDate(task.dueDateTime?.dateTime);
   const createdDate = parseDate(task.createdDateTime);
-  const accents = task.importance === 'high' ? ' — urgente' : '';
+  const urgency = task.importance === 'high' ? ' | Urgente' : '';
+
+  const formatTaskDateOnly = (date: Date): string => date.toLocaleDateString('fr-FR', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit',
+  });
+
   const datePart = dueDate
-    ? ` — echeance ${formatDateForLine(dueDate)}`
+    ? ` | Echeance ${formatTaskDateOnly(dueDate)}`
     : createdDate
-      ? ` — creee ${formatDateForLine(createdDate)}`
+      ? ` | Creee ${formatTaskDateOnly(createdDate)}`
       : '';
-  return `${label} — ${task.title} — ${task.listName}${datePart}${accents}`;
+  return `${label}: ${task.title} (${task.listName})${datePart}${urgency}`;
 }
 
 async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection> {
@@ -395,44 +577,41 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
     return makeSection('Taches', 'jarvis-todo', 'La gestion des taches n est pas configuree (identifiants Microsoft manquants).');
   }
 
-  const token = await refreshMicrosoftAccessToken(env, 'Tasks.ReadWrite offline_access');
-  const listsPayload = await graphGet<{ value?: MsTaskList[] }>('/me/todo/lists?$top=50', token);
-  const lists = listsPayload.value ?? [];
-  if (lists.length === 0) {
-    return makeSection('Taches', 'jarvis-todo', 'Aucune liste de taches disponible dans Microsoft To Do.');
+  const tasks = (await fetchMicrosoftTodoTasks(env)).filter((task) => task.status !== 'completed');
+  if (tasks.length === 0) {
+    const { lists } = await fetchMicrosoftTodoLists(env);
+    if (lists.length === 0) {
+      return makeSection('Taches', 'jarvis-todo', 'Aucune liste de taches disponible dans Microsoft To Do.');
+    }
+    return makeSection('Taches', 'jarvis-todo', 'Aucune tache active dans Microsoft To Do.');
   }
 
-  const taskResults = await Promise.allSettled(
-    lists.map(async (list) => {
-      const payload = await graphGet<{ value?: Array<Omit<DashboardTask, 'listName'>> }>(
-        `/me/todo/lists/${list.id}/tasks?$filter=status ne 'completed'&$top=100&$select=id,title,importance,dueDateTime,createdDateTime`,
-        token,
-      );
-      return (payload.value ?? []).map((task) => ({ ...task, listName: list.displayName }));
-    }),
-  );
-
-  const tasks = taskResults
-    .filter((result): result is PromiseFulfilledResult<DashboardTask[]> => result.status === 'fulfilled')
-    .flatMap((result) => result.value)
-    .filter((task) => task.title?.trim());
-
   const now = new Date();
-  const overdueTasks = tasks
+  const sortedTasks = tasks.slice().sort((left, right) => compareDashboardTasks(left, right, now));
+
+  const overdueTasks = sortedTasks
     .filter((task) => isTaskOverdue(task, now))
     .sort((left, right) => {
       const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
       const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
       return leftDue - rightDue;
     });
-  const upcomingTasks = tasks
+  const upcomingTasks = sortedTasks
     .filter((task) => isTaskDueThisWeek(task, now))
     .sort((left, right) => {
       const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
       const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
       return leftDue - rightDue;
     });
-  const recentUndatedTasks = tasks
+  const todayTasks = sortedTasks
+    .filter((task) => isTaskDueToday(task, now))
+    .sort((left, right) => {
+      const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      return leftDue - rightDue;
+    });
+
+  const recentUndatedTasks = sortedTasks
     .filter((task) => isRecentlyCreatedWithoutDueDate(task, now))
     .sort((left, right) => {
       const leftCreated = parseDate(left.createdDateTime)?.getTime() ?? 0;
@@ -442,16 +621,42 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
 
   const relevantTasks = [
     ...overdueTasks.map((task) => formatTaskLine('En retard', task)),
+    ...todayTasks.map((task) => formatTaskLine('Aujourd hui', task)),
     ...upcomingTasks.map((task) => formatTaskLine('Cette semaine', task)),
     ...recentUndatedTasks.map((task) => formatTaskLine('Recente sans date', task)),
   ].slice(0, 8);
 
   if (relevantTasks.length === 0) {
-    return makeSection('Taches', 'jarvis-todo', 'Aucune tache prioritaire: rien en retard, rien a echeance cette semaine, aucune creation recente sans date.');
+    if (tasks.length === 0) {
+      return makeSection('Taches', 'jarvis-todo', 'Aucune tache active dans Microsoft To Do.');
+    }
+
+    const activePreview = sortedTasks
+      .slice()
+      .sort((left, right) => {
+        const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        if (leftDue !== rightDue) return leftDue - rightDue;
+        const leftCreated = parseDate(left.createdDateTime)?.getTime() ?? 0;
+        const rightCreated = parseDate(right.createdDateTime)?.getTime() ?? 0;
+        return rightCreated - leftCreated;
+      })
+      .slice(0, 8)
+      .map((task) => formatTaskLine('Active', task));
+
+    return {
+      title: 'Taches',
+      source: 'jarvis-todo',
+      summary: `${tasks.length} tache${tasks.length > 1 ? 's' : ''} active${tasks.length > 1 ? 's' : ''}. Aucune priorite urgente cette semaine.`,
+      lines: activePreview,
+      status: 'ok',
+      items: sortedTasks,
+    };
   }
 
   const summaryParts = [
     overdueTasks.length > 0 ? `${overdueTasks.length} en retard` : '',
+    todayTasks.length > 0 ? `${todayTasks.length} aujourd hui` : '',
     upcomingTasks.length > 0 ? `${upcomingTasks.length} a echeance cette semaine` : '',
     recentUndatedTasks.length > 0 ? `${recentUndatedTasks.length} recente${recentUndatedTasks.length > 1 ? 's' : ''} sans date` : '',
   ].filter(Boolean);
@@ -462,6 +667,7 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
     summary: `Priorites taches: ${summaryParts.join(', ')}.`,
     lines: relevantTasks,
     status: 'ok',
+    items: sortedTasks,
   };
 }
 
@@ -623,6 +829,146 @@ function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null 
 }
 
 export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): void {
+  app.get('/v1/todo/lists', async (_req, reply) => {
+    try {
+      const { lists } = await fetchMicrosoftTodoLists(deps.env);
+      const items = lists.map(mapTodoListItem);
+      const defaultListId = items.find((list) => list.displayName.toLowerCase() === 'tasks')?.id ?? items[0]?.id ?? null;
+      return reply.code(200).send({ items, defaultListId });
+    } catch (error) {
+      app.log.warn({ error }, 'todo_lists_list_failed');
+      return reply.code(500).send({ error: 'todo_lists_list_failed' });
+    }
+  });
+
+  app.get('/v1/todo/tasks', async (_req, reply) => {
+    try {
+      const items = (await fetchMicrosoftTodoTasks(deps.env))
+        .filter((task) => task.status !== 'completed')
+        .sort((left, right) => {
+          const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+          const rightDue = parseDate(right.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+          if (leftDue !== rightDue) return leftDue - rightDue;
+          const leftCreated = parseDate(left.createdDateTime)?.getTime() ?? 0;
+          const rightCreated = parseDate(right.createdDateTime)?.getTime() ?? 0;
+          return rightCreated - leftCreated;
+        });
+      return reply.code(200).send({ items });
+    } catch (error) {
+      app.log.warn({ error }, 'todo_tasks_list_failed');
+      return reply.code(500).send({ error: 'todo_tasks_list_failed' });
+    }
+  });
+
+  app.post('/v1/todo/tasks', async (req, reply) => {
+    try {
+      const body = (req.body ?? {}) as {
+        title?: unknown;
+        listId?: unknown;
+        importance?: unknown;
+        dueDate?: unknown;
+      };
+      const title = typeof body.title === 'string' ? body.title.trim() : '';
+      if (!title) {
+        return reply.code(400).send({ error: 'title_required' });
+      }
+
+      const { token, lists } = await fetchMicrosoftTodoLists(deps.env);
+      if (lists.length === 0) {
+        return reply.code(400).send({ error: 'todo_list_missing' });
+      }
+
+      const listIdInput = typeof body.listId === 'string' ? body.listId.trim() : '';
+      const targetList = listIdInput
+        ? lists.find((list) => list.id === listIdInput)
+        : lists.find((list) => list.displayName.toLowerCase() === 'tasks') ?? lists[0];
+      if (!targetList) {
+        return reply.code(400).send({ error: 'todo_list_invalid' });
+      }
+
+      const importanceInput = typeof body.importance === 'string' ? body.importance.trim().toLowerCase() : 'normal';
+      const importance = importanceInput === 'high' || importanceInput === 'low' ? importanceInput : 'normal';
+
+      const payload: Record<string, unknown> = {
+        title,
+        importance,
+      };
+
+      const dueDateInput = typeof body.dueDate === 'string' ? body.dueDate.trim() : '';
+      if (dueDateInput) {
+        const dueDateTime = toGraphDateTimeFromDateOnly(dueDateInput);
+        if (!dueDateTime) {
+          return reply.code(400).send({ error: 'due_date_invalid' });
+        }
+        payload.dueDateTime = dueDateTime;
+      }
+
+      const created = await graphPost<Omit<DashboardTask, 'listId' | 'listName'>>(
+        `/me/todo/lists/${targetList.id}/tasks`,
+        token,
+        payload,
+      );
+
+      const item = mapTodoTaskItem({
+        ...created,
+        listId: targetList.id,
+        listName: targetList.displayName,
+      });
+
+      return reply.code(201).send({ item });
+    } catch (error) {
+      app.log.warn({ error }, 'todo_task_create_failed');
+      return reply.code(500).send({ error: 'todo_task_create_failed' });
+    }
+  });
+
+  app.patch('/v1/todo/tasks/:taskId', async (req, reply) => {
+    try {
+      const params = (req.params ?? {}) as { taskId?: string };
+      const taskId = params.taskId?.trim();
+      if (!taskId) {
+        return reply.code(400).send({ error: 'task_id_required' });
+      }
+
+      const body = (req.body ?? {}) as {
+        listId?: unknown;
+        status?: unknown;
+      };
+
+      const listId = typeof body.listId === 'string' ? body.listId.trim() : '';
+      if (!listId) {
+        return reply.code(400).send({ error: 'list_id_required' });
+      }
+
+      const { lists } = await fetchMicrosoftTodoLists(deps.env);
+      if (!lists.some((list) => list.id === listId)) {
+        return reply.code(404).send({ error: 'todo_list_not_found' });
+      }
+
+      const statusInput = typeof body.status === 'string' ? body.status.trim() : '';
+      if (statusInput !== 'completed' && statusInput !== 'notStarted') {
+        return reply.code(400).send({ error: 'status_invalid' });
+      }
+      const status = statusInput;
+
+      const token = await refreshMicrosoftAccessToken(deps.env, 'Tasks.ReadWrite offline_access');
+      try {
+        await graphPatch(`/me/todo/lists/${listId}/tasks/${taskId}`, token, { status });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('graph_patch_failed:404')) {
+          return reply.code(404).send({ error: 'todo_task_not_found' });
+        }
+        throw error;
+      }
+
+      return reply.code(200).send({ ok: true });
+    } catch (error) {
+      app.log.warn({ error }, 'todo_task_patch_failed');
+      return reply.code(500).send({ error: 'todo_task_patch_failed' });
+    }
+  });
+
   app.get('/v1/dashboard', async (_req, reply) => {
     const haStatesPromise = deps.ha
       ? deps.ha.getStates()

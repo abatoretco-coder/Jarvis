@@ -140,6 +140,10 @@ const envSchema = z
   // Optional: expose a minimal Home Assistant entity index for mapping/disambiguation
   EXPOSE_HA_INDEX: booleanFromEnv.default('false'),
 
+  // Persistent store for rotated OAuth refresh tokens (mail/todo).
+  // Allows automatic token rotation to survive process restarts.
+  OAUTH_REFRESH_TOKEN_STORE_PATH: z.string().default('/app/data/oauth-refresh-tokens.json'),
+
   // ── Microsoft Graph — Todo agent + Outlook mail agent ───────────────────────
   // Required for todo.* and mail.* (outlook) sub-agents.
   // Register an app at https://portal.azure.com → Azure Active Directory → App registrations.
@@ -170,6 +174,9 @@ const envSchema = z
   // When set, these override the single-account GOOGLE_*/MICROSOFT_* vars above.
   // MAIL_ACCOUNT_N_PROVIDER: "gmail" | "outlook"
   // MAIL_ACCOUNT_N_TENANT_ID: only for Outlook (default: "common")
+  // Optional unlimited mode: MAIL_ACCOUNTS_JSON='[{"label":"perso","provider":"gmail",...}]'
+  MAIL_ACCOUNTS_JSON: optionalNonEmptyString,
+
   MAIL_ACCOUNT_1_LABEL:         optionalNonEmptyString,
   MAIL_ACCOUNT_1_PROVIDER:      optionalNonEmptyString,
   MAIL_ACCOUNT_1_CLIENT_ID:     optionalNonEmptyString,

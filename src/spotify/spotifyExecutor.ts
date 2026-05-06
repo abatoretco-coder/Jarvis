@@ -201,23 +201,7 @@ function buildSearchQuery(input: {
   return undefined;
 }
 
-function isPersonalPlaylistIntent(input: {
-  query?: string;
-  text?: string;
-  entities?: Record<string, unknown>;
-}): boolean {
-  const q = normalizeForMatch(input.query ?? '');
-  const t = normalizeForMatch(input.text ?? '');
-  const playlistEntity = normalizeForMatch(
-    slotString(input.entities ?? {}, 'playlist')
-      ?? slotString(input.entities ?? {}, 'playlist_name')
-      ?? ''
-  );
 
-  const combined = [q, t, playlistEntity].filter((value) => value.length > 0).join(' ');
-  if (!combined) return false;
-  return /(^|\s)(ma|mes|moi|my)(\s|$)/.test(combined);
-}
 
 function isNowPlayingActive(data: Record<string, unknown>): boolean {
   return data.is_playing === true;
@@ -923,11 +907,8 @@ async function _executeSpotifyCapability(input: {
     }
 
     if (type === 'playlist') {
-      const personalPlaylistIntent = isPersonalPlaylistIntent({
-        query,
-        text: request.text,
-        entities,
-      });
+      // Try user playlists first (best match). If not found, fall through to
+      // public catalogue search below — no keyword-based intent detection.
       const userPlaylist = await spotifyWebApi.searchUserPlaylistContextUri(query);
       if (userPlaylist.ok) {
         const played = await spotifyWebApi.playContextUri(userPlaylist.uri, deviceId);
@@ -940,18 +921,7 @@ async function _executeSpotifyCapability(input: {
           data: { context_uri: userPlaylist.uri, type: 'playlist', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
         };
       }
-
-      if (personalPlaylistIntent && (userPlaylist.error === 'spotify_user_playlist_not_found' || userPlaylist.error === 'spotify_user_playlists_empty')) {
-        const candidates = Array.isArray((userPlaylist.details as Record<string, unknown> | undefined)?.candidates)
-          ? ((userPlaylist.details as Record<string, unknown>).candidates as Array<Record<string, unknown>>).slice(0, 8)
-          : [];
-        return {
-          status: 'need_clarification',
-          tts: 'Introuvable dans vos playlists.',
-          options: candidates,
-          error_code: userPlaylist.error,
-        };
-      }
+      // User playlist not found — fall through to public catalogue search.
     }
 
     const searched = await spotifyWebApi.searchCatalog(type, query, 5);

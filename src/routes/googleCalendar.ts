@@ -195,7 +195,10 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
       return reply.code(200).send({ status: 'ok', items });
     } catch (error) {
       app.log.warn({ error }, 'google_calendar_calendars_failed');
-      return reply.code(502).send({ error: 'google_calendar_calendars_failed' });
+      return reply.code(502).send({
+        error: 'google_calendar_calendars_failed',
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
@@ -242,7 +245,10 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
       });
     } catch (error) {
       app.log.warn({ error }, 'google_calendar_events_list_failed');
-      return reply.code(502).send({ error: 'google_calendar_events_list_failed' });
+      return reply.code(502).send({
+        error: 'google_calendar_events_list_failed',
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 

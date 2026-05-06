@@ -4,14 +4,21 @@ import type { CommitCandidateResult, ThreadListItem, ThreadRecord, ThreadReposit
 export class InMemoryThreadRepository implements ThreadRepository {
   private readonly threads = new Map<string, ThreadRecord>();
 
-  async getOrCreate(threadId: string): Promise<ThreadRecord> {
+  async getOrCreate(threadId: string, options?: { channel?: string | null }): Promise<ThreadRecord> {
+    const incomingChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
     const existing = this.threads.get(threadId);
     if (existing) {
+      if (incomingChannel && existing.channel !== incomingChannel) {
+        const next = { ...existing, channel: incomingChannel };
+        this.threads.set(threadId, next);
+        return { ...next };
+      }
       return { ...existing };
     }
 
     const created: ThreadRecord = {
       threadId,
+      channel: incomingChannel || null,
       summary: '',
       summaryUptoSeq: 0,
       summaryVersion: 0,
@@ -77,7 +84,7 @@ export class InMemoryThreadRepository implements ThreadRepository {
     return { committed: true, usedSummaryVersion: `v${row.summaryVersion}` };
   }
 
-  async listRecent(_limit: number): Promise<ThreadListItem[]> {
+  async listRecent(_limit: number, _options?: { channel?: string | null }): Promise<ThreadListItem[]> {
     // In-memory implementation returns empty list
     return [];
   }
