@@ -37,7 +37,7 @@ type RecurrenceInput = {
   month?: number;
 };
 
-type ListTasksAction           = { action: 'list_tasks';              list_name?: string; status?: 'active' | 'completed' | 'all' };
+type ListTasksAction           = { action: 'list_tasks';              list_name?: string; status?: 'active' | 'completed' | 'all'; period?: 'today' | 'tomorrow' | 'this_week' | 'next_week' | 'this_month' | 'overdue' };
 type AddTaskAction             = { action: 'add_task';                 title: string; list_name?: string; due_date?: string; start_date?: string; reminder_date?: string; importance?: 'low' | 'normal' | 'high'; notes?: string; categories?: string[]; recurrence?: RecurrenceInput };
 type CompleteAction            = { action: 'complete_task';            title: string; list_name?: string };
 type DeleteAction              = { action: 'delete_task';              title: string; list_name?: string };
@@ -242,6 +242,68 @@ async function graphDelete(path: string, token: string): Promise<void> {
   }
 }
 
+// ─── Watched lists (aggregated when no list_name given) ─────────────────────
+
+// Patterns matching the 3 lists the user manages with Jarvis.
+// Order matters: first match wins for display purposes.
+const WATCHED_LIST_PATTERNS: RegExp[] = [
+  /^(tasks?|t[\u00e2a]ches?)$/i,  // built-in "T\u00e2ches" / "Tasks"
+  /^vie\s+quotidienne$/i,
+  /^nas$/i,
+];
+
+function isWatchedList(l: MsTaskList): boolean {
+  if (l.wellknownListName === 'defaultList') return true;
+  return WATCHED_LIST_PATTERNS.some((p) => p.test(l.displayName.trim()));
+}
+
+// ─── Period filter helpers ────────────────────────────────────────────────────
+
+function startOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function isInPeriod(isoDate: string | undefined, period: string): boolean {
+  if (!isoDate) return false;
+  const taskDay = startOfDay(new Date(isoDate.slice(0, 10)));
+  const today   = startOfDay(new Date());
+  switch (period) {
+    case 'today':       return taskDay.getTime() === today.getTime();
+    case 'tomorrow': {
+      const tom = new Date(today); tom.setDate(today.getDate() + 1);
+      return taskDay.getTime() === tom.getTime();
+    }
+    case 'this_week': {
+      const mon = new Date(today); mon.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+      const sun = new Date(mon);   sun.setDate(mon.getDate() + 6);
+      return taskDay >= mon && taskDay <= sun;
+    }
+    case 'next_week': {
+      const mon = new Date(today); mon.setDate(today.getDate() - ((today.getDay() + 6) % 7) + 7);
+      const sun = new Date(mon);   sun.setDate(mon.getDate() + 6);
+      return taskDay >= mon && taskDay <= sun;
+    }
+    case 'this_month':
+      return taskDay.getFullYear() === today.getFullYear() && taskDay.getMonth() === today.getMonth();
+    case 'overdue':
+      return taskDay.getTime() < today.getTime();
+    default:
+      return true;
+  }
+}
+
+function periodFr(period: string): string {
+  switch (period) {
+    case 'today':      return "pour aujourd'hui";
+    case 'tomorrow':   return 'pour demain';
+    case 'this_week':  return 'cette semaine';
+    case 'next_week':  return 'la semaine prochaine';
+    case 'this_month': return 'ce mois-ci';
+    case 'overdue':    return 'en retard';
+    default:           return '';
+  }
+}
+
 // ─── List & task finders ──────────────────────────────────────────────────────
 
 async function findList(token: string, listName?: string): Promise<MsTaskList | null> {
@@ -284,19 +346,33 @@ async function findTask(token: string, listId: string, title: string, includeCom
 const _PLANNER_SYSTEM = `Tu es un assistant de gestion de tâches (Microsoft To Do).
 Analyse la commande vocale en français et retourne un JSON correspondant à une seule action.
 
+Listes surveillées par défaut (utilisées quand aucune liste n'est précisée) :
+  - "Tâches" (liste système par défaut)
+  - "Vie quotidienne"
+  - "NAS"
+
 Champ obligatoire "action" parmi :
   list_tasks | add_task | complete_task | delete_task | update_task
   list_lists | create_list | delete_list
   add_checklist_item | complete_checklist_item | delete_checklist_item
 
 Champs conditionnels (selon l'action) :
-  list_tasks              → "list_name" (optionnel), "status" ("active"|"completed"|"all", défaut "active")
+  list_tasks              → "list_name" (optionnel),
+                            "status" ("active"|"completed"|"all", défaut "active"),
+                            "period" (optionnel — UNIQUEMENT si l'utilisateur donne une temporalité) :
+                              "today"      = aujourd'hui
+                              "tomorrow"   = demain
+                              "this_week"  = cette semaine
+                              "next_week"  = la semaine prochaine
+                              "this_month" = ce mois-ci
+                              "overdue"    = en retard
+                            Quand "period" est présent, seules les tâches AVEC échéance dans cette période sont retournées.
   add_task                → "title" (obligatoire), "list_name" (optionnel),
                             "due_date" (YYYY-MM-DD, optionnel), "start_date" (YYYY-MM-DD, optionnel),
                             "reminder_date" (YYYY-MM-DDTHH:MM, optionnel),
                             "importance" ("low"|"normal"|"high", optionnel),
                             "notes" (string, optionnel),
-                            "categories" (string[], optionnel — ex: ["Travail","Urgent"]),
+                            "categories" (string[], optionnel),
                             "recurrence" (objet optionnel — voir format ci-dessous)
   complete_task           → "title" (obligatoire), "list_name" (optionnel)
   delete_task             → "title" (obligatoire), "list_name" (optionnel)
@@ -324,6 +400,10 @@ Format "recurrence" :
 Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire.
 Exemples :
   "montre mes tâches"                              → {"action":"list_tasks"}
+  "mes tâches d'aujourd'hui"                       → {"action":"list_tasks","period":"today"}
+  "qu'est-ce que j'ai à faire cette semaine"       → {"action":"list_tasks","period":"this_week"}
+  "tâches en retard"                               → {"action":"list_tasks","period":"overdue"}
+  "tâches de demain"                               → {"action":"list_tasks","period":"tomorrow"}
   "tâches terminées"                               → {"action":"list_tasks","status":"completed"}
   "ajoute acheter du pain"                         → {"action":"add_task","title":"Acheter du pain"}
   "tâche urgente : appeler le médecin"             → {"action":"add_task","title":"Appeler le médecin","importance":"high"}
@@ -463,44 +543,67 @@ function buildRecurrence(r: RecurrenceInput, startDate: string): object {
 async function executeTodo(action: TodoAction, token: string): Promise<string> {
   switch (action.action) {
     case 'list_tasks': {
-      const list = await findList(token, action.list_name);
-      if (!list) return 'Aucune liste de tâches trouvée dans Microsoft To Do.';
+      // Determine which list(s) to query.
+      let targetLists: MsTaskList[];
+      if (action.list_name) {
+        const found = await findList(token, action.list_name);
+        if (!found) return `Je n'ai pas trouvé de liste correspondant à ${action.list_name}.`;
+        targetLists = [found];
+      } else {
+        const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
+        targetLists = (allData.value ?? []).filter(isWatchedList);
+        if (targetLists.length === 0) return 'Aucune liste surveillée trouvée dans Microsoft To Do.';
+      }
 
-      // Sort active tasks by due date ascending (soonest first), completed by completedDateTime desc.
+      // Build Graph query string.
       let qs: string;
       if (action.status === 'completed') {
-        qs = `$filter=status eq 'completed'&$orderby=lastModifiedDateTime desc&$top=10`;
+        qs = `$filter=status eq 'completed'&$top=20`;
       } else if (action.status === 'all') {
-        qs = `$top=20`;
+        qs = `$top=30`;
       } else {
-        qs = `$filter=status ne 'completed'&$top=20`;
+        qs = `$filter=status ne 'completed'&$top=30`;
       }
-      const data = await graphGet<{ value: MsTask[] }>(
-        `/me/todo/lists/${list.id}/tasks?${qs}`,
-        token,
-      );
-      const tasks = data.value ?? [];
 
-      // Sort active tasks: overdue first, then by dueDateTime asc, then no-due last.
-      if (action.status !== 'completed') {
-        tasks.sort((a, b) => {
-          const aTime = a.dueDateTime ? new Date(a.dueDateTime.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
-          const bTime = b.dueDateTime ? new Date(b.dueDateTime.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
-          return aTime - bTime;
-        });
+      // Fetch from all target lists in parallel.
+      const results = await Promise.all(
+        targetLists.map((l) =>
+          graphGet<{ value: MsTask[] }>(`/me/todo/lists/${l.id}/tasks?${qs}`, token)
+            .then((d) => d.value ?? [])
+            .catch(() => [] as MsTask[]),
+        ),
+      );
+      let tasks = results.flat();
+
+      // Period filter: when a temporal context is given, only keep tasks WITH a due date in that period.
+      // Tasks without due date are excluded — the user manages those separately.
+      if (action.period) {
+        tasks = tasks.filter((t) => isInPeriod(t.dueDateTime?.dateTime, action.period!));
       }
+
+      // Sort by dueDateTime asc (tasks without due date go last).
+      tasks.sort((a, b) => {
+        const aTime = a.dueDateTime ? new Date(a.dueDateTime.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
+        const bTime = b.dueDateTime ? new Date(b.dueDateTime.dateTime).getTime() : Number.MAX_SAFE_INTEGER;
+        return aTime - bTime;
+      });
 
       if (tasks.length === 0) {
+        if (action.period) {
+          return `Tu n'as aucune tâche avec échéance ${periodFr(action.period)}.`;
+        }
         return action.status === 'completed'
-          ? `Tu n'as aucune tâche terminée dans ${list.displayName}.`
-          : `Tu n'as aucune tâche en attente dans ${list.displayName}.`;
+          ? 'Tu n\'as aucune tâche terminée dans tes listes.'
+          : 'Tu n\'as aucune tâche en attente.';
       }
+
       const count = tasks.length;
-      const titles = tasks.slice(0, 5).map((t) => {
+      const displayed = tasks.slice(0, 5).map((t) => {
         const dueIso = t.dueDateTime?.dateTime.slice(0, 10);
-        const isOverdue = dueIso && new Date(dueIso) < new Date(new Date().toDateString());
+        const isOverdue = dueIso && new Date(dueIso) < startOfDay(new Date());
         const due = dueIso
           ? isOverdue ? `, en retard depuis le ${formatDateFr(dueIso)}`
+                      : action.period ? ''  // period gives context, avoid repeating date
                       : `, échéance ${formatDateFr(dueIso)}`
           : '';
         const imp = t.importance === 'high' ? ', urgente' : '';
@@ -512,10 +615,11 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         return `${t.title}${due}${imp}${statusLabel}${rec}`;
       });
       const more = count > 5 ? ` et ${count - 5} autre${count - 5 > 1 ? 's' : ''}` : '';
+      const periodLabel = action.period ? ` ${periodFr(action.period)}` : '';
       const intro = action.status === 'completed'
-        ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''} dans ${list.displayName} :`
-        : `Tu as ${count} tâche${count > 1 ? 's' : ''} dans ${list.displayName} :`;
-      return `${intro} ${joinFr(titles)}${more}.`;
+        ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''}${periodLabel} :`
+        : `Tu as ${count} tâche${count > 1 ? 's' : ''}${periodLabel} :`;
+      return `${intro} ${joinFr(displayed)}${more}.`;
     }
 
     case 'add_task': {
