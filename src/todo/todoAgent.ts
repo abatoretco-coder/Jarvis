@@ -90,7 +90,7 @@ const _msTokenCache          = new Map<string, CachedToken>();
 const _msLiveRefreshToken    = new Map<string, string>(); // captures rotated refresh tokens
 const _msKeepaliveScheduled  = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;          // refresh access token 60 s before expiry
-const KEEPALIVE_INTERVAL_MS  = 30 * 24 * 3_600_000; // 30 days — resets inactivity window
+const KEEPALIVE_DAYS         = 30;              // resets Microsoft's 90-day inactivity window
 
 async function refreshMicrosoftToken(env: {
   MICROSOFT_TENANT_ID?: string;
@@ -150,13 +150,19 @@ async function refreshMicrosoftToken(env: {
   // Schedule a keep-alive so the refresh token's inactivity window never expires
   // while the Jarvis process is running. Fires every 30 days (well within the
   // 90-day Microsoft inactive limit).
+  // Note: Node.js setInterval uses a 32-bit ms counter (max ~24.8 days).
+  // We chain 1-day intervals and count up to KEEPALIVE_DAYS to stay within bounds.
   if (!_msKeepaliveScheduled.has(cacheKey)) {
     _msKeepaliveScheduled.add(cacheKey);
+    let dayCount = 0;
     const timer = setInterval(() => {
-      _msTokenCache.delete(cacheKey); // force a real token call
-      refreshMicrosoftToken(env).catch(() => { /* keep-alive failure is non-fatal */ });
-    }, KEEPALIVE_INTERVAL_MS);
-    // Do not keep the Node.js process alive solely for this timer.
+      dayCount++;
+      if (dayCount >= KEEPALIVE_DAYS) {
+        dayCount = 0;
+        _msTokenCache.delete(cacheKey);
+        refreshMicrosoftToken(env).catch(() => { /* keep-alive failure is non-fatal */ });
+      }
+    }, 24 * 3_600_000); // 1 day — safe for 32-bit setInterval
     if (timer.unref) timer.unref();
   }
 
@@ -240,6 +246,13 @@ async function graphDelete(path: string, token: string): Promise<void> {
   if (!resp.ok && resp.status !== 404) {
     throw new Error(`todo_graph_delete_failed:${resp.status}`);
   }
+}
+
+/** Build a Graph API dateTimeTimeZone object.
+ * The dateTime must NOT include a timezone suffix (no 'Z') when timeZone is provided separately.
+ */
+function graphDateTime(isoDate: string, time = '00:00:00.0000000'): { dateTime: string; timeZone: string } {
+  return { dateTime: `${isoDate.slice(0, 10)}T${time}`, timeZone: 'UTC' };
 }
 
 // ─── Watched lists (aggregated when no list_name given) ─────────────────────
@@ -628,14 +641,14 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
 
       const body: Record<string, unknown> = { title: action.title };
       if (action.due_date) {
-        body['dueDateTime'] = { dateTime: `${action.due_date}T00:00:00.000Z`, timeZone: 'UTC' };
+        body['dueDateTime'] = graphDateTime(action.due_date);
       }
       if (action.start_date) {
-        body['startDateTime'] = { dateTime: `${action.start_date}T00:00:00.000Z`, timeZone: 'UTC' };
+        body['startDateTime'] = graphDateTime(action.start_date);
       }
       if (action.reminder_date) {
-        const dt = action.reminder_date.includes('T') ? action.reminder_date : `${action.reminder_date}T09:00`;
-        body['reminderDateTime'] = { dateTime: `${dt}:00.000000`, timeZone: 'UTC' };
+        const time = action.reminder_date.includes('T') ? action.reminder_date.split('T')[1] + ':00.0000000' : '09:00:00.0000000';
+        body['reminderDateTime'] = graphDateTime(action.reminder_date, time);
         body['isReminderOn'] = true;
       }
       if (action.importance) body['importance'] = action.importance;
@@ -692,13 +705,13 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.due_date === null) {
         patch['dueDateTime'] = null;
       } else if (action.due_date) {
-        patch['dueDateTime'] = { dateTime: `${action.due_date}T00:00:00.000Z`, timeZone: 'UTC' };
+        patch['dueDateTime'] = graphDateTime(action.due_date);
       }
       if (action.notes)       patch['body']        = { contentType: 'text', content: action.notes };
       if (action.categories)  patch['categories']  = action.categories;
       if (action.reminder_date) {
-        const dt = action.reminder_date.includes('T') ? action.reminder_date : `${action.reminder_date}T09:00`;
-        patch['reminderDateTime'] = { dateTime: `${dt}:00.000000`, timeZone: 'UTC' };
+        const time = action.reminder_date.includes('T') ? action.reminder_date.split('T')[1] + ':00.0000000' : '09:00:00.0000000';
+        patch['reminderDateTime'] = graphDateTime(action.reminder_date, time);
         patch['isReminderOn'] = true;
       }
       // recurrence: null removes it, object sets it
