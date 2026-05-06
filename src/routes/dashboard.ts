@@ -976,15 +976,16 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         status?: unknown;
       };
 
-      const listId = typeof body.listId === 'string' ? body.listId.trim() : '';
-      if (!listId) {
-        return reply.code(400).send({ error: 'list_id_required' });
+      const { lists } = await fetchMicrosoftTodoLists(deps.env);
+      if (lists.length === 0) {
+        return reply.code(400).send({ error: 'todo_list_missing' });
       }
 
-      const { lists } = await fetchMicrosoftTodoLists(deps.env);
-      if (!lists.some((list) => list.id === listId)) {
-        return reply.code(404).send({ error: 'todo_list_not_found' });
-      }
+      const listIdInput = typeof body.listId === 'string' ? body.listId.trim() : '';
+      const preferred = listIdInput && lists.some((list) => list.id === listIdInput)
+        ? [listIdInput]
+        : [];
+      const candidateListIds = [...preferred, ...lists.map((list) => list.id).filter((id) => id !== listIdInput)];
 
       const statusInput = typeof body.status === 'string' ? body.status.trim() : '';
       if (statusInput !== 'completed' && statusInput !== 'notStarted') {
@@ -993,14 +994,23 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       const status = statusInput;
 
       const token = await refreshMicrosoftAccessToken(deps.env, 'Tasks.ReadWrite offline_access');
-      try {
-        await graphPatch(`/me/todo/lists/${listId}/tasks/${taskId}`, token, { status });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.includes('graph_patch_failed:404')) {
-          return reply.code(404).send({ error: 'todo_task_not_found' });
+      let patched = false;
+      for (const listId of candidateListIds) {
+        try {
+          await graphPatch(`/me/todo/lists/${listId}/tasks/${taskId}`, token, { status });
+          patched = true;
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes('graph_patch_failed:404')) {
+            continue;
+          }
+          throw error;
         }
-        throw error;
+      }
+
+      if (!patched) {
+        return reply.code(404).send({ error: 'todo_task_not_found' });
       }
 
       return reply.code(200).send({ ok: true });
