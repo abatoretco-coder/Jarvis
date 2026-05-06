@@ -392,6 +392,40 @@ async function planTodoAction(
   return parsed as TodoAction;
 }
 
+// ─── TTS formatting helpers ───────────────────────────────────────────────────
+
+const FR_MONTHS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+const FR_DAYS   = { sunday:'dimanche', monday:'lundi', tuesday:'mardi', wednesday:'mercredi', thursday:'jeudi', friday:'vendredi', saturday:'samedi' } as const;
+
+/** "2026-05-06" → "6 mai" or "6 mai 2026" if year differs from current */
+function formatDateFr(iso: string): string {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+  const now = new Date();
+  const day = d;
+  const month = FR_MONTHS[(m ?? 1) - 1] ?? '';
+  if (y !== now.getFullYear()) return `${day} ${month} ${y}`;
+  return `${day} ${month}`;
+}
+
+/** Localize recurrence type for TTS */
+function recurrenceFr(r: RecurrenceInput): string {
+  const daysLabel = r.daysOfWeek?.map((d) => FR_DAYS[d as keyof typeof FR_DAYS] ?? d).join(' et ');
+  switch (r.type) {
+    case 'daily':           return r.interval && r.interval > 1 ? `tous les ${r.interval} jours` : 'tous les jours';
+    case 'weekly':          return daysLabel ? `chaque ${daysLabel}` : (r.interval && r.interval > 1 ? `toutes les ${r.interval} semaines` : 'chaque semaine');
+    case 'absoluteMonthly': return r.interval && r.interval > 1 ? `tous les ${r.interval} mois` : 'chaque mois';
+    case 'absoluteYearly':  return r.interval && r.interval > 1 ? `tous les ${r.interval} ans` : 'chaque année';
+    default:                return 'régulièrement';
+  }
+}
+
+/** Join a list of strings naturally: "a, b et c" */
+function joinFr(items: string[]): string {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0]!;
+  return `${items.slice(0, -1).join(', ')} et ${items[items.length - 1]}`;
+}
+
 // ─── Recurrence builder ───────────────────────────────────────────────────────
 
 /**
@@ -450,24 +484,26 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
 
       if (tasks.length === 0) {
         return action.status === 'completed'
-          ? `Aucune tâche terminée dans "${list.displayName}".`
-          : `Aucune tâche en attente dans la liste "${list.displayName}".`;
+          ? `Tu n'as aucune tâche terminée dans ${list.displayName}.`
+          : `Tu n'as aucune tâche en attente dans ${list.displayName}.`;
       }
       const count = tasks.length;
       const titles = tasks.slice(0, 5).map((t) => {
-        const due = t.dueDateTime ? `, échéance le ${t.dueDateTime.dateTime.slice(0, 10)}` : '';
+        const due = t.dueDateTime ? ` pour le ${formatDateFr(t.dueDateTime.dateTime)}` : '';
         const imp = t.importance === 'high' ? ', urgente' : '';
         const rec = t.recurrence ? ', récurrente' : '';
-        const cat = t.categories?.length ? `, [${t.categories.join(', ')}]` : '';
-        return `${t.title}${due}${imp}${rec}${cat}`;
-      }).join(' ; ');
+        return `${t.title}${due}${imp}${rec}`;
+      });
       const more = count > 5 ? ` et ${count - 5} autre${count - 5 > 1 ? 's' : ''}` : '';
-      return `Tu as ${count} tâche${count > 1 ? 's' : ''} dans "${list.displayName}" : ${titles}${more}.`;
+      const intro = action.status === 'completed'
+        ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''} dans ${list.displayName} :`
+        : `Tu as ${count} tâche${count > 1 ? 's' : ''} dans ${list.displayName} :`;
+      return `${intro} ${joinFr(titles)}${more}.`;
     }
 
     case 'add_task': {
       const list = await findList(token, action.list_name);
-      if (!list) return `Impossible de trouver la liste "${action.list_name ?? 'par défaut'}".`;
+      if (!list) return `Je n'ai pas trouvé la liste ${action.list_name ?? 'par défaut'}.`;
 
       const body: Record<string, unknown> = { title: action.title };
       if (action.due_date) {
@@ -490,40 +526,42 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       }
 
       await graphPost(`/me/todo/lists/${list.id}/tasks`, token, body);
-      const dateClause = action.due_date ? ` pour le ${action.due_date}` : '';
-      const impClause  = action.importance === 'high' ? ', marquée urgente' : '';
-      const recClause  = action.recurrence ? `, récurrente (${action.recurrence.type})` : '';
-      return `Tâche "${action.title}" ajoutée dans "${list.displayName}"${dateClause}${impClause}${recClause}.`;
+      const parts: string[] = [];
+      if (action.due_date)                     parts.push(`pour le ${formatDateFr(action.due_date)}`);
+      if (action.importance === 'high')        parts.push('marquée urgente');
+      if (action.recurrence)                   parts.push(recurrenceFr(action.recurrence));
+      const suffix = parts.length ? `, ${parts.join(', ')}` : '';
+      return `C'est noté. J'ai ajouté ${action.title} dans ta liste ${list.displayName}${suffix}.`;
     }
 
     case 'complete_task': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
 
       const task = await findTask(token, list.id, action.title);
-      if (!task) return `Aucune tâche correspondant à "${action.title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
 
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}`, token, { status: 'completed' });
-      return `Tâche "${task.title}" marquée comme terminée.`;
+      return `Parfait, ${task.title} est marquée comme terminée.`;
     }
 
     case 'delete_task': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
 
       const task = await findTask(token, list.id, action.title, true);
-      if (!task) return `Aucune tâche correspondant à "${action.title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
 
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}`, token);
-      return `Tâche "${task.title}" supprimée.`;
+      return `La tâche ${task.title} a bien été supprimée.`;
     }
 
     case 'update_task': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
 
       const task = await findTask(token, list.id, action.title, true);
-      if (!task) return `Aucune tâche correspondant à "${action.title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
 
       const patch: Record<string, unknown> = {};
       if (action.new_title)   patch['title']      = action.new_title;
@@ -549,24 +587,24 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         const startDate = action.due_date ?? task.dueDateTime?.dateTime.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
         patch['recurrence'] = buildRecurrence(action.recurrence, startDate);
       }
-      if (Object.keys(patch).length === 0) return 'Aucune modification spécifiée.';
+      if (Object.keys(patch).length === 0) return 'Tu n\'as pas précisé de modification.';
 
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}`, token, patch);
       const updatedName = (patch['title'] as string | undefined) ?? task.title;
-      return `Tâche "${updatedName}" mise à jour.`;
+      return `C'est fait, ${updatedName} a bien été mise à jour.`;
     }
 
     case 'list_lists': {
       const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists?$top=50', token);
       const lists = data.value ?? [];
-      if (lists.length === 0) return 'Tu n\'as aucune liste de tâches.';
+      if (lists.length === 0) return 'Tu n\'as aucune liste de tâches pour le moment.';
       const names = lists.map((l) => l.displayName);
-      return `Tu as ${lists.length} liste${lists.length > 1 ? 's' : ''} : ${names.join(', ')}.`;
+      return `Tu as ${lists.length} liste${lists.length > 1 ? 's' : ''} : ${joinFr(names)}.`;
     }
 
     case 'create_list': {
       await graphPost(`/me/todo/lists`, token, { displayName: action.name });
-      return `Liste "${action.name}" créée.`;
+      return `La liste ${action.name} a bien été créée.`;
     }
 
     case 'delete_list': {
@@ -574,35 +612,35 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const lists = data.value ?? [];
       const needle = action.name.toLowerCase();
       const found = lists.find((l) => l.displayName.toLowerCase().includes(needle));
-      if (!found) return `Aucune liste correspondant à "${action.name}" trouvée.`;
+      if (!found) return `Je n'ai pas trouvé de liste correspondant à ${action.name}.`;
       // Built-in lists (defaultList, flaggedEmails) cannot be deleted.
       if (found.wellknownListName && found.wellknownListName !== 'none') {
-        return `La liste "${found.displayName}" est une liste système et ne peut pas être supprimée.`;
+        return `La liste ${found.displayName} est une liste système, je ne peux pas la supprimer.`;
       }
       await graphDelete(`/me/todo/lists/${found.id}`, token);
-      return `Liste "${found.displayName}" supprimée.`;
+      return `La liste ${found.displayName} a bien été supprimée.`;
     }
 
     case 'add_checklist_item': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
 
       const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Aucune tâche correspondant à "${action.task_title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
 
       await graphPost(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
         { displayName: action.item_title },
       );
-      return `Sous-tâche "${action.item_title}" ajoutée à "${task.title}".`;
+      return `J'ai ajouté ${action.item_title} dans la tâche ${task.title}.`;
     }
 
     case 'complete_checklist_item': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
       const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Aucune tâche correspondant à "${action.task_title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
 
       const checkData = await graphGet<{ value: MsChecklistItem[] }>(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
@@ -610,16 +648,16 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       );
       const needle = action.item_title.toLowerCase();
       const item = checkData.value?.find((c) => c.displayName.toLowerCase().includes(needle));
-      if (!item) return `Sous-tâche "${action.item_title}" introuvable dans "${task.title}".`;
+      if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token, { isChecked: true });
-      return `Sous-tâche "${item.displayName}" marquée comme terminée.`;
+      return `Parfait, ${item.displayName} est cochée dans ${task.title}.`;
     }
 
     case 'delete_checklist_item': {
       const list = await findList(token, action.list_name);
-      if (!list) return 'Liste de tâches introuvable.';
+      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
       const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Aucune tâche correspondant à "${action.task_title}" trouvée.`;
+      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
 
       const checkData = await graphGet<{ value: MsChecklistItem[] }>(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
@@ -627,13 +665,13 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       );
       const needle = action.item_title.toLowerCase();
       const item = checkData.value?.find((c) => c.displayName.toLowerCase().includes(needle));
-      if (!item) return `Sous-tâche "${action.item_title}" introuvable dans "${task.title}".`;
+      if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token);
-      return `Sous-tâche "${item.displayName}" supprimée de "${task.title}".`;
+      return `${item.displayName} a bien été supprimée de ${task.title}.`;
     }
 
     default:
-      return 'Action todo non reconnue.';
+      return 'Je ne reconnais pas cette action.';
   }
 }
 
@@ -659,10 +697,10 @@ export async function callTodoAgent(
   log?: MinLogger,
 ): Promise<string> {
   if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
-    return 'La gestion des tâches n\'est pas configurée (identifiants Microsoft manquants).';
+    return 'La gestion des tâches n\'est pas disponible, les identifiants Microsoft ne sont pas configurés.';
   }
   if (!env.OPENAI_API_KEY) {
-    return 'Agent todo non disponible : clé OpenAI manquante.';
+    return 'Je ne peux pas gérer les tâches pour l\'instant, la clé OpenAI est manquante.';
   }
 
   const action = await planTodoAction(
