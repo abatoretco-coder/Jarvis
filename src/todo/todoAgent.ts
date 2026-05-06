@@ -354,6 +354,37 @@ async function findTask(token: string, listId: string, title: string, includeCom
   );
 }
 
+/** Search for a task across all watched lists when no list_name is given.
+ * Returns the first match with its parent list, or null.
+ */
+async function findTaskAcrossWatchedLists(
+  token: string,
+  title: string,
+  includeCompleted = false,
+): Promise<{ list: MsTaskList; task: MsTask } | null> {
+  const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
+  const watched = (allData.value ?? []).filter(isWatchedList);
+  const hits = await Promise.all(
+    watched.map(async (l) => {
+      const task = await findTask(token, l.id, title, includeCompleted);
+      return task ? { list: l, task } : null;
+    }),
+  );
+  return hits.find((r) => r !== null) ?? null;
+}
+
+/** Normalize a reminder dateTime string (from LLM) to 'HH:MM:SS.0000000'.
+ * Handles: '09:00', '09:00:00', '09:00:00.000', etc.
+ */
+function normalizeReminderTime(reminderDate: string): string {
+  const raw = reminderDate.includes('T') ? reminderDate.split('T')[1]! : '09:00';
+  const parts = raw.split(':');
+  const h = (parts[0] ?? '09').padStart(2, '0');
+  const m = (parts[1] ?? '00').padStart(2, '0');
+  const s = (parts[2] ?? '00').split('.')[0]!.padStart(2, '0');
+  return `${h}:${m}:${s}.0000000`;
+}
+
 // ─── LLM planner ─────────────────────────────────────────────────────────────
 
 const _PLANNER_SYSTEM = `Tu es un assistant de gestion de tâches (Microsoft To Do).
@@ -612,7 +643,9 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       }
 
       const count = tasks.length;
-      const displayed = tasks.slice(0, 5).map((t) => {
+      // Show more tasks when a period filter is active (all are relevant by definition).
+      const displayMax = action.period ? 10 : 5;
+      const displayed = tasks.slice(0, displayMax).map((t) => {
         const dueIso = t.dueDateTime?.dateTime.slice(0, 10);
         const isOverdue = dueIso && new Date(dueIso) < startOfDay(new Date());
         const due = dueIso
@@ -628,7 +661,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
           : '';
         return `${t.title}${due}${imp}${statusLabel}${rec}`;
       });
-      const more = count > 5 ? ` et ${count - 5} autre${count - 5 > 1 ? 's' : ''}` : '';
+      const more = count > displayMax ? ` et ${count - displayMax} autre${count - displayMax > 1 ? 's' : ''}` : '';
       const periodLabel = action.period ? ` ${periodFr(action.period)}` : '';
       const intro = action.status === 'completed'
         ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''}${periodLabel} :`
@@ -648,8 +681,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         body['startDateTime'] = graphDateTime(action.start_date);
       }
       if (action.reminder_date) {
-        const time = action.reminder_date.includes('T') ? action.reminder_date.split('T')[1] + ':00.0000000' : '09:00:00.0000000';
-        body['reminderDateTime'] = graphDateTime(action.reminder_date, time);
+        body['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date));
         body['isReminderOn'] = true;
       }
       if (action.importance) body['importance'] = action.importance;
@@ -670,33 +702,52 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
     }
 
     case 'complete_task': {
-      const list = await findList(token, action.list_name);
-      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-
-      const task = await findTask(token, list.id, action.title);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
-
+      let list: MsTaskList | null;
+      let task: MsTask | null;
+      if (action.list_name) {
+        list = await findList(token, action.list_name);
+        if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
+        task = await findTask(token, list.id, action.title);
+        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+      } else {
+        const found = await findTaskAcrossWatchedLists(token, action.title);
+        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        list = found.list; task = found.task;
+      }
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}`, token, { status: 'completed' });
       return `Parfait, ${task.title} est marquée comme terminée.`;
     }
 
     case 'delete_task': {
-      const list = await findList(token, action.list_name);
-      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-
-      const task = await findTask(token, list.id, action.title, true);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
-
+      let list: MsTaskList | null;
+      let task: MsTask | null;
+      if (action.list_name) {
+        list = await findList(token, action.list_name);
+        if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
+        task = await findTask(token, list.id, action.title, true);
+        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+      } else {
+        const found = await findTaskAcrossWatchedLists(token, action.title, true);
+        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        list = found.list; task = found.task;
+      }
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}`, token);
       return `La tâche ${task.title} a bien été supprimée.`;
     }
 
     case 'update_task': {
-      const list = await findList(token, action.list_name);
-      if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-
-      const task = await findTask(token, list.id, action.title, true);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+      let list: MsTaskList | null;
+      let task: MsTask | null;
+      if (action.list_name) {
+        list = await findList(token, action.list_name);
+        if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
+        task = await findTask(token, list.id, action.title, true);
+        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+      } else {
+        const found = await findTaskAcrossWatchedLists(token, action.title, true);
+        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        list = found.list; task = found.task;
+      }
 
       const patch: Record<string, unknown> = {};
       if (action.new_title)   patch['title']      = action.new_title;
@@ -711,8 +762,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.notes)       patch['body']        = { contentType: 'text', content: action.notes };
       if (action.categories)  patch['categories']  = action.categories;
       if (action.reminder_date) {
-        const time = action.reminder_date.includes('T') ? action.reminder_date.split('T')[1] + ':00.0000000' : '09:00:00.0000000';
-        patch['reminderDateTime'] = graphDateTime(action.reminder_date, time);
+        patch['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date));
         patch['isReminderOn'] = true;
       }
       // recurrence: null removes it, object sets it
