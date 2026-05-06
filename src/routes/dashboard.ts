@@ -67,6 +67,11 @@ type MsTaskList = {
   displayName: string;
 };
 
+type GraphTodoTasksPage = {
+  value?: Array<Omit<DashboardTask, 'listName' | 'listId'>>;
+  '@odata.nextLink'?: string;
+};
+
 type TodoListItem = {
   id: string;
   displayName: string;
@@ -231,7 +236,16 @@ function formatDateForLine(date: Date): string {
 function parseDate(value: unknown): Date | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (!Number.isNaN(date.getTime())) return date;
+
+  // Handle Graph datetime variants by falling back to date-only parsing.
+  const head = value.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(head)) {
+    const normalized = new Date(`${head}T00:00:00`);
+    if (!Number.isNaN(normalized.getTime())) return normalized;
+  }
+
+  return null;
 }
 
 function addDays(base: Date, days: number): Date {
@@ -364,6 +378,23 @@ async function graphGet<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function graphGetAbsolute<T>(url: string, token: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(8_000),
+  });
+
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`graph_get_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
 async function graphPost<T>(path: string, token: string, body: Record<string, unknown>): Promise<T> {
   const response = await fetch(`${MS_GRAPH_BASE}${path}`, {
     method: 'POST',
@@ -451,11 +482,21 @@ async function fetchMicrosoftTodoTasks(env: AppDeps['env']): Promise<TodoTaskIte
 
   const taskResults = await Promise.allSettled(
     lists.map(async (list) => {
-      const payload = await graphGet<{ value?: Array<Omit<DashboardTask, 'listName' | 'listId'>> }>(
-        `/me/todo/lists/${list.id}/tasks?$orderby=createdDateTime desc&$top=100`,
-        token,
-      );
-      return (payload.value ?? []).map((task) => ({
+      const collected: DashboardTask[] = [];
+      let nextLink: string | null = `/me/todo/lists/${list.id}/tasks?$orderby=createdDateTime desc&$top=200`;
+
+      // Pull multiple pages so old recurring tasks are not dropped by the first page.
+      for (let page = 0; page < 10 && nextLink; page += 1) {
+        const payload: GraphTodoTasksPage = nextLink.startsWith('https://')
+          ? await graphGetAbsolute<GraphTodoTasksPage>(nextLink, token)
+          : await graphGet<GraphTodoTasksPage>(nextLink, token);
+
+        collected.push(...(payload.value ?? []) as DashboardTask[]);
+        const candidate: string | undefined = payload['@odata.nextLink'];
+        nextLink = typeof candidate === 'string' && candidate.trim() ? candidate : null;
+      }
+
+      return collected.map((task) => ({
         ...task,
         listId: list.id,
         listName: list.displayName,
