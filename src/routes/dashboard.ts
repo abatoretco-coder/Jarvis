@@ -963,10 +963,13 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     }
   });
 
-  app.patch('/v1/todo/tasks/:taskId', async (req, reply) => {
+  async function patchTodoTaskStatus(
+    req: { body?: unknown },
+    reply: { code: (statusCode: number) => { send: (payload: Record<string, unknown>) => unknown } },
+    taskIdRaw: unknown,
+  ) {
     try {
-      const params = (req.params ?? {}) as { taskId?: string };
-      const taskId = params.taskId?.trim();
+      const taskId = typeof taskIdRaw === 'string' ? taskIdRaw.trim() : '';
       if (!taskId) {
         return reply.code(400).send({ error: 'task_id_required' });
       }
@@ -1018,6 +1021,16 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       app.log.warn({ error }, 'todo_task_patch_failed');
       return reply.code(500).send({ error: 'todo_task_patch_failed' });
     }
+  }
+
+  app.patch('/v1/todo/tasks/:taskId', async (req, reply) => {
+    const params = (req.params ?? {}) as { taskId?: string };
+    return patchTodoTaskStatus(req, reply, params.taskId);
+  });
+
+  app.patch('/v1/todo/tasks', async (req, reply) => {
+    const body = (req.body ?? {}) as { taskId?: unknown };
+    return patchTodoTaskStatus(req, reply, body.taskId);
   });
 
   app.get('/v1/dashboard', async (_req, reply) => {
