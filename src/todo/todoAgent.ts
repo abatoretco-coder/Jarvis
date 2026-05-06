@@ -358,6 +358,7 @@ async function findTask(token: string, listId: string, title: string, includeCom
 
 const _PLANNER_SYSTEM = `Tu es un assistant de gestion de tâches (Microsoft To Do).
 Analyse la commande vocale en français et retourne un JSON correspondant à une seule action.
+Le message utilisateur commencera par "TODAY=YYYY-MM-DD" indiquant la date du jour. Utilise cette date pour calculer les dates relatives (demain, la semaine prochaine, etc.) et toujours exprimer les dates en format YYYY-MM-DD absolu.
 
 Listes surveillées par défaut (utilisées quand aucune liste n'est précisée) :
   - "Tâches" (liste système par défaut)
@@ -457,7 +458,7 @@ async function planTodoAction(
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: _PLANNER_SYSTEM },
-        { role: 'user',   content: text },
+        { role: 'user',   content: `TODAY=${new Date().toISOString().slice(0, 10)}\n${text}` },
       ],
     }),
     signal: AbortSignal.timeout(timeoutMs),
@@ -862,7 +863,7 @@ export async function callTodoAgent(
     log?.warn({ err: String(err) }, 'todo_agent_planner_error');
     return 'Désolé, je n\'ai pas compris cette demande de tâche. Tu peux réessayer différemment.';
   }
-  log?.info({ action: action.action }, 'todo_agent_planned');
+log?.info({ action: action.action, due_date: (action as Record<string,unknown>).due_date, reminder_date: (action as Record<string,unknown>).reminder_date }, 'todo_agent_planned');
 
   let token: string;
   try {
