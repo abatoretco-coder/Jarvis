@@ -360,7 +360,7 @@ async function planTodoAction(
     body: JSON.stringify({
       model: 'gpt-4o-mini',
       temperature: 0,
-      max_tokens: 200,
+      max_tokens: 350,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: _PLANNER_SYSTEM },
@@ -397,14 +397,22 @@ async function planTodoAction(
 const FR_MONTHS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
 const FR_DAYS   = { sunday:'dimanche', monday:'lundi', tuesday:'mardi', wednesday:'mercredi', thursday:'jeudi', friday:'vendredi', saturday:'samedi' } as const;
 
-/** "2026-05-06" → "6 mai" or "6 mai 2026" if year differs from current */
+/** "2026-05-06" → "aujourd'hui", "demain", "hier", "6 mai" or "6 mai 2026" */
 function formatDateFr(iso: string): string {
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
   const now = new Date();
-  const day = d;
+  const todayY = now.getFullYear(), todayM = now.getMonth() + 1, todayD = now.getDate();
+  if (y === todayY && m === todayM && d === todayD) return "aujourd'hui";
+  // tomorrow
+  const tom = new Date(now); tom.setDate(todayD + 1);
+  if (y === tom.getFullYear() && m === tom.getMonth() + 1 && d === tom.getDate()) return 'demain';
+  // yesterday
+  const yest = new Date(now); yest.setDate(todayD - 1);
+  if (y === yest.getFullYear() && m === yest.getMonth() + 1 && d === yest.getDate()) return 'hier';
+
   const month = FR_MONTHS[(m ?? 1) - 1] ?? '';
-  if (y !== now.getFullYear()) return `${day} ${month} ${y}`;
-  return `${day} ${month}`;
+  if (y !== todayY) return `${d} ${month} ${y}`;
+  return `${d} ${month}`;
 }
 
 /** Localize recurrence type for TTS */
@@ -489,10 +497,19 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       }
       const count = tasks.length;
       const titles = tasks.slice(0, 5).map((t) => {
-        const due = t.dueDateTime ? ` pour le ${formatDateFr(t.dueDateTime.dateTime)}` : '';
+        const dueIso = t.dueDateTime?.dateTime.slice(0, 10);
+        const isOverdue = dueIso && new Date(dueIso) < new Date(new Date().toDateString());
+        const due = dueIso
+          ? isOverdue ? `, en retard depuis le ${formatDateFr(dueIso)}`
+                      : `, échéance ${formatDateFr(dueIso)}`
+          : '';
         const imp = t.importance === 'high' ? ', urgente' : '';
         const rec = t.recurrence ? ', récurrente' : '';
-        return `${t.title}${due}${imp}${rec}`;
+        const statusLabel = t.status === 'inProgress' ? ', en cours'
+          : t.status === 'deferred' ? ', différée'
+          : t.status === 'waitingOnOthers' ? ', en attente'
+          : '';
+        return `${t.title}${due}${imp}${statusLabel}${rec}`;
       });
       const more = count > 5 ? ` et ${count - 5} autre${count - 5 > 1 ? 's' : ''}` : '';
       const intro = action.status === 'completed'
@@ -591,7 +608,23 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
 
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}`, token, patch);
       const updatedName = (patch['title'] as string | undefined) ?? task.title;
-      return `C'est fait, ${updatedName} a bien été mise à jour.`;
+      // Build a specific confirmation based on what changed.
+      const details: string[] = [];
+      if (patch['title'])       details.push(`renommée en ${patch['title'] as string}`);
+      if (patch['dueDateTime'] === null)     details.push('échéance supprimée');
+      else if (patch['dueDateTime'])         details.push(`échéance fixée au ${formatDateFr(action.due_date as string)}`);
+      if (patch['recurrence'] === null)      details.push('récurrence supprimée');
+      else if (patch['recurrence'])          details.push(`récurrence mise à jour`);
+      if (patch['reminderDateTime'])         details.push('rappel programmé');
+      if (patch['importance'])               details.push(patch['importance'] === 'high' ? 'marquée urgente' : `importance ${patch['importance'] as string}`);
+      if (patch['status']) {
+        const statusFr: Record<string, string> = { notStarted: 'non commencée', inProgress: 'en cours', deferred: 'différée', waitingOnOthers: 'en attente' };
+        details.push(statusFr[patch['status'] as string] ?? String(patch['status']));
+      }
+      if (patch['body'])        details.push('notes mises à jour');
+      if (patch['categories'])  details.push('catégories mises à jour');
+      const detailStr = details.length ? ` : ${joinFr(details)}` : '';
+      return `C'est fait, ${updatedName} a été mise à jour${detailStr}.`;
     }
 
     case 'list_lists': {
@@ -703,22 +736,39 @@ export async function callTodoAgent(
     return 'Je ne peux pas gérer les tâches pour l\'instant, la clé OpenAI est manquante.';
   }
 
-  const action = await planTodoAction(
-    text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS,
-  );
+  let action: TodoAction;
+  try {
+    action = await planTodoAction(
+      text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS,
+    );
+  } catch (err) {
+    log?.warn({ err: String(err) }, 'todo_agent_planner_error');
+    return 'Désolé, je n\'ai pas compris cette demande de tâche. Tu peux réessayer différemment.';
+  }
   log?.info({ action: action.action }, 'todo_agent_planned');
 
-  const token = await refreshMicrosoftToken({
-    MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
-    MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
-    MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
-    MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
-    cacheKey:                `todo:${env.MICROSOFT_CLIENT_ID}`,
-    storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
-    OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-  });
+  let token: string;
+  try {
+    token = await refreshMicrosoftToken({
+      MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
+      MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
+      MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
+      MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
+      cacheKey:                `todo:${env.MICROSOFT_CLIENT_ID}`,
+      storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    });
+  } catch (err) {
+    log?.warn({ err: String(err) }, 'todo_agent_token_error');
+    return 'Je ne peux pas accéder à Microsoft To Do pour le moment, le token d\'authentification a expiré ou est invalide.';
+  }
 
-  const result = await executeTodo(action, token);
-  log?.info({ action: action.action, result_len: result.length }, 'todo_agent_done');
-  return result;
+  try {
+    const result = await executeTodo(action, token);
+    log?.info({ action: action.action, result_len: result.length }, 'todo_agent_done');
+    return result;
+  } catch (err) {
+    log?.warn({ err: String(err), action: action.action }, 'todo_agent_execute_error');
+    return 'Une erreur s\'est produite lors de l\'accès à Microsoft To Do. Réessaie dans un instant.';
+  }
 }
