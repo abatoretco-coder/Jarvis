@@ -22,6 +22,7 @@ type CalendarPreview = {
   title: string;
   message: string;
   start: Date;
+  end: Date;
 };
 
 type DashboardTask = {
@@ -261,7 +262,8 @@ function startOfToday(base: Date): Date {
 function extractCalendarPreview(state: HaState): CalendarPreview | null {
   const attributes = state.attributes ?? {};
   const start = parseDate(attributes.start_time);
-  if (!start) return null;
+  const end = parseDate(attributes.end_time);
+  if (!start || !end) return null;
 
   const title = String(attributes.friendly_name ?? state.entity_id.replace(/^calendar\./, '')).trim();
   const message = String(attributes.message ?? '').trim();
@@ -269,6 +271,7 @@ function extractCalendarPreview(state: HaState): CalendarPreview | null {
     title,
     message,
     start,
+    end,
   };
 }
 
@@ -279,7 +282,8 @@ function buildAgendaSection(states: HaState[], now = new Date()): DashboardSecti
     .filter((state) => state.entity_id.startsWith('calendar.'))
     .map(extractCalendarPreview)
     .filter((item): item is CalendarPreview => item !== null)
-    .filter((item) => item.start >= windowStart && item.start < windowEnd)
+    // Include events that overlap with the 7-day window (not just those starting in it)
+    .filter((item) => item.start < windowEnd && item.end > windowStart)
     .sort((left, right) => left.start.getTime() - right.start.getTime())
     .slice(0, 6);
 
