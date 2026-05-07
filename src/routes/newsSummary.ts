@@ -41,9 +41,10 @@ function buildPrompt(body: NewsSummaryRequest): string {
     `Vue d'actualite: ${body.scopeLabel}${sectorLabel ? ` (${sectorLabel})` : ''}.`,
     factBlock,
     `Articles recents:\n${articleList}`,
-    'Fais une synthese en francais en 3 ou 4 phrases courtes, factuelles et utiles.',
+    'Fais une synthese en francais en 4 points cles courts et factuels, separes par des tirets (•).',
     'Utilise uniquement les informations deduisibles de ces articles et des reperes fournis.',
-    'Ne fais ni introduction, ni liste, ni disclaimer.',
+    'Ne fais ni introduction, ni disclaimer, ni texte supplementaire.',
+    'Format exact: • point 1 • point 2 • point 3 • point 4',
   ].filter(Boolean).join('\n\n');
 }
 
