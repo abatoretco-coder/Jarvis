@@ -7,6 +7,11 @@ function isProtectedV1Route(url?: string): boolean {
   return url === '/v1' || url.startsWith('/v1/');
 }
 
+function isOAuthRoute(url?: string): boolean {
+  if (!url) return false;
+  return url === '/v1/oauth' || url.startsWith('/v1/oauth/');
+}
+
 function isIngestRoute(url?: string): boolean {
   if (!url) return false;
   return url === '/v1/ingest' || url.startsWith('/v1/ingest?');
@@ -90,6 +95,8 @@ export function registerApiKeyHook(app: FastifyInstance, env: Env): void {
 
     if (!env.REQUIRE_API_KEY) return;
     if (!isProtectedV1Route(req.url)) return;
+    // OAuth endpoints are public (used for oneshot credential setup)
+    if (isOAuthRoute(req.url)) return;
 
     const allowed = allowedApiKeys(env);
     const providedApiKey = normalizeHeaderValue(req.headers['x-api-key']);
