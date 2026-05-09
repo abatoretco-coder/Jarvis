@@ -726,7 +726,7 @@ async function fetchMailItemsForAccount(account: MailAccount): Promise<Dashboard
   const detailedPayloads = await Promise.allSettled(
     messages.map((message) =>
       gmailGet<GmailDashboardMessage>(
-        `/messages/${message.id}?format=metadata&metadataHeaders=From,Subject,Date`,
+        `/messages/${message.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
         token,
       ),
     ),
