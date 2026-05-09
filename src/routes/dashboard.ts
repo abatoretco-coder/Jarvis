@@ -90,12 +90,6 @@ type GmailDashboardMessage = {
   };
 };
 
-type OutlookDashboardMessage = {
-  subject?: string;
-  from?: { emailAddress?: { name?: string; address?: string } };
-  receivedDateTime?: string;
-};
-
 const MS_GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -721,61 +715,37 @@ function gmailHeader(message: GmailDashboardMessage, headerName: string): string
 }
 
 async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
-  if (account.provider === 'gmail') {
-    const token = await refreshGoogleAccessToken(account);
-    const listPayload = await gmailGet<{ messages?: GmailMessageRef[] }>(
-      `/messages?q=${encodeURIComponent('in:inbox')}&maxResults=8`,
-      token,
-    );
-    const messages = listPayload.messages ?? [];
-    if (messages.length === 0) return [];
-
-    const detailedPayloads = await Promise.allSettled(
-      messages.map((message) =>
-        gmailGet<GmailDashboardMessage>(
-          `/messages/${message.id}?format=metadata&metadataHeaders=From,Subject,Date`,
-          token,
-        ),
-      ),
-    );
-
-    return detailedPayloads
-      .filter((result): result is PromiseFulfilledResult<GmailDashboardMessage> => result.status === 'fulfilled')
-      .map((result) => {
-        const from = gmailHeader(result.value, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
-        const subject = gmailHeader(result.value, 'Subject') || '(sans objet)';
-        const internalDate = Number(result.value.internalDate ?? '0');
-        const headerDate = Date.parse(gmailHeader(result.value, 'Date'));
-        return {
-          accountLabel: account.label,
-          from,
-          subject,
-          receivedAt: Number.isFinite(internalDate) && internalDate > 0 ? internalDate : (Number.isFinite(headerDate) ? headerDate : 0),
-        };
-      });
-  }
-
-  const token = await refreshMicrosoftAccessToken(
-    {
-      MICROSOFT_TENANT_ID: account.tenantId,
-      MICROSOFT_CLIENT_ID: account.clientId,
-      MICROSOFT_CLIENT_SECRET: account.clientSecret,
-      MICROSOFT_REFRESH_TOKEN: account.refreshToken,
-    },
-    'Mail.ReadWrite Mail.Send offline_access',
-  );
-
-  const payload = await graphGet<{ value?: OutlookDashboardMessage[] }>(
-    '/me/mailFolders/inbox/messages?$orderby=receivedDateTime desc&$top=8&$select=subject,from,receivedDateTime',
+  const token = await refreshGoogleAccessToken(account);
+  const listPayload = await gmailGet<{ messages?: GmailMessageRef[] }>(
+    `/messages?q=${encodeURIComponent('in:inbox')}&maxResults=8`,
     token,
   );
+  const messages = listPayload.messages ?? [];
+  if (messages.length === 0) return [];
 
-  return (payload.value ?? []).map((message) => ({
-    accountLabel: account.label,
-    from: message.from?.emailAddress?.name ?? message.from?.emailAddress?.address ?? 'Inconnu',
-    subject: message.subject?.trim() || '(sans objet)',
-    receivedAt: Date.parse(message.receivedDateTime ?? '') || 0,
-  }));
+  const detailedPayloads = await Promise.allSettled(
+    messages.map((message) =>
+      gmailGet<GmailDashboardMessage>(
+        `/messages/${message.id}?format=metadata&metadataHeaders=From,Subject,Date`,
+        token,
+      ),
+    ),
+  );
+
+  return detailedPayloads
+    .filter((result): result is PromiseFulfilledResult<GmailDashboardMessage> => result.status === 'fulfilled')
+    .map((result) => {
+      const from = gmailHeader(result.value, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
+      const subject = gmailHeader(result.value, 'Subject') || '(sans objet)';
+      const internalDate = Number(result.value.internalDate ?? '0');
+      const headerDate = Date.parse(gmailHeader(result.value, 'Date'));
+      return {
+        accountLabel: account.label,
+        from,
+        subject,
+        receivedAt: Number.isFinite(internalDate) && internalDate > 0 ? internalDate : (Number.isFinite(headerDate) ? headerDate : 0),
+      };
+    });
 }
 
 async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']): Promise<DashboardSection> {

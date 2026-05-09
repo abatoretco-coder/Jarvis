@@ -1,7 +1,7 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
 
 /**
- * Mail agent — Gmail (Google) + Outlook (Microsoft Graph) sub-agent.
+ * Mail agent — Gmail (Google) sub-agent.
  *
  * Architecture mirrors todo/todoAgent.ts:
  *   1. LLM planner (gpt-4o-mini, structured JSON) translates voice → MailAction
@@ -11,18 +11,15 @@ import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefre
  *
  * Provider selection (auto-detected from env vars):
  *   - GOOGLE_REFRESH_TOKEN set      → Gmail API (googleapis.com)
- *   - MICROSOFT_REFRESH_TOKEN set   → Outlook via Microsoft Graph
- *   - Both set                      → Gmail takes priority (configure MAIL_PROVIDER=outlook to override)
  *
  * Routing keys: "mail" | "mail.*"
  * Detected by isMailAgentKey() — mirrors isSearchAgentKey() from search/agents.ts.
  *
- * Required env vars (choose one provider):
+ * Required env vars:
  *   Gmail:   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
- *   Outlook: MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_REFRESH_TOKEN
  *   Common:  OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_TIMEOUT_MS
  *
- * Optional: MICROSOFT_TENANT_ID (default: "common"), MAIL_PROVIDER ("gmail" | "outlook")
+ * Optional: MAIL_PROVIDER ("gmail")
  */
 
 // ─── Action types ─────────────────────────────────────────────────────────────
@@ -45,7 +42,7 @@ type MailAction = ListInboxAction | SearchAction | SendAction | MarkReadAction |
 
 export interface MailAccount {
   label: string;
-  provider: 'gmail' | 'outlook';
+  provider: 'gmail';
   clientId: string;
   clientSecret: string;
   refreshToken: string;
@@ -62,10 +59,6 @@ export interface MailAccountsEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REFRESH_TOKEN?: string;
-  MICROSOFT_CLIENT_ID?: string;
-  MICROSOFT_CLIENT_SECRET?: string;
-  MICROSOFT_REFRESH_TOKEN?: string;
-  MICROSOFT_TENANT_ID?: string;
   MAIL_PROVIDER?: string;
   // Indexed multi-account (takes priority when any LABEL_1 is set)
   MAIL_ACCOUNT_1_LABEL?: string; MAIL_ACCOUNT_1_PROVIDER?: string; MAIL_ACCOUNT_1_CLIENT_ID?: string; MAIL_ACCOUNT_1_CLIENT_SECRET?: string; MAIL_ACCOUNT_1_REFRESH_TOKEN?: string; MAIL_ACCOUNT_1_TENANT_ID?: string;
@@ -102,7 +95,7 @@ export function buildMailAccounts(env: MailAccountsEnv): MailAccount[] {
           const refreshToken = typeof candidate.refreshToken === 'string' ? candidate.refreshToken.trim() : '';
           const tenantId = typeof candidate.tenantId === 'string' ? candidate.tenantId.trim() : undefined;
           if (!label || !clientId || !clientSecret || !refreshToken) continue;
-          if (provider !== 'gmail' && provider !== 'outlook') continue;
+          if (provider !== 'gmail') continue;
           accounts.push({ label, provider, clientId, clientSecret, refreshToken, tenantId });
         }
       }
@@ -121,22 +114,17 @@ export function buildMailAccounts(env: MailAccountsEnv): MailAccount[] {
     const refreshToken  = e[`MAIL_ACCOUNT_${i}_REFRESH_TOKEN`];
     const tenantId      = e[`MAIL_ACCOUNT_${i}_TENANT_ID`];
     if (!label || !provider || !clientId || !clientSecret || !refreshToken) continue;
-    if (provider !== 'gmail' && provider !== 'outlook') continue;
-    accounts.push({ label, provider: provider as 'gmail' | 'outlook', clientId, clientSecret, refreshToken, tenantId });
+    if (provider !== 'gmail') continue;
+    accounts.push({ label, provider: 'gmail', clientId, clientSecret, refreshToken, tenantId });
   }
 
   if (accounts.length > 0) return accounts;
 
   // Legacy single-account fallback
   const override = env.MAIL_PROVIDER?.trim().toLowerCase();
-  if (override === 'outlook' && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
-    return [{ label: 'outlook', provider: 'outlook', clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET, refreshToken: env.MICROSOFT_REFRESH_TOKEN, tenantId: env.MICROSOFT_TENANT_ID }];
-  }
+  if (override && override !== 'gmail') return [];
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN) {
     return [{ label: 'gmail', provider: 'gmail', clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN }];
-  }
-  if (env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REFRESH_TOKEN) {
-    return [{ label: 'outlook', provider: 'outlook', clientId: env.MICROSOFT_CLIENT_ID, clientSecret: env.MICROSOFT_CLIENT_SECRET, refreshToken: env.MICROSOFT_REFRESH_TOKEN, tenantId: env.MICROSOFT_TENANT_ID }];
   }
   return [];
 }
@@ -163,23 +151,12 @@ type MinLogger = {
 async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: string): Promise<string> {
   const cacheBase = `${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
   const storeBase = `mail:${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
-  if (acc.provider === 'gmail') {
-    return refreshGoogleToken({
-      GOOGLE_CLIENT_ID:     acc.clientId,
-      GOOGLE_CLIENT_SECRET: acc.clientSecret,
-      GOOGLE_REFRESH_TOKEN: acc.refreshToken,
-      cacheKey:             cacheBase,
-      storeKey:             storeBase,
-      OAUTH_REFRESH_TOKEN_STORE_PATH: refreshStorePath,
-    });
-  }
-  return refreshMicrosoftToken({
-    MICROSOFT_TENANT_ID:     acc.tenantId,
-    MICROSOFT_CLIENT_ID:     acc.clientId,
-    MICROSOFT_CLIENT_SECRET: acc.clientSecret,
-    MICROSOFT_REFRESH_TOKEN: acc.refreshToken,
-    cacheKey:                cacheBase,
-    storeKey:                storeBase,
+  return refreshGoogleToken({
+    GOOGLE_CLIENT_ID:     acc.clientId,
+    GOOGLE_CLIENT_SECRET: acc.clientSecret,
+    GOOGLE_REFRESH_TOKEN: acc.refreshToken,
+    cacheKey:             cacheBase,
+    storeKey:             storeBase,
     OAUTH_REFRESH_TOKEN_STORE_PATH: refreshStorePath,
   });
 }
@@ -198,11 +175,8 @@ async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: str
 
 interface CachedToken { accessToken: string; expiresAt: number }
 const _googleTokenCache         = new Map<string, CachedToken>();
-const _msTokenCache             = new Map<string, CachedToken>();
 const _googleLiveRefreshToken   = new Map<string, string>(); // captures rotated tokens
-const _msLiveRefreshToken       = new Map<string, string>();
 const _googleKeepaliveScheduled = new Set<string>();
-const _msKeepaliveScheduled     = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS    = 60_000;           // refresh access token 60 s before expiry
 const KEEPALIVE_INTERVAL_MS     = 30 * 24 * 3_600_000; // 30 days
 
@@ -260,73 +234,6 @@ async function refreshGoogleToken(env: {
     const timer = setInterval(() => {
       _googleTokenCache.delete(cacheKey);
       refreshGoogleToken(env).catch(() => {});
-    }, KEEPALIVE_INTERVAL_MS);
-    if (timer.unref) timer.unref();
-  }
-
-  return data.access_token;
-}
-
-// ─── Microsoft — token refresh ────────────────────────────────────────────────
-
-async function refreshMicrosoftToken(env: {
-  MICROSOFT_TENANT_ID?: string;
-  MICROSOFT_CLIENT_ID: string;
-  MICROSOFT_CLIENT_SECRET: string;
-  MICROSOFT_REFRESH_TOKEN: string;
-  cacheKey?: string;
-  storeKey?: string;
-  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
-}): Promise<string> {
-  const cacheKey = env.cacheKey?.trim() || env.MICROSOFT_CLIENT_ID;
-  const storeKey = env.storeKey?.trim() || `mail:outlook:${env.MICROSOFT_CLIENT_ID}`;
-  const cached = _msTokenCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
-
-  const refreshToken =
-    _msLiveRefreshToken.get(cacheKey)
-    ?? await getStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey)
-    ?? env.MICROSOFT_REFRESH_TOKEN;
-  const tenantId = env.MICROSOFT_TENANT_ID?.trim() || 'common';
-  const resp = await fetch(
-    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id:     env.MICROSOFT_CLIENT_ID,
-        client_secret: env.MICROSOFT_CLIENT_SECRET,
-        refresh_token: refreshToken,
-        grant_type:    'refresh_token',
-        scope:         'Mail.ReadWrite Mail.Send offline_access',
-      }),
-      signal: AbortSignal.timeout(8_000),
-    },
-  );
-  if (!resp.ok) {
-    _msTokenCache.delete(cacheKey);
-    const body = await resp.text().catch(() => '');
-    throw new Error(`mail_ms_token_refresh_failed:${resp.status}:${body.slice(0, 200)}`);
-  }
-  const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
-  if (!data.access_token) throw new Error('mail_ms_token_refresh_no_token');
-
-  if (data.refresh_token) {
-    _msLiveRefreshToken.set(cacheKey, data.refresh_token);
-    await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
-  }
-
-  const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
-  _msTokenCache.set(cacheKey, {
-    accessToken: data.access_token,
-    expiresAt:   Date.now() + expiresIn * 1_000 - TOKEN_EXPIRY_BUFFER_MS,
-  });
-
-  if (!_msKeepaliveScheduled.has(cacheKey)) {
-    _msKeepaliveScheduled.add(cacheKey);
-    const timer = setInterval(() => {
-      _msTokenCache.delete(cacheKey);
-      refreshMicrosoftToken(env).catch(() => {});
     }, KEEPALIVE_INTERVAL_MS);
     if (timer.unref) timer.unref();
   }
@@ -693,227 +600,6 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
   }
 }
 
-// ─── Outlook (MS Graph) executor ─────────────────────────────────────────────
-
-const GRAPH_MAIL = 'https://graph.microsoft.com/v1.0/me';
-
-interface GraphMailMessage {
-  id: string;
-  subject?: string;
-  from?: { emailAddress?: { name?: string; address?: string } };
-  bodyPreview?: string;
-  receivedDateTime?: string;
-  isRead?: boolean;
-}
-
-async function graphGet<T>(path: string, token: string): Promise<T> {
-  const resp = await fetch(`${GRAPH_MAIL}${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`mail_graph_get_failed:${resp.status}:${body.slice(0, 200)}`);
-  }
-  return resp.json() as Promise<T>;
-}
-
-async function graphPost<T>(path: string, token: string, body: object): Promise<T | null> {
-  const resp = await fetch(`${GRAPH_MAIL}${path}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`mail_graph_post_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-  if (resp.status === 202 || resp.headers.get('content-length') === '0') return null;
-  return resp.json() as Promise<T>;
-}
-
-async function graphPatch(path: string, token: string, body: object): Promise<void> {
-  const resp = await fetch(`${GRAPH_MAIL}${path}`, {
-    method: 'PATCH',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`mail_graph_patch_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-}
-
-async function graphDelete(path: string, token: string): Promise<void> {
-  const resp = await fetch(`${GRAPH_MAIL}${path}`, {
-    method: 'DELETE',
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok && resp.status !== 404) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`mail_graph_delete_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-}
-
-async function findOutlookMessages(
-  token: string,
-  sender?: string,
-  subject?: string,
-  max = 5,
-): Promise<GraphMailMessage[]> {
-  const filters: string[] = [];
-  if (sender) {
-    const s = sender.replace(/'/g, '');
-    filters.push(`(contains(from/emailAddress/name,'${s}') or contains(from/emailAddress/address,'${s}'))`);
-  }
-  if (subject) {
-    filters.push(`contains(subject,'${subject.replace(/'/g, '')}')`);
-  }
-  const filterStr = filters.length > 0 ? `&$filter=${encodeURIComponent(filters.join(' and '))}` : '';
-  const data = await graphGet<{ value: GraphMailMessage[] }>(
-    `/messages?$top=${max}&$orderby=receivedDateTime desc&$select=id,subject,from,isRead,receivedDateTime,bodyPreview${filterStr}`,
-    token,
-  );
-  return data.value ?? [];
-}
-
-async function executeOutlook(action: MailAction, token: string): Promise<string> {
-  switch (action.action) {
-    case 'list_inbox': {
-      const max = Math.min(action.max ?? 5, 20);
-      const filter = action.unread_only !== false ? '&$filter=isRead eq false' : '';
-      const data = await graphGet<{ value: GraphMailMessage[] }>(
-        `/messages?$orderby=receivedDateTime desc&$top=${max}&$select=subject,from,receivedDateTime,isRead${filter}`,
-        token,
-      );
-      const msgs = data.value ?? [];
-      if (msgs.length === 0) return action.unread_only !== false
-        ? 'Aucun email non lu.'
-        : 'Ta boîte de réception est vide.';
-      const summaries = msgs.slice(0, 5).map((m) => {
-        const from = m.from?.emailAddress?.name ?? m.from?.emailAddress?.address ?? 'Inconnu';
-        return `${from} : ${m.subject ?? '(sans objet)'}`;
-      });
-      const label = action.unread_only !== false ? ' non lu' : '';
-      return `Tu as ${msgs.length} email${msgs.length > 1 ? 's' : ''}${label} : ${summaries.join(' ; ')}.`;
-    }
-
-    case 'search_emails': {
-      const max = Math.min(action.max ?? 5, 20);
-      const data = await graphGet<{ value: GraphMailMessage[] }>(
-        `/messages?$search="${encodeURIComponent(action.query)}"&$top=${max}&$select=subject,from`,
-        token,
-      );
-      const msgs = data.value ?? [];
-      if (msgs.length === 0) return `Aucun email trouvé pour "${action.query}".`;
-      const summaries = msgs.slice(0, 3).map((m) => {
-        const from = m.from?.emailAddress?.name ?? 'Inconnu';
-        return `${from} : ${m.subject ?? '(sans objet)'}`;
-      });
-      return `${msgs.length} résultat${msgs.length > 1 ? 's' : ''} : ${summaries.join(' ; ')}.`;
-    }
-
-    case 'send_email': {
-      const message: Record<string, unknown> = {
-        subject: action.subject,
-        body:    { contentType: 'Text', content: action.body },
-        toRecipients: [{ emailAddress: { address: action.to } }],
-      };
-      if (action.cc)  message['ccRecipients']  = [{ emailAddress: { address: action.cc } }];
-      if (action.bcc) message['bccRecipients'] = [{ emailAddress: { address: action.bcc } }];
-      if (action.importance) {
-        message['importance'] = action.importance.charAt(0).toUpperCase() + action.importance.slice(1);
-      }
-      await graphPost('/sendMail', token, { message, saveToSentItems: true });
-      return `Email envoyé à ${action.to} avec l'objet "${action.subject}".`;
-    }
-
-    case 'mark_read': {
-      const filterParts: string[] = ['isRead eq false'];
-      if (action.subject) filterParts.push(`contains(subject,'${action.subject.replace(/'/g, '')}')`);
-      if (action.sender)  filterParts.push(`contains(from/emailAddress/name,'${action.sender.replace(/'/g, '')}')`);
-      const data = await graphGet<{ value: GraphMailMessage[] }>(
-        `/messages?$filter=${encodeURIComponent(filterParts.join(' and '))}&$top=20&$select=id,subject`,
-        token,
-      );
-      const msgs = data.value ?? [];
-      if (msgs.length === 0) return 'Aucun email non lu correspondant trouvé.';
-      await Promise.all(msgs.map((m) => graphPatch(`/messages/${m.id}`, token, { isRead: true })));
-      return `${msgs.length} email${msgs.length > 1 ? 's' : ''} marqué${msgs.length > 1 ? 's' : ''} comme lu.`;
-    }
-
-    case 'mark_unread': {
-      const filterParts: string[] = ['isRead eq true'];
-      if (action.subject) filterParts.push(`contains(subject,'${action.subject.replace(/'/g, '')}')`);
-      if (action.sender)  filterParts.push(`contains(from/emailAddress/name,'${action.sender.replace(/'/g, '')}')`);
-      const data = await graphGet<{ value: GraphMailMessage[] }>(
-        `/messages?$filter=${encodeURIComponent(filterParts.join(' and '))}&$top=20&$select=id,subject`,
-        token,
-      );
-      const msgs = data.value ?? [];
-      if (msgs.length === 0) return 'Aucun email lu correspondant trouvé.';
-      await Promise.all(msgs.map((m) => graphPatch(`/messages/${m.id}`, token, { isRead: false })));
-      return `${msgs.length} email${msgs.length > 1 ? 's' : ''} marqué${msgs.length > 1 ? 's' : ''} comme non lu.`;
-    }
-
-    case 'reply_email': {
-      const msgs = await findOutlookMessages(token, action.sender, action.subject, 1);
-      if (msgs.length === 0) return 'Aucun email trouvé pour répondre.';
-      await graphPost(`/messages/${msgs[0].id}/reply`, token, { comment: action.body });
-      const from = msgs[0].from?.emailAddress?.name ?? msgs[0].from?.emailAddress?.address ?? 'destinataire';
-      return `Réponse envoyée à ${from}.`;
-    }
-
-    case 'forward_email': {
-      const msgs = await findOutlookMessages(token, action.sender, action.subject, 1);
-      if (msgs.length === 0) return 'Aucun email trouvé pour transférer.';
-      await graphPost(`/messages/${msgs[0].id}/forward`, token, {
-        toRecipients: [{ emailAddress: { address: action.to } }],
-        comment: action.comment ?? '',
-      });
-      return `Email transféré à ${action.to}.`;
-    }
-
-    case 'trash_email': {
-      const msgs = await findOutlookMessages(token, action.sender, action.subject, 3);
-      if (msgs.length === 0) return 'Aucun email trouvé.';
-      await Promise.all(msgs.map((m) => graphDelete(`/messages/${m.id}`, token)));
-      return `${msgs.length} email${msgs.length > 1 ? 's' : ''} supprimé${msgs.length > 1 ? 's' : ''}.`;
-    }
-
-    case 'get_email': {
-      const msgs = await findOutlookMessages(token, action.sender, action.subject, 1);
-      if (msgs.length === 0) return 'Aucun email trouvé.';
-      const msg = await graphGet<GraphMailMessage & { body?: { content?: string } }>(
-        `/messages/${msgs[0].id}?$select=subject,from,body,receivedDateTime`,
-        token,
-      );
-      const from    = msg.from?.emailAddress?.name ?? 'Inconnu';
-      const subject = msg.subject ?? '(sans objet)';
-      const bodyText = (msg.body?.content ?? msg.bodyPreview ?? '')
-        .replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 400);
-      return `Email de ${from}, objet "${subject}" : ${bodyText}`;
-    }
-
-    case 'flag_email': {
-      const msgs = await findOutlookMessages(token, action.sender, action.subject, 5);
-      if (msgs.length === 0) return 'Aucun email trouvé.';
-      const isFlagged = action.flagged !== false;
-      await Promise.all(msgs.map((m) =>
-        graphPatch(`/messages/${m.id}`, token, { flag: { flagStatus: isFlagged ? 'flagged' : 'notFlagged' } }),
-      ));
-      const verb = isFlagged ? 'marqué' : 'déflagué';
-      return `${msgs.length} email${msgs.length > 1 ? 's' : ''} ${verb}${msgs.length > 1 ? 's' : ''} comme important.`;
-    }
-
-    default:
-      return 'Action email non reconnue.';
-  }
-}
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -952,9 +638,7 @@ export async function callMailAgent(
     const results = await Promise.allSettled(
       accounts.map(async (acc) => {
         const token = await getAccountTokenWithStore(acc, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
-        const result = acc.provider === 'gmail'
-          ? await executeGmail(action, token)
-          : await executeOutlook(action, token);
+          const result = await executeGmail(action, token);
         return accounts.length > 1 ? `[${acc.label}] ${result}` : result;
       }),
     );
@@ -979,9 +663,7 @@ export async function callMailAgent(
     : accounts[0];
 
   const token = await getAccountTokenWithStore(target, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
-  const result = target.provider === 'gmail'
-    ? await executeGmail(action, token)
-    : await executeOutlook(action, token);
+  const result = await executeGmail(action, token);
   log?.info({ action: action.action, account: target.label, result_len: result.length }, 'mail_agent_done');
   return result;
 }

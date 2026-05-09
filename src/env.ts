@@ -144,10 +144,10 @@ const envSchema = z
   // Allows automatic token rotation to survive process restarts.
   OAUTH_REFRESH_TOKEN_STORE_PATH: z.string().default('/app/data/oauth-refresh-tokens.json'),
 
-  // ── Microsoft Graph — Todo agent + Outlook mail agent ───────────────────────
-  // Required for todo.* and mail.* (outlook) sub-agents.
+  // ── Microsoft Graph — Todo agent ─────────────────────────────────────────────
+  // Required for todo.* sub-agent.
   // Register an app at https://portal.azure.com → Azure Active Directory → App registrations.
-  // Scopes needed: Tasks.ReadWrite, Mail.ReadWrite, Mail.Send, offline_access
+  // Scopes needed: Tasks.ReadWrite, offline_access
   // MICROSOFT_TENANT_ID: use "common" for personal accounts, your tenant UUID for corporate.
   MICROSOFT_TENANT_ID:     z.string().default('common'),
   MICROSOFT_CLIENT_ID:     optionalNonEmptyString,
@@ -163,17 +163,15 @@ const envSchema = z
   GOOGLE_REFRESH_TOKEN: optionalNonEmptyString,
 
   // ── Mail provider override ────────────────────────────────────────────────────
-  // When both Google and Microsoft credentials are set, force a specific provider.
-  // Values: "gmail" | "outlook" — default: auto (Gmail takes priority).
+  // Mail is Gmail-only. Keep empty or set "gmail".
   MAIL_PROVIDER: z.preprocess(
     (v) => (typeof v === 'string' ? v.trim().toLowerCase() || undefined : v),
-    z.enum(['gmail', 'outlook']).optional(),
+    z.enum(['gmail']).optional(),
   ),
 
   // ── Multi-account mail (indexed, up to 5) ────────────────────────────────────
-  // When set, these override the single-account GOOGLE_*/MICROSOFT_* vars above.
-  // MAIL_ACCOUNT_N_PROVIDER: "gmail" | "outlook"
-  // MAIL_ACCOUNT_N_TENANT_ID: only for Outlook (default: "common")
+  // When set, these override single-account GOOGLE_* vars.
+  // MAIL_ACCOUNT_N_PROVIDER: "gmail"
   // Optional unlimited mode: MAIL_ACCOUNTS_JSON='[{"label":"perso","provider":"gmail",...}]'
   MAIL_ACCOUNTS_JSON: optionalNonEmptyString,
 
