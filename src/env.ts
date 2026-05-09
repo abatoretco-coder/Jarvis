@@ -161,6 +161,8 @@ const envSchema = z
   GOOGLE_CLIENT_ID:     optionalNonEmptyString,
   GOOGLE_CLIENT_SECRET: optionalNonEmptyString,
   GOOGLE_REFRESH_TOKEN: optionalNonEmptyString,
+  // OAuth redirect URI used for the oneshot setup flow.
+  OAUTH_REDIRECT_URI: optionalNonEmptyString,
 
   // ── Mail provider override ────────────────────────────────────────────────────
   // Mail is Gmail-only. Keep empty or set "gmail".

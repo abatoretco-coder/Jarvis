@@ -17,6 +17,8 @@ import { setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
  */
 
 export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
+  const redirectUri = deps.env.OAUTH_REDIRECT_URI?.trim() || 'http://127.0.0.1:8090/v1/oauth/google/callback';
+
   /**
    * GET /v1/oauth/google/authorize
    * Returns the Google authorization URL for oneshot Gmail setup.
@@ -32,7 +34,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
 
     const params = new URLSearchParams({
       client_id: env.GOOGLE_CLIENT_ID,
-      redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+      redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'https://mail.google.com/',
       access_type: 'offline',
@@ -78,7 +80,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
           client_secret: env.GOOGLE_CLIENT_SECRET,
           code,
           grant_type: 'authorization_code',
-          redirect_uri: 'urn:ietf:wg:oauth:2.0:oob',
+          redirect_uri: redirectUri,
         }),
         signal: AbortSignal.timeout(8_000),
       });
