@@ -433,7 +433,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const detailed = await Promise.all(
         msgs.slice(0, 5).map((m) =>
-          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From,Subject`, token)
+          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
             .catch(() => null),
         ),
       );
@@ -456,7 +456,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const detailed = await Promise.all(
         msgs.slice(0, 3).map((m) =>
-          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From,Subject`, token)
+          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
             .catch(() => null),
         ),
       );
@@ -506,7 +506,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       if (msgs.length === 0) return 'Aucun email trouvé pour répondre.';
 
       const msg = await gmailGet<GmailMessage>(
-        `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Message-ID,Subject,From,References`,
+        `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=References`,
         token,
       );
       const origMessageId = gmailHeader(msg, 'Message-ID');
@@ -529,7 +529,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       if (msgs.length === 0) return 'Aucun email trouvé pour transférer.';
 
       const msg = await gmailGet<GmailMessage>(
-        `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Subject,From,Date`,
+        `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
         token,
       );
       const origSubject = gmailHeader(msg, 'Subject');
