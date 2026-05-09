@@ -15,7 +15,7 @@ type DashboardSection = {
   lines: string[];
   source: string;
   status: 'ok' | 'empty' | 'error';
-  items?: TodoTaskItem[];
+  items?: TodoTaskItem[] | DashboardMailItem[];
 };
 
 type CalendarPreview = {
@@ -54,6 +54,7 @@ type DashboardMailItem = {
   from: string;
   subject: string;
   receivedAt: number;
+  snippet?: string;
 };
 
 type MicrosoftAccessTokenEnv = {
@@ -85,6 +86,7 @@ type GmailMessageRef = {
 type GmailDashboardMessage = {
   id: string;
   internalDate?: string;
+  snippet?: string;
   payload?: {
     headers?: Array<{ name: string; value: string }>;
   };
@@ -717,7 +719,7 @@ function gmailHeader(message: GmailDashboardMessage, headerName: string): string
 async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
   const token = await refreshGoogleAccessToken(account);
   const listPayload = await gmailGet<{ messages?: GmailMessageRef[] }>(
-    `/messages?q=${encodeURIComponent('in:inbox')}&maxResults=8`,
+    `/messages?q=${encodeURIComponent('in:inbox')}&maxResults=40`,
     token,
   );
   const messages = listPayload.messages ?? [];
@@ -744,6 +746,7 @@ async function fetchMailItemsForAccount(account: MailAccount): Promise<Dashboard
         from,
         subject,
         receivedAt: Number.isFinite(internalDate) && internalDate > 0 ? internalDate : (Number.isFinite(headerDate) ? headerDate : 0),
+        snippet: result.value.snippet?.trim() || undefined,
       };
     });
 }
@@ -789,6 +792,7 @@ async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']
     summary,
     lines,
     status: 'ok',
+    items: availableItems,
   };
 }
 
