@@ -10,6 +10,7 @@ import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerIngestRoute } from './routes/ingest';
 import { registerNewsSummaryRoute } from './routes/newsSummary';
+import { registerOAuthRoutes } from './routes/oauth';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 
 export type AppDeps = {
@@ -80,6 +81,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);
   registerNewsSummaryRoute(app, deps);
+  registerOAuthRoutes(app, deps);
 
   registerIngestRoute(app, deps);
 
