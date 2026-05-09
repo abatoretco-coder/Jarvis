@@ -50,6 +50,7 @@ type TodoTaskItem = {
 };
 
 type DashboardMailItem = {
+  id: string;
   accountLabel: string;
   from: string;
   subject: string;
@@ -528,6 +529,55 @@ async function gmailGet<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function gmailPost<T>(path: string, token: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`${GMAIL_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8_000),
+  });
+
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`gmail_post_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+
+  const text = await response.text().catch(() => '');
+  if (!text.trim()) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function decodeMimeHeader(value: string): string {
+  if (!value.includes('=?')) return value;
+
+  return value.replace(/=\?([^?]+)\?([bqBQ])\?([^?]+)\?=/g, (_match, charsetRaw: string, encodingRaw: string, textRaw: string) => {
+    try {
+      const charset = charsetRaw.trim().toLowerCase();
+      const encoding = encodingRaw.toUpperCase();
+      const nodeEncoding: BufferEncoding = charset.includes('8859-1') || charset.includes('latin1')
+        ? 'latin1'
+        : 'utf8';
+
+      if (encoding === 'B') {
+        const bytes = Buffer.from(textRaw, 'base64');
+        return bytes.toString(nodeEncoding);
+      }
+
+      const qp = textRaw
+        .replace(/_/g, ' ')
+        .replace(/=([0-9A-Fa-f]{2})/g, (_hexMatch, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+
+      return Buffer.from(qp, 'binary').toString(nodeEncoding);
+    } catch {
+      return textRaw;
+    }
+  });
+}
+
 function isTaskOverdue(task: DashboardTask, now: Date): boolean {
   const dueDate = parseDate(task.dueDateTime?.dateTime);
   if (!dueDate) return false;
@@ -713,7 +763,8 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
 }
 
 function gmailHeader(message: GmailDashboardMessage, headerName: string): string {
-  return message.payload?.headers?.find((header) => header.name.toLowerCase() === headerName.toLowerCase())?.value ?? '';
+  const raw = message.payload?.headers?.find((header) => header.name.toLowerCase() === headerName.toLowerCase())?.value ?? '';
+  return decodeMimeHeader(raw);
 }
 
 async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
@@ -742,6 +793,7 @@ async function fetchMailItemsForAccount(account: MailAccount): Promise<Dashboard
       const internalDate = Number(result.value.internalDate ?? '0');
       const headerDate = Date.parse(gmailHeader(result.value, 'Date'));
       return {
+        id: result.value.id,
         accountLabel: account.label,
         from,
         subject,
@@ -848,6 +900,34 @@ function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null 
 }
 
 export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): void {
+  app.post('/v1/mail/trash', async (req, reply) => {
+    try {
+      const body = (req.body ?? {}) as { messageId?: unknown; accountLabel?: unknown };
+      const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
+      const accountLabel = typeof body.accountLabel === 'string' ? body.accountLabel.trim().toLowerCase() : '';
+
+      if (!messageId) {
+        return reply.code(400).send({ error: 'message_id_required' });
+      }
+
+      const accounts = buildMailAccounts(deps.env);
+      if (accounts.length === 0) {
+        return reply.code(400).send({ error: 'mail_not_configured' });
+      }
+
+      const account = accountLabel
+        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
+        : accounts[0];
+
+      const token = await refreshGoogleAccessToken(account);
+      await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token, {});
+      return reply.code(200).send({ ok: true });
+    } catch (error) {
+      app.log.warn({ error }, 'dashboard_mail_trash_failed');
+      return reply.code(500).send({ error: 'mail_trash_failed' });
+    }
+  });
+
   app.get('/v1/todo/lists', async (_req, reply) => {
     try {
       const { lists } = await fetchMicrosoftTodoLists(deps.env);

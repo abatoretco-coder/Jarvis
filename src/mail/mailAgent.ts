@@ -351,8 +351,36 @@ interface GmailMessage {
   snippet?: string;
 }
 
+function decodeMimeHeader(value: string): string {
+  if (!value.includes('=?')) return value;
+
+  return value.replace(/=\?([^?]+)\?([bqBQ])\?([^?]+)\?=/g, (_match, charsetRaw: string, encodingRaw: string, textRaw: string) => {
+    try {
+      const charset = charsetRaw.trim().toLowerCase();
+      const encoding = encodingRaw.toUpperCase();
+      const nodeEncoding: BufferEncoding = charset.includes('8859-1') || charset.includes('latin1')
+        ? 'latin1'
+        : 'utf8';
+
+      if (encoding === 'B') {
+        const bytes = Buffer.from(textRaw, 'base64');
+        return bytes.toString(nodeEncoding);
+      }
+
+      const qp = textRaw
+        .replace(/_/g, ' ')
+        .replace(/=([0-9A-Fa-f]{2})/g, (_hexMatch, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+
+      return Buffer.from(qp, 'binary').toString(nodeEncoding);
+    } catch {
+      return textRaw;
+    }
+  });
+}
+
 function gmailHeader(msg: GmailMessage, name: string): string {
-  return msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+  const raw = msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+  return decodeMimeHeader(raw);
 }
 
 async function gmailGet<T>(path: string, token: string): Promise<T> {
