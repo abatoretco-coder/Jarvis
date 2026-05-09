@@ -39,6 +39,8 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       scope: 'https://mail.google.com/',
       access_type: 'offline',
       prompt: 'consent',
+      device_id: 'jarvis-vm400',
+      device_name: 'Jarvis VM400',
     });
 
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
