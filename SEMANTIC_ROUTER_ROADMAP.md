@@ -257,9 +257,9 @@ multiIntent threshold = 0.5
 - Dispatch direct vers agents Todo/Mail avec fallback LLM inchangé
 - Couverture tests unitaires + intégration étendue
 
-### Phase 2E : E1 actions Mail sensibles 🔜 NEXT
+### Phase 2E : E1 actions Mail sensibles ✅ COMPLETE
 
-**Scope prévu** :
+**Scope activé** :
 - `mail.send_email`
 - `mail.reply_email`
 - `mail.forward_email`
@@ -268,6 +268,12 @@ multiIntent threshold = 0.5
 **Pourquoi isoler ce palier** :
 - envoi externe ou suppression de contenu
 - besoin de garde-fous renforcés (logs, seuil de confiance plus exigeant, confirmation conversationnelle selon cas)
+
+**Garde-fous live** :
+- Gate dédiée: `SEMANTIC_ROUTER_E1_HIGH_RISK_ACTIVATION_ENABLED`
+- Allowlist dédiée: `SEMANTIC_ROUTER_ACTIVATED_E1_HIGH_RISK_ROUTES`
+- Seuils stricts: `SEMANTIC_ROUTER_HIGH_RISK_ACCEPT_SCORE` + `SEMANTIC_ROUTER_HIGH_RISK_MIN_MARGIN`
+- Logs dédiés: blocked/attempt/handled/error pour routes high-risk E1
 
 ---
 

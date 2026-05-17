@@ -35,6 +35,7 @@ import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/cont
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
+import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
@@ -186,6 +187,11 @@ const SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS = new Set([
   'todo.complete_checklist_item',
   'todo.delete_checklist_item',
   'mail.flag_email',
+  // Phase 2E (still guarded by dedicated high-risk activation + thresholds)
+  'mail.send_email',
+  'mail.reply_email',
+  'mail.forward_email',
+  'mail.trash_email',
 ]);
 
 async function synthesizeWeatherReplyWithOpenAi(params: {
@@ -747,6 +753,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const semanticActivatedE1RouteKeys = new Set(
       uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES ?? '').split(',')),
     );
+    const semanticE1HighRiskActivationEnabled =
+      semanticLiveModeEnabled
+      && deps.env.SEMANTIC_ROUTER_E1_HIGH_RISK_ACTIVATION_ENABLED === true;
+    const semanticActivatedE1HighRiskRouteKeys = new Set(
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_HIGH_RISK_ROUTES ?? '').split(',')),
+    );
 
     const toSemanticActivationTarget = (candidate: {
       key: string;
@@ -928,23 +940,61 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             }
           }
           if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+            const routeKey = semResult.matchedRoute.key;
+            const highRisk = semResult.matchedRoute.highRisk === true;
             app.log.info(
               {
                 threadId,
                 requestId,
-                route: semResult.matchedRoute.key,
+                route: routeKey,
+                routeLevel: 'E1',
+                score: semResult.top1Score,
+                margin: semResult.margin,
                 decision: semResult.decision,
+                activated: false,
+                fallback: false,
+                highRisk,
+                elapsedMs: semResult.elapsedMs,
                 targetAgentId: semResult.matchedRoute.targetAgentId,
                 plannerRequired: semResult.matchedRoute.plannerRequired === true,
               },
               'semantic_router_e1_candidate',
             );
 
-            const routeKey = semResult.matchedRoute.key;
             if (!semanticE1ActivationEnabled) {
-              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_e1_activation_fallback_not_allowlisted');
+              app.log.info(
+                {
+                  threadId,
+                  requestId,
+                  route: routeKey,
+                  routeLevel: 'E1',
+                  score: semResult.top1Score,
+                  margin: semResult.margin,
+                  decision: semResult.decision,
+                  activated: false,
+                  fallback: true,
+                  highRisk,
+                  elapsedMs: semResult.elapsedMs,
+                },
+                'semantic_router_e1_activation_fallback_not_allowlisted',
+              );
             } else if (!semanticActivatedE1RouteKeys.has(routeKey)) {
-              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_e1_activation_fallback_not_allowlisted');
+              app.log.info(
+                {
+                  threadId,
+                  requestId,
+                  route: routeKey,
+                  routeLevel: 'E1',
+                  score: semResult.top1Score,
+                  margin: semResult.margin,
+                  decision: semResult.decision,
+                  activated: false,
+                  fallback: true,
+                  highRisk,
+                  elapsedMs: semResult.elapsedMs,
+                },
+                'semantic_router_e1_activation_fallback_not_allowlisted',
+              );
             } else {
               const targetAgentId = semResult.matchedRoute.targetAgentId;
               const expectedTargetAgentId = routeKey.startsWith('search.deep.')
@@ -962,21 +1012,112 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
               if (!safeRouteAllowed || !supportedTarget) {
                 app.log.info(
-                  { threadId, requestId, routeKey, targetAgentId },
+                  {
+                    threadId,
+                    requestId,
+                    route: routeKey,
+                    routeLevel: 'E1',
+                    score: semResult.top1Score,
+                    margin: semResult.margin,
+                    decision: semResult.decision,
+                    activated: false,
+                    fallback: true,
+                    highRisk,
+                    elapsedMs: semResult.elapsedMs,
+                    targetAgentId,
+                  },
                   'semantic_router_e1_activation_fallback_unsupported_target',
                 );
               } else {
+                let highRiskAllowed = true;
+                if (highRisk) {
+                  const highRiskGate = evaluateHighRiskE1Activation({
+                    enabled: semanticE1HighRiskActivationEnabled,
+                    activatedRoutes: semanticActivatedE1HighRiskRouteKeys,
+                    routeKey,
+                    top1Score: semResult.top1Score,
+                    margin: semResult.margin,
+                    acceptScore: deps.env.SEMANTIC_ROUTER_HIGH_RISK_ACCEPT_SCORE,
+                    minMargin: deps.env.SEMANTIC_ROUTER_HIGH_RISK_MIN_MARGIN,
+                  });
+                  if (!highRiskGate.allowed) {
+                    highRiskAllowed = false;
+                    if (highRiskGate.decision === 'blocked_activation_disabled') {
+                      app.log.info(
+                        {
+                          threadId,
+                          requestId,
+                          route: routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
+                          decision: semResult.decision,
+                          activated: false,
+                          fallback: true,
+                          highRisk: true,
+                          elapsedMs: semResult.elapsedMs,
+                        },
+                        'semantic_router_e1_high_risk_blocked_activation_disabled',
+                      );
+                    } else if (highRiskGate.decision === 'blocked_not_allowlisted') {
+                      app.log.info(
+                        {
+                          threadId,
+                          requestId,
+                          route: routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
+                          decision: semResult.decision,
+                          activated: false,
+                          fallback: true,
+                          highRisk: true,
+                          elapsedMs: semResult.elapsedMs,
+                        },
+                        'semantic_router_e1_high_risk_blocked_not_allowlisted',
+                      );
+                    } else {
+                      app.log.info(
+                        {
+                          threadId,
+                          requestId,
+                          route: routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
+                          decision: semResult.decision,
+                          activated: false,
+                          fallback: true,
+                          highRisk: true,
+                          elapsedMs: semResult.elapsedMs,
+                          thresholdScore: deps.env.SEMANTIC_ROUTER_HIGH_RISK_ACCEPT_SCORE,
+                          thresholdMargin: deps.env.SEMANTIC_ROUTER_HIGH_RISK_MIN_MARGIN,
+                        },
+                        'semantic_router_e1_high_risk_blocked_thresholds',
+                      );
+                    }
+                  }
+                }
+
+                if (highRiskAllowed) {
                 const tE1 = Date.now();
                 app.log.info(
                   {
                     threadId,
                     requestId,
                     route: routeKey,
+                    routeLevel: 'E1',
+                    score: semResult.top1Score,
+                    margin: semResult.margin,
                     decision: semResult.decision,
+                    activated: true,
+                    fallback: false,
+                    highRisk,
+                    elapsedMs: semResult.elapsedMs,
                     targetAgentId,
                     handled: false,
                   },
-                  'semantic_router_e1_live_attempt',
+                  highRisk ? 'semantic_router_e1_high_risk_live_attempt' : 'semantic_router_e1_live_attempt',
                 );
 
                 if (isSlowReadRoute && sseStream !== null) {
@@ -1043,7 +1184,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         threadId,
                         requestId,
                         route: routeKey,
+                        routeLevel: 'E1',
+                        score: semResult.top1Score,
+                        margin: semResult.margin,
                         decision: semResult.decision,
+                        activated: true,
+                        fallback: true,
+                        highRisk,
+                        elapsedMs: semResult.elapsedMs,
                         targetAgentId,
                         handled: false,
                         elapsed_ms: Date.now() - tE1,
@@ -1058,12 +1206,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         threadId,
                         requestId,
                         route: e1Result.routeKey,
+                        routeLevel: 'E1',
+                        score: semResult.top1Score,
+                        margin: semResult.margin,
                         decision: semResult.decision,
+                        activated: true,
+                        fallback: false,
+                        highRisk,
+                        elapsedMs: semResult.elapsedMs,
                         targetAgentId,
                         handled: true,
                         elapsed_ms: Date.now() - tE1,
                       },
-                      'semantic_router_e1_live_handled',
+                      highRisk ? 'semantic_router_e1_high_risk_live_handled' : 'semantic_router_e1_live_handled',
                     );
                   } else if (e1Result.kind === 'spotify_plan') {
                     const maybePlan = e1Result.data as MusicAgentPlan;
@@ -1073,7 +1228,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           threadId,
                           requestId,
                           route: e1Result.routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
                           decision: semResult.decision,
+                          activated: true,
+                          fallback: true,
+                          highRisk,
+                          elapsedMs: semResult.elapsedMs,
                           targetAgentId,
                           handled: false,
                           elapsed_ms: Date.now() - tE1,
@@ -1089,13 +1251,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           threadId,
                           requestId,
                           route: e1Result.routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
                           decision: semResult.decision,
+                          activated: true,
+                          fallback: false,
+                          highRisk,
+                          elapsedMs: semResult.elapsedMs,
                           targetAgentId,
                           planner: 'spotify_music_agent',
                           handled: true,
                           elapsed_ms: Date.now() - tE1,
                         },
-                        'semantic_router_e1_live_handled',
+                        highRisk ? 'semantic_router_e1_high_risk_live_handled' : 'semantic_router_e1_live_handled',
                       );
                     }
                   } else {
@@ -1104,7 +1273,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         threadId,
                         requestId,
                         route: routeKey,
+                        routeLevel: 'E1',
+                        score: semResult.top1Score,
+                        margin: semResult.margin,
                         decision: semResult.decision,
+                        activated: true,
+                        fallback: true,
+                        highRisk,
+                        elapsedMs: semResult.elapsedMs,
                         targetAgentId,
                         handled: false,
                         elapsed_ms: Date.now() - tE1,
@@ -1118,13 +1294,21 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       threadId,
                       requestId,
                       route: routeKey,
+                      routeLevel: 'E1',
+                      score: semResult.top1Score,
+                      margin: semResult.margin,
                       decision: semResult.decision,
+                      activated: true,
+                      fallback: true,
+                      highRisk,
+                      elapsedMs: semResult.elapsedMs,
                       targetAgentId,
                       elapsed_ms: Date.now() - tE1,
                       err,
                     },
-                    'semantic_router_e1_live_error',
+                    highRisk ? 'semantic_router_e1_high_risk_live_error' : 'semantic_router_e1_live_error',
                   );
+                }
                 }
               }
             }

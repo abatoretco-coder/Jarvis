@@ -149,6 +149,14 @@ const envSchema = z
   // Comma-separated route keys allowed for Phase 2A E1 activation.
   // Example: "search.deep.analysis,spotify.search_and_play"
   SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: optionalNonEmptyString,
+  // Phase 2E: dedicated gate for high-risk E1 routes (mail send/reply/forward/trash,
+  // plus explicitly marked destructive todo mutations).
+  SEMANTIC_ROUTER_E1_HIGH_RISK_ACTIVATION_ENABLED: booleanFromEnv.default('false'),
+  // Comma-separated high-risk E1 routes allowed in live mode.
+  SEMANTIC_ROUTER_ACTIVATED_E1_HIGH_RISK_ROUTES: optionalNonEmptyString,
+  // Stricter confidence gates for high-risk E1 routes.
+  SEMANTIC_ROUTER_HIGH_RISK_ACCEPT_SCORE: z.coerce.number().min(0.5).max(0.99).default(0.90),
+  SEMANTIC_ROUTER_HIGH_RISK_MIN_MARGIN: z.coerce.number().min(0.01).max(0.30).default(0.12),
 
   // General fallback HA conversation agent (used when router is disabled or returns no confident target).
   // Override to point to your custom general agent instead of the default openai_conversation.
