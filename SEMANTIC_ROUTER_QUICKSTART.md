@@ -18,7 +18,7 @@
 
 2. **[SEMANTIC_ROUTER_SUMMARY.md](./SEMANTIC_ROUTER_SUMMARY.md)** ← Visualisation claire
    - Diagrammes ASCII
-   - Stats (20 routes E2, 32 variantes Spotify)
+   - Stats (16 routes E2, 8 routes E1 démarrage, 32 variantes Spotify)
    - Checklist go-live
    - **Temps** : 10 min
 
@@ -79,7 +79,7 @@
 
 ---
 
-## 🎯 Les 20 routes E2 Phase 1
+## 🎯 Etat actuel des routes
 
 ```
 ┌─ SPOTIFY (7)
@@ -91,14 +91,20 @@
 │  ├─ list_devices       → template
 │  └─ clear_queue        → 3 variantes
 │
-├─ SEARCH (5)
-│  ├─ weather            → "quel temps demain ?"
+├─ WEATHER LOCAL (4, E2)
+│  ├─ current_temperature  → "quelle température à la maison ?"
+│  ├─ current_humidity     → "humidité actuelle maison"
+│  ├─ current_precipitation → "il pleut chez moi ?"
+│  └─ current_conditions   → "météo locale du moment"
+│
+├─ SEARCH EXTERNE (5, E2)
+│  ├─ external_weather    → "météo à Paris demain ?"
 │  ├─ live_sport         → "qui a gagné le match ?"
 │  ├─ current_news       → "quelles sont les actus ?"
 │  ├─ definition         → "c'est quoi ?"
 │  └─ quick_lookup       → "qui est Paul ?"
 │
-├─ TODO (6)
+├─ TODO (6, E1)
 │  ├─ list_tasks         → "mes tâches"
 │  ├─ list_tasks.today   → "tâches du jour"
 │  ├─ list_tasks.tomorrow → "tâches demain"
@@ -106,12 +112,12 @@
 │  ├─ list_tasks.overdue → "tâches en retard"
 │  └─ list_lists         → "mes listes"
 │
-└─ MAIL (2)
+└─ MAIL (2, E1)
    ├─ list_inbox         → "lis mes mails"
    └─ list_inbox.unread  → "mails non lus"
 ```
 
-**Total** : 20 routes E2 + 32 Spotify variantes + catalog complet
+**Total** : 16 routes E2 + 8 routes E1 (démarrage) + 32 Spotify variantes
 
 ---
 
@@ -154,7 +160,7 @@ Si échoue une check → **Fallback vers LLM Router existant**
 | Phase | Semaines | Routes | Status |
 |---|---|---|---|
 | **0** | S1-2 | Types | ✅ DONE |
-| **1** | S3-4 | 20 E2 | 🔴 Implementation (TODO) |
+| **1** | S3-4 | E2 (Spotify/Search/Weather) | 🔴 Implementation (TODO) |
 | **2** | S5-6 | 22 E1 | 🔴 TODO |
 | **3** | S7-8 | 12 HA | 🔴 TODO |
 | **4** | S9-10 | Advanced | 🔴 TODO |
@@ -202,7 +208,7 @@ Si échoue une check → **Fallback vers LLM Router existant**
 
 - [ ] Tous les docs lus ✓
 - [ ] Types TypeScript compris (semanticRouter.types.ts)
-- [ ] Catalog 20 routes OK (semanticRouteCatalog.ts)
+- [ ] Catalog aligné runtime OK (semanticRouteCatalog.ts)
 - [ ] Spotify responses OK (32 variantes)
 - [ ] Ollama installé (local) OU clé OpenAI réservée
 - [ ] Reserve 2 semaines Phase 0 implementation
@@ -252,7 +258,7 @@ ls src/routing/deterministic/spotifyResponses.ts ✓
 
 - 4 docs (2500+ lines)
 - 6 fichiers TS (types + catalog + responses)
-- 20 routes E2 définies
+- Catalogue aligné runtime défini (E2 + E1)
 - 32 variantes Spotify
 - Ready for Phase 1 implementation
 

@@ -38,7 +38,7 @@ src\routing\
 Fichiers créés       : 11
 Documentation        : ~2500 lignes (COMPLET)
 TypeScript           : ~950 lignes (COMPLET types + catalog)
-Routes cataloguées   : 20 E2 + 22 E1 + 12 HA = 54 routes
+Routes cataloguées   : 16 E2 + 8 E1 (catalog implémenté) + expansion planifiée
 Spotify variantes    : 32 (pause, play, next, previous, now_playing, list_devices, clear_queue)
 Tests fixtures       : 📋 À créer Phase 1
 ```
@@ -59,20 +59,19 @@ Tests fixtures       : 📋 À créer Phase 1
 └────────────────┬────────────────────────┘
                  ↓
 ┌─────────────────────────────────────────┐
-│ [E2] Embedding + Direct Executor        │ ← **PHASE 1 — 20 routes**
+│ [E2] Embedding + Direct Executor        │ ← **PHASE 1 — 16 routes**
 │ • Spotify (7)    : pause, play, next... │
-│ • Search (5)     : weather, live_sport..│
-│ • Todo (6)       : list_tasks, today... │
-│ • Mail (2)       : list_inbox, unread   │
+│ • Weather (4)    : current_* local home │
+│ • Search (5)     : external_weather ... │
 │ ~40-50ms, pas de planner                │
 └────────────────┬────────────────────────┘
                  ↓
 ┌─────────────────────────────────────────┐
-│ [E1] Embedding + Agent + Planner        │ ← **PHASE 2 — 22 routes**
+│ [E1] Embedding + Agent + Planner        │ ← **PHASE 2+**
 │ • Spotify (6)    : search, queue_add... │
 │ • Search (3)     : deep analysis...     │
-│ • Todo (9)       : add_task, complete.. │
-│ • Mail (8)       : send_email, reply... │
+│ • Todo (9+)      : add_task, complete.. │
+│ • Mail (8+)      : send_email, reply... │
 │ • HA (6)         : timer, alarm...      │
 │ ~500-1000ms, besoin LLM planner         │
 └────────────────┬────────────────────────┘
@@ -101,7 +100,7 @@ Tests fixtures       : 📋 À créer Phase 1
   key: 'spotify.pause',
   level: 'E2',
   targetAgentId: 'spotify',
-  directAction: 'pause',
+  directRequest: { domain: 'spotify', action: 'pause' },
   plannerRequired: false,
   examples: ['pause', 'pause la musique', 'arrête le son', ...],
   deterministicResponses: () => SPOTIFY_PAUSE_RESPONSES,
@@ -119,7 +118,7 @@ Tests fixtures       : 📋 À créer Phase 1
   top1Score: 0.91,
   top2Score: 0.61,
   margin: 0.30,
-  top1Intent: 'search.news.weather',
+  top1Intent: 'search.news.external_weather',
   top2Intent: 'search.web.lookup',
   confidence: 0.91,
   elapsedMs: 45
@@ -156,7 +155,7 @@ Fallback : LLM router
 
 ---
 
-## 📊 Catalog : 20 routes E2 Phase 1
+## 📊 Catalog : état actuel aligné runtime
 
 ### Spotify (7)
 
@@ -172,33 +171,42 @@ Fallback : LLM router
 
 **Total Spotify** : 32 variantes deterministic
 
-### Search (5)
+### Weather local (4, E2)
 
 | Route | Action | Examples |
 |---|---|---|
-| `search.news.weather` | weather | "quel temps demain" |
+| `weather.current_temperature` | current_temperature | "quelle température à la maison" |
+| `weather.current_humidity` | current_humidity | "humidité actuelle maison" |
+| `weather.current_precipitation` | current_precipitation | "il pleut chez moi" |
+| `weather.current_conditions` | current_conditions | "météo locale du moment" |
+
+### Search externe (5, E2)
+
+| Route | Action | Examples |
+|---|---|---|
+| `search.news.external_weather` | external_weather | "météo à Paris demain" |
 | `search.news.live_sport` | live_sport | "qui a gagné le match" |
 | `search.news.current_news` | current_news | "quelles sont les actus" |
 | `search.web.definition` | definition | "c'est quoi" |
 | `search.web.quick_lookup` | quick_lookup | "qui est Paul" |
 
-### Todo (6)
+### Todo (6, E1)
 
-| Route | Action | Examples |
+| Route | directRequest | Examples |
 |---|---|---|
-| `todo.list_tasks` | list_tasks | "mes tâches" |
-| `todo.list_tasks.today` | list_tasks_today | "tâches du jour" |
-| `todo.list_tasks.tomorrow` | list_tasks_tomorrow | "tâches demain" |
-| `todo.list_tasks.this_week` | list_tasks_this_week | "tâches de la semaine" |
-| `todo.list_tasks.overdue` | list_tasks_overdue | "tâches en retard" |
-| `todo.list_lists` | list_lists | "mes listes" |
+| `todo.list_tasks` | `{domain:'todo', action:'list_tasks'}` | "mes tâches" |
+| `todo.list_tasks.today` | `{domain:'todo', action:'list_tasks', slots:{period:'today'}}` | "tâches du jour" |
+| `todo.list_tasks.tomorrow` | `{domain:'todo', action:'list_tasks', slots:{period:'tomorrow'}}` | "tâches demain" |
+| `todo.list_tasks.this_week` | `{domain:'todo', action:'list_tasks', slots:{period:'this_week'}}` | "tâches de la semaine" |
+| `todo.list_tasks.overdue` | `{domain:'todo', action:'list_tasks', slots:{period:'overdue'}}` | "tâches en retard" |
+| `todo.list_lists` | `{domain:'todo', action:'list_lists'}` | "mes listes" |
 
-### Mail (2)
+### Mail (2, E1)
 
-| Route | Action | Examples |
+| Route | directRequest | Examples |
 |---|---|---|
-| `mail.list_inbox` | list_inbox | "lis mes mails" |
-| `mail.list_inbox.unread` | list_inbox_unread | "mails non lus" |
+| `mail.list_inbox` | `{domain:'mail', action:'list_inbox'}` | "lis mes mails" |
+| `mail.list_inbox.unread` | `{domain:'mail', action:'list_inbox', slots:{unread_only:true}}` | "mails non lus" |
 
 ---
 
@@ -207,7 +215,7 @@ Fallback : LLM router
 ```
 PHASE 0 : 2 semaines (DONE ✅)
   ✅ Types TypeScript
-  ✅ Catalog 20 routes E2
+  ✅ Catalog aligné runtime (E2 + E1)
   ✅ Spotify responses COMPLET (32 variantes)
   ✅ Documentation ROADMAP + ARCHITECTURE + INDEX
 
@@ -217,7 +225,7 @@ PHASE 1 : 2 semaines (TODO 🔴)
   ← routeDecision.ts (logic)
   ← semanticRouter.ts (orchestration)
   ← Integration ingest.ts
-  ← 20 routes E2 LIVE (<50ms latency)
+  ← routes E2 LIVE (<50ms latency) + Todo/Mail E1
 
 PHASE 2 : 2 semaines
   ← E1 routes (22)
@@ -385,7 +393,7 @@ mailResponses.ts     ⏳ STUBS | avec LLM synthesis fallback
 - Planning complet : 4 phases détaillées
 - Architecture définie : hiérarchie D0-E2-E1-LLM-HA
 - Types TypeScript : 15+ definitions prêts
-- Catalog : 20 routes E2 cataloguées
+- Catalog : aligné runtime (E2 + E1 démarrage)
 - Responses Spotify : 32 variantes complètes
 - Documentation : ~2500 lignes (ROADMAP, ARCHITECTURE, INDEX, PROMPTS)
 

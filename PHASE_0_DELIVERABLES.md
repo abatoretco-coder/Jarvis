@@ -66,9 +66,10 @@
 
 6. **[semanticRouteCatalog.ts](./semanticRouteCatalog.ts)** (450 lignes)
    - ✅ 7 routes E2 Spotify (pause, play, next, previous, now_playing, list_devices, clear_queue)
-   - ✅ 5 routes E2 Search (weather, live_sport, current_news, definition, quick_lookup)
-   - ✅ 6 routes E2 Todo (list_tasks, today, tomorrow, this_week, overdue, list_lists)
-   - ✅ 2 routes E2 Mail (list_inbox, list_inbox.unread)
+   - ✅ 5 routes E2 Search externe (external_weather, live_sport, current_news, definition, quick_lookup)
+   - ✅ 4 routes E2 Weather local (current_temperature, current_humidity, current_precipitation, current_conditions)
+   - ✅ 6 routes E1 Todo (list_tasks, today, tomorrow, this_week, overdue, list_lists)
+   - ✅ 2 routes E1 Mail (list_inbox, list_inbox.unread)
    - ✅ 0 routes E2 HA (reserved Phase 3)
    - ✅ Helpers : getCatalogByLevel(), getCatalogByAgent(), findRouteByKey(), getRouteDeterministicResponse(), getCatalogStats()
    - **Compilable** : 0 erreurs (quand deterministic responses importées)
@@ -113,8 +114,8 @@
 - ✅ Compatible avec existant (orchestratorRouter, ingest.ts, etc.)
 
 ### Catalog
-- ✅ 20 routes E2 définies
-- ✅ Chaque route a examples, targetAgentId, directAction
+- ✅ Catalogue aligné runtime (16 E2 + 8 E1 démarrage)
+- ✅ Chaque route a examples, targetAgentId, directRequest
 - ✅ Relie vers deterministic responses
 - ✅ Extensible pour Phase 2 (E1) + Phase 3 (HA)
 
@@ -138,7 +139,8 @@
 | Files créés | 10 | ✅ |
 | Documentation (lignes) | ~2500 | ✅ |
 | TypeScript (lignes) | ~280 | ✅ |
-| Routes E2 | 20 | ✅ |
+| Routes E2 | 16 | ✅ |
+| Routes E1 (démarrage) | 8 | ✅ |
 | Routes E1 (placeholder) | 22 | 📋 |
 | Routes HA (placeholder) | 12 | 📋 |
 | Spotify variantes | 32 | ✅ |
@@ -219,7 +221,7 @@ Avant de commencer Phase 0 code (embeddingClient.ts, etc.) :
 | **E2 Accuracy Target** | >95% | correct routes |
 | **Fallback Rate Target** | <5% | multi-intent/ambiguous |
 | **Cache Hit Target** | >80% | embedding queries |
-| **Routes E2** | 20 | Phase 0-1 live |
+| **Routes E2** | 16 | Phase 0-1 live |
 | **Routes E1** | 22 | Phase 2+ |
 | **Routes HA** | 12 | Phase 3+ |
 

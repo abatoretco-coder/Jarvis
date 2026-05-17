@@ -6,11 +6,15 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { ConversationService } from '../conversation/ConversationService';
+import { detectEffectiveThreadId } from '../conversation/conversationWindow';
+import { enrichWithContextNote } from '../conversation/contextNote';
 import { routeUserRequest, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentResponses } from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
+import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
+import { buildWeatherSnapshotFromStates, type HaStateLike, type WeatherSnapshot } from '../weather/weatherSnapshot';
 import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import {
@@ -60,12 +64,6 @@ const ttsRequestSchema = z.object({
 
 type EntityStateLike = {
   entity_id: string;
-  attributes?: Record<string, unknown>;
-};
-
-type HaStateLike = {
-  entity_id: string;
-  state?: string;
   attributes?: Record<string, unknown>;
 };
 
@@ -143,164 +141,6 @@ function normalizeClientChannel(value: unknown): string | undefined {
   if (!normalized) return undefined;
   if (!/^[a-z0-9._-]{2,64}$/.test(normalized)) return undefined;
   return normalized;
-}
-
-function asFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
-}
-
-type WeatherSnapshot = {
-  location: string;
-  current?: {
-    entityId: string;
-    condition: string;
-    temperature?: number;
-    feelsLike?: number;
-    humidity?: number;
-    windSpeed?: number;
-    windBearing?: number;
-    precipitation?: number;
-  };
-  sensors: Array<{ entityId: string; label?: string; value?: number }>;
-  forecast: Array<{
-    date: string;
-    condition: string;
-    temperature?: number;
-    tempLow?: number;
-    precipitation?: number;
-    windSpeed?: number;
-  }>;
-};
-
-function buildWeatherSnapshot(states: HaStateLike[]): WeatherSnapshot | null {
-  const weatherEntity = states.find((state) => state.entity_id === 'weather.maison')
-    ?? states.find((state) => state.entity_id.startsWith('weather.'));
-  const weatherSensors = states.filter((state) =>
-    state.entity_id.startsWith('sensor.maison_weather')
-    || state.entity_id === 'sensor.maison_temperature'
-    || state.entity_id === 'sensor.maison_apparent_temperature'
-    || state.entity_id === 'sensor.maison_heat_index_temperature'
-    || state.entity_id === 'sensor.maison_humidity'
-  );
-
-  if (!weatherEntity && weatherSensors.length === 0) return null;
-
-  const attributes = weatherEntity?.attributes ?? {};
-  const forecast = Array.isArray(attributes.forecast) ? attributes.forecast as Array<Record<string, unknown>> : [];
-  const location = String(attributes.friendly_name ?? weatherEntity?.entity_id.replace(/^weather\./, '') ?? 'Maison');
-  const currentCondition = String(weatherEntity?.state ?? attributes.condition ?? 'nuageux');
-  const currentTemperature = asFiniteNumber(attributes.temperature);
-  const currentFeelsLike = asFiniteNumber(attributes.apparent_temperature);
-  const currentHumidity = asFiniteNumber(attributes.humidity);
-  const currentWindSpeed = asFiniteNumber(attributes.wind_speed);
-  const currentWindBearing = asFiniteNumber(attributes.wind_bearing);
-  const currentPrecipitation = asFiniteNumber(attributes.precipitation_probability);
-
-  return {
-    location,
-    current: weatherEntity
-      ? {
-          entityId: weatherEntity.entity_id,
-          condition: currentCondition,
-          ...(currentTemperature !== undefined ? { temperature: currentTemperature } : {}),
-          ...(currentFeelsLike !== undefined ? { feelsLike: currentFeelsLike } : {}),
-          ...(currentHumidity !== undefined ? { humidity: currentHumidity } : {}),
-          ...(currentWindSpeed !== undefined ? { windSpeed: currentWindSpeed } : {}),
-          ...(currentWindBearing !== undefined ? { windBearing: currentWindBearing } : {}),
-          ...(currentPrecipitation !== undefined ? { precipitation: currentPrecipitation } : {}),
-        }
-      : undefined,
-    sensors: weatherSensors.map((sensor) => ({
-      entityId: sensor.entity_id,
-      label: typeof sensor.attributes?.friendly_name === 'string' ? sensor.attributes.friendly_name : undefined,
-      value: asFiniteNumber(sensor.state) ?? asFiniteNumber(sensor.attributes?.state),
-    })),
-    forecast: forecast.slice(0, 7).map((item, index) => ({
-      date: typeof item.datetime === 'string' ? item.datetime : new Date(Date.now() + index * 86_400_000).toISOString(),
-      condition: String(item.condition ?? currentCondition),
-      ...(asFiniteNumber(item.temperature) !== undefined ? { temperature: asFiniteNumber(item.temperature) } : {}),
-      ...(asFiniteNumber(item.templow) !== undefined ? { tempLow: asFiniteNumber(item.templow) } : {}),
-      ...(asFiniteNumber(item.precipitation) !== undefined ? { precipitation: asFiniteNumber(item.precipitation) } : {}),
-      ...(asFiniteNumber(item.wind_speed) !== undefined ? { windSpeed: asFiniteNumber(item.wind_speed) } : {}),
-    })),
-  };
-}
-
-/**
- * Synthesizes a deterministic weather response for trivial requests.
- * Returns null if the request is not a simple/deterministic weather question.
- * 
- * Trivial requests: current temperature, humidity, condition, or precipitation.
- * Examples: "Quelle température?" "Il pleut?" "Quel temps fait-il?"
- */
-function synthesizeDeterministicWeatherReply(params: {
-  userText: string;
-  weather: WeatherSnapshot;
-  log?: { info: (obj: Record<string, unknown>, msg: string) => void };
-}): string | null {
-  const text = params.userText.toLowerCase().trim();
-  const snap = params.weather.current;
-
-  if (!snap) return null;
-
-  // Pattern 1: Current temperature (e.g., "Quelle température?", "Il fait combien?")
-  if (/temp|fait.*combi|combien.*temp/i.test(text)) {
-    if (snap.temperature !== undefined) {
-      const temp = Math.round(snap.temperature);
-      params.log?.info({ temperature: temp }, 'weather_deterministic_temperature');
-      return `Il fait actuellement ${temp}°C.`;
-    }
-  }
-
-  // Pattern 2: Current humidity (e.g., "Quelle est l'humidité?")
-  if (/humidité|hygrométrie/i.test(text)) {
-    if (snap.humidity !== undefined) {
-      const humidity = Math.round(snap.humidity);
-      params.log?.info({ humidity }, 'weather_deterministic_humidity');
-      return `L'humidité est actuellement de ${humidity}%.`;
-    }
-  }
-
-  // Pattern 3: Current precipitation (e.g., "Il pleut?", "Pluie?")
-  if (/plu|rain|précipitation|goutte|mouillé|sec/i.test(text)) {
-    // Check precipitation probability first
-    if (snap.precipitation !== undefined && snap.precipitation > 0) {
-      const proba = Math.round(snap.precipitation);
-      params.log?.info({ precipitation: proba }, 'weather_deterministic_precipitation');
-      return `Il y a ${proba}% de chance de pluie actuellement.`;
-    }
-    // Fallback to condition
-    if (snap.condition) {
-      const isRainy = /pluie|rain|averse|ondée/i.test(snap.condition);
-      const msg = isRainy
-        ? 'Il pleut actuellement.'
-        : 'Il ne pleut pas actuellement.';
-      params.log?.info({ condition: snap.condition }, 'weather_deterministic_condition_precipitation');
-      return msg;
-    }
-  }
-
-  // Pattern 4: General current weather (e.g., "Quel temps fait-il à la maison?")
-  if (/quel.*temps|état.*météo|météo|condition|dehors/i.test(text)) {
-    let reply = `À ${snap.entityId.replace(/^weather\./, '')} `;
-    if (snap.condition) {
-      reply += `il est ${snap.condition}`;
-    }
-    if (snap.temperature !== undefined) {
-      const temp = Math.round(snap.temperature);
-      reply += ` (${temp}°C)`;
-    }
-    reply += '.';
-    params.log?.info({ condition: snap.condition, temperature: snap.temperature }, 'weather_deterministic_general');
-    return reply;
-  }
-
-  return null;
 }
 
 async function synthesizeWeatherReplyWithOpenAi(params: {
@@ -694,9 +534,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
-    const assistantInputText = contextNote
-      ? toSingleParagraphPlainText(`Contexte d actualite: ${contextNote}. Question utilisateur: ${text}`)
-      : text;
+    const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
@@ -704,8 +542,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // Vérifier si une fenêtre de conversation active existe (10s post-réponse)
     // Si oui, réutiliser le threadId actif pour maintenir le contexte
-    let effectiveThreadId = threadId;
     const activeThread = await threadRepository.getActiveConversationThread(clientChannel ?? undefined);
+    const effectiveThreadId = detectEffectiveThreadId(threadId, activeThread);
     if (activeThread) {
       app.log.info(
         {
@@ -715,7 +553,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         },
         'ingest_reusing_active_thread'
       );
-      effectiveThreadId = activeThread.threadId;
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
@@ -1085,7 +922,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 ? deps.ha.getStates()
                     .then((statesRaw) => {
                       const haStates = toEntityStates(statesRaw);
-                      const weather = buildWeatherSnapshot(haStates);
+                      const weather = buildWeatherSnapshotFromStates(haStates);
                       if (!weather) return null;
 
                       // Try deterministic path first (current temp, humidity, condition, precipitation)

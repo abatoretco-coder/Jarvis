@@ -72,7 +72,7 @@ export const SEARCH_WEATHER_RESPONSES = ['Je n\'arrive pas à dire la météo po
 ```
 
 À remplir pour Phase 1 :
-- `search.news.weather` → résumé météo court
+- `search.news.external_weather` → résumé météo externe court
 - `search.news.live_sport` → résultats sportifs
 - `search.news.current_news` → actus du jour
 - `search.web.definition` → définition rapide

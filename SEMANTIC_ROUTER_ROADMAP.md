@@ -37,7 +37,7 @@ STT brut
 | Niveau | Description | Planner | Coût | Exemple |
 |--------|---|---|---|---|
 | **D0** | Déterminisme pur | ❌ | ~0ms | "pause" → `spotify.pause` |
-| **E2** | Embedding + direct executor | ❌ | ~40-50ms | "quel temps ?" → `search.news.weather` |
+| **E2** | Embedding + direct executor | ❌ | ~40-50ms | "quelle température à la maison ?" → `weather.current_temperature` |
 | **E1** | Embedding → agent → planner | ✅ | ~500-1000ms | "mets du jazz" → Spotify planner |
 | **LLM** | Router LLM pour ambiguïté | ✅ | ~1500-2000ms | "mets du jazz et donne-moi les actus" |
 
@@ -70,14 +70,19 @@ multiIntent threshold = 0.5
 ### Search
 
 **E2** (5 routes) :
-- `search.news.weather` | `live_sport` | `current_news` | `web.definition` | `web.quick_lookup`
+- `search.news.external_weather` | `live_sport` | `current_news` | `web.definition` | `web.quick_lookup`
+
+### Weather local
+
+**E2** (4 routes) :
+- `weather.current_temperature` | `current_humidity` | `current_precipitation` | `current_conditions`
 
 **E1** (3 routes) :
 - `search.deep.analysis` | `history` | `comparison`
 
 ### To Do
 
-**E2** (6 routes) :
+**E1** (6 routes au demarrage) :
 - `todo.list_tasks` | `today` | `tomorrow` | `this_week` | `overdue` | `list_lists`
 
 **E1** (9 routes) :
@@ -85,7 +90,7 @@ multiIntent threshold = 0.5
 
 ### Mail
 
-**E2** (2 routes) :
+**E1** (2 routes au demarrage) :
 - `mail.list_inbox` | `list_inbox.unread`
 
 **E1** (8 routes) :
@@ -107,7 +112,7 @@ multiIntent threshold = 0.5
 
 **Commits** :
 1. `semanticRouter.types.ts` — types TypeScript
-2. `semanticRouteCatalog.ts` — catalogue 20 routes E2
+2. `semanticRouteCatalog.ts` — catalogue aligné runtime (`directRequest`, Weather E2, Todo/Mail E1)
 3. `embeddingClient.ts` — client Ollama/OpenAI
 4. `routeScoring.ts` — calcul similarity + scoring
 5. `routeDecision.ts` — logique d'acceptation/rejet
@@ -122,7 +127,7 @@ multiIntent threshold = 0.5
 
 **Sorties** :
 - Infrastructure de routage sémantique fonctionnelle
-- 20 routes E2 testables
+- Routes E2 testables + routes E1 de base Todo/Mail
 
 ---
 
@@ -131,7 +136,7 @@ multiIntent threshold = 0.5
 **Commits** :
 7. Config env + `src/env.ts` → `SEMANTIC_ROUTER_*` vars
 8. Integration `src/routes/ingest.ts` → appel semantic router avant LLM router
-9. E2 Catalog complete (20 routes remplies)
+9. E2 Catalog complete (Spotify + Search + Weather local)
 10. Logging & metrics
 11. Phase 1 test fixtures + tests
 
@@ -147,8 +152,8 @@ multiIntent threshold = 0.5
 **Commits** :
 12. E1 Catalog (22 routes)
 13. `routeDispatcher.ts` → acheminer vers agents
-14. Direct actions Spotify E2
-15. Direct actions Search/Todo/Mail E2
+14. Direct actions Spotify E2 (via `directRequest`)
+15. Direct actions Search E2 + evolution Todo/Mail vers E2 quand direct readers prets
 16. E1 Catalog complet + wiring agents
 17. Phase 2 test fixtures
 
@@ -296,9 +301,9 @@ else
   key: 'spotify.pause',
   level: 'E2',
   targetAgentId: 'spotify',
-  directAction: 'pause',
+  directRequest: { domain: 'spotify', action: 'pause' },
   plannerRequired: false,
-  examples: ['pause', 'arrête le son', 'coupe Spotify'],
+  examples: ['pause', 'arrête le son', 'coupe la musique'],
   deterministicResponses: () => SPOTIFY_PAUSE_RESPONSES
 }
 ```
@@ -352,7 +357,7 @@ tests/routing/semanticRouter.phase3.fixtures.json
   "threadId": "abc123",
   "text": "quel temps demain",
   "semanticRouter": {
-    "top1_intent": "search.news.weather",
+    "top1_intent": "search.news.external_weather",
     "top1_score": 0.91,
     "top2_intent": "search.web.lookup",
     "top2_score": 0.61,
@@ -361,7 +366,7 @@ tests/routing/semanticRouter.phase3.fixtures.json
     "elapsed_ms": 45,
     "cachedEmbedding": true
   },
-  "route": "search.news.weather",
+  "route": "search.news.external_weather",
   "levelExecuted": "E2",
   "response": "Demain il fera beau avec 18°C."
 }
@@ -396,7 +401,7 @@ tests/routing/semanticRouter.phase3.fixtures.json
 ## 🎯 Checklist avant Go Live
 
 - [ ] Phase 0 : types + infra testée
-- [ ] Phase 1 : 20 routes E2 live + <50ms latency
+- [ ] Phase 1 : routes E2 live + <50ms latency
 - [ ] Logging : semantic_router_* events capturées
 - [ ] Fallback LLM : toujours fonctionnel
 - [ ] Tests : >90% pass rate

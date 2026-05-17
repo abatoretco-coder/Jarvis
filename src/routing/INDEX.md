@@ -37,7 +37,7 @@ src/routing/
 ├── INDEX.md                           ← Ce fichier
 ├── ARCHITECTURE.md                    ← Doc technique détaillée
 ├── semanticRouter.types.ts            ← Types TS (Phase 0)
-├── semanticRouteCatalog.ts            ← Catalogue 20 routes E2 (Phase 0)
+├── semanticRouteCatalog.ts            ← Catalogue aligné runtime (E2 + E1)
 ├── embeddingClient.ts                 ← Client Ollama/OpenAI (Phase 0)
 ├── routeScoring.ts                    ← Scoring cosine (Phase 0)
 ├── routeDecision.ts                   ← Logique décision (Phase 0)
@@ -75,7 +75,7 @@ tests/routing/
 **Commits** : 6  
 **Sorties** :
 - ✅ `semanticRouter.types.ts` — Types TypeScript
-- ✅ `semanticRouteCatalog.ts` — 20 routes E2 cataloguées
+- ✅ `semanticRouteCatalog.ts` — catalogue aligné runtime (E2 + E1)
 - ⏳ `embeddingClient.ts` — Client embeddings
 - ⏳ `routeScoring.ts` — Calcul similarity
 - ⏳ `routeDecision.ts` — Logique décision
@@ -140,6 +140,12 @@ tests/routing/
 
 ---
 
+## 🎯 Etat réel du catalogue (Source de vérité)
+
+- E2 (16): Spotify (7), Search externe (5), Weather local (4)
+- E1 (8): Todo (6), Mail (2)
+- Modèle de contrat: `directRequest` (domain/action/slots), pas `directAction`
+
 ## 🎯 Routes : Résumé complet
 
 ### Spotify (7+6 routes)
@@ -164,11 +170,19 @@ tests/routing/
 ### Search (5+3 routes)
 
 **E2** :
-- `search.news.weather` ✅
+- `search.news.external_weather` ✅
 - `search.news.live_sport` ✅
 - `search.news.current_news` ✅
 - `search.web.definition` ✅
 - `search.web.quick_lookup` ✅
+
+### Weather local (4 routes)
+
+**E2** :
+- `weather.current_temperature` ✅
+- `weather.current_humidity` ✅
+- `weather.current_precipitation` ✅
+- `weather.current_conditions` ✅
 
 **E1** :
 - `search.deep.analysis`
@@ -177,7 +191,7 @@ tests/routing/
 
 ### Todo (6+9 routes)
 
-**E2** :
+**E1 (démarrage)** :
 - `todo.list_tasks` ✅
 - `todo.list_tasks.today` ✅
 - `todo.list_tasks.tomorrow` ✅
@@ -198,7 +212,7 @@ tests/routing/
 
 ### Mail (2+8 routes)
 
-**E2** :
+**E1 (démarrage)** :
 - `mail.list_inbox` ✅
 - `mail.list_inbox.unread` ✅
 
@@ -276,7 +290,7 @@ semantic_router_result
 
 - [ ] Phase 0 : Tous fichiers créés & types OK
 - [ ] Phase 0 : Spotify responses COMPLET
-- [ ] Phase 0 : Catalog 20 routes E2 OK
+- [ ] Phase 0 : Catalog aligné runtime validé
 - [ ] Phase 0 : Documentation (ROADMAP + ARCHITECTURE) à jour
 - [ ] Phase 1 : Integration ingest.ts
 - [ ] Phase 1 : Config env

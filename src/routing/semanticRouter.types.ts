@@ -28,7 +28,7 @@ export type SemanticRouteDefinition = {
   /**
    * Identifiant unique de la route.
    * Format: "domain.action" ou "domain.subdomain.action"
-   * Exemples: "spotify.pause", "search.news.weather", "todo.list_tasks"
+  * Exemples: "spotify.pause", "search.news.external_weather", "todo.list_tasks"
    */
   key: string;
 
@@ -47,10 +47,16 @@ export type SemanticRouteDefinition = {
   targetAgentId?: string;
 
   /**
-   * Action directe si E2 (pas de planner).
-   * Exemples: "pause", "now_playing", "list_inbox", "list_tasks"
+   * Requête directe alignée avec le runtime (domain/action/slots).
+   * Exemples:
+   *  - { domain: "spotify", action: "pause" }
+   *  - { domain: "mail", action: "list_inbox", slots: { unread_only: true } }
    */
-  directAction?: string;
+  directRequest?: {
+    domain: string;
+    action: string;
+    slots?: Record<string, unknown>;
+  };
 
   /**
    * Si true, cette route nécessite un planner LLM dans l'agent.
@@ -133,7 +139,7 @@ export type SemanticRouteResult = {
 
   /**
    * Clé de la route top1 match.
-   * Ex: "search.news.weather"
+  * Ex: "search.news.external_weather"
    */
   top1Intent: string;
 

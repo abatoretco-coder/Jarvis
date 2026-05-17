@@ -8,36 +8,17 @@
  */
 
 import { describe, it, expect, beforeEach } from '@jest/globals';
-
-// Mock types matching ingest.ts
-type HaStateLike = {
-  entity_id: string;
-  state?: string;
-  attributes?: Record<string, unknown>;
-};
-
-type WeatherSnapshot = {
-  location: string;
-  current?: {
-    entityId: string;
-    condition: string;
-    temperature?: number;
-    feelsLike?: number;
-    humidity?: number;
-    windSpeed?: number;
-    windBearing?: number;
-    precipitation?: number;
-  };
-  sensors: Array<{ entityId: string; label?: string; value?: number }>;
-  forecast: Array<{
-    date: string;
-    condition: string;
-    temperature?: number;
-    tempLow?: number;
-    precipitation?: number;
-    windSpeed?: number;
-  }>;
-};
+import {
+  isClearlyExternalWeather,
+  isClearlyLocalWeather,
+  isDeterministicWeatherQuestion,
+  isGeneralWeatherQuestion,
+  isHumidityQuestion,
+  isPrecipitationQuestion,
+  isTemperatureQuestion,
+  synthesizeDeterministicWeatherReply,
+} from '../src/weather/deterministicWeatherReply';
+import { buildWeatherSnapshotFromStates, type HaStateLike, type WeatherSnapshot } from '../src/weather/weatherSnapshot';
 
 // Helper to create mock states
 function createWeatherState(overrides?: Record<string, unknown>): HaStateLike {
@@ -352,7 +333,8 @@ describe('Weather Routing & Deterministic Responses', () => {
     });
 
     it('should handle missing location gracefully', () => {
-      const snapshot = mockSnapshot({ location: '' });
+      const snapshot = mockSnapshot();
+      snapshot.location = '';
       const response = synthesizeDeterministicWeatherReply({
         userText: 'Quel temps ?',
         weather: snapshot,
@@ -399,53 +381,6 @@ describe('Weather Routing & Deterministic Responses', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────
-// Test helpers (these mirror ingest.ts functions conceptually)
-// ─────────────────────────────────────────────────────────────────
-
-function isTemperatureQuestion(text: string): boolean {
-  return /temp|fait.*combi|combien.*temp/i.test(text);
-}
-
-function isHumidityQuestion(text: string): boolean {
-  return /humidité|hygrométrie/i.test(text);
-}
-
-function isPrecipitationQuestion(text: string): boolean {
-  return /plu|rain|précipitation|goutte|mouillé|sec/i.test(text);
-}
-
-function isGeneralWeatherQuestion(text: string): boolean {
-  return /quel.*temps|état.*météo|météo|condition|dehors/i.test(text);
-}
-
-function isDeterministicWeatherQuestion(text: string): boolean {
-  // Current time only, not forecasts or complex queries
-  const hasCurrentIndicator = /actuel|maintenant|en ce moment|ici|à la maison|du moment|dehors/i.test(text);
-  const isComplexQuery = /demain|semaine|jeudi|demain|dans|quand|comment.*habill/i.test(text);
-  
-  if (isComplexQuery) return false;
-  
-  return (
-    isTemperatureQuestion(text) ||
-    isHumidityQuestion(text) ||
-    isPrecipitationQuestion(text) ||
-    (isGeneralWeatherQuestion(text) && (hasCurrentIndicator || !isComplexQuery))
-  );
-}
-
-function isClearlyLocalWeather(text: string): boolean {
-  const localIndicators = /chez.*moi|maison|local|actuellement|maintenant|ici|salon|cuisine|chambre|du moment/i;
-  const externalLocations = /paris|lyon|marseille|london|tokyo|france|italie|allemagne|espagne|italie|florence|venise|rome/i;
-  
-  return localIndicators.test(text) || !externalLocations.test(text);
-}
-
-function isClearlyExternalWeather(text: string): boolean {
-  const externalLocations = /paris|lyon|marseille|london|tokyo|france|italie|allemagne|espagne|italie|florence|venise|rome|ville|externe|ailleurs|autre/i;
-  return externalLocations.test(text);
-}
-
 function mockSnapshot(overrides?: Partial<WeatherSnapshot['current']>): WeatherSnapshot {
   return {
     location: 'Maison',
@@ -460,82 +395,4 @@ function mockSnapshot(overrides?: Partial<WeatherSnapshot['current']>): WeatherS
     sensors: [],
     forecast: [],
   };
-}
-
-function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSnapshot | null {
-  // Mock implementation matching ingest.ts logic
-  const weatherEntity = states.find((s) => s.entity_id === 'weather.maison')
-    ?? states.find((s) => s.entity_id.startsWith('weather.'));
-
-  const weatherSensors = states.filter((s) =>
-    s.entity_id.startsWith('sensor.maison_weather') ||
-    s.entity_id === 'sensor.maison_temperature' ||
-    s.entity_id === 'sensor.maison_humidity'
-  );
-
-  if (!weatherEntity && weatherSensors.length === 0) return null;
-
-  const attrs = weatherEntity?.attributes ?? {};
-  return {
-    location: String(attrs.friendly_name ?? weatherEntity?.entity_id ?? 'Unknown'),
-    current: weatherEntity ? {
-      entityId: weatherEntity.entity_id,
-      condition: String(attrs.condition ?? weatherEntity.state ?? 'unknown'),
-      temperature: typeof attrs.temperature === 'number' ? attrs.temperature : undefined,
-      humidity: typeof attrs.humidity === 'number' ? attrs.humidity : undefined,
-      precipitation: typeof attrs.precipitation_probability === 'number' ? attrs.precipitation_probability : undefined,
-    } : undefined,
-    sensors: weatherSensors.map((s) => ({
-      entityId: s.entity_id,
-      label: typeof s.attributes?.friendly_name === 'string' ? s.attributes.friendly_name : undefined,
-      value: typeof s.state === 'string' ? parseFloat(s.state) : undefined,
-    })),
-    forecast: [],
-  };
-}
-
-function synthesizeDeterministicWeatherReply(params: {
-  userText: string;
-  weather: WeatherSnapshot;
-}): string | null {
-  const text = params.userText.toLowerCase();
-  const snap = params.weather.current;
-
-  if (!snap) return null;
-
-  if (/temp|fait.*combi|combien.*temp/i.test(text)) {
-    if (snap.temperature !== undefined) {
-      return `Il fait actuellement ${Math.round(snap.temperature)}°C.`;
-    }
-  }
-
-  if (/humidité|hygrométrie/i.test(text)) {
-    if (snap.humidity !== undefined) {
-      return `L'humidité est actuellement de ${Math.round(snap.humidity)}%.`;
-    }
-  }
-
-  if (/plu|rain|précipitation|goutte|mouillé|sec/i.test(text)) {
-    if (snap.precipitation !== undefined && snap.precipitation > 0) {
-      return `Il y a ${Math.round(snap.precipitation)}% de chance de pluie actuellement.`;
-    }
-    if (snap.condition) {
-      const isRainy = /pluie|rain|averse|ondée/i.test(snap.condition);
-      return isRainy ? 'Il pleut actuellement.' : 'Il ne pleut pas actuellement.';
-    }
-  }
-
-  if (/quel.*temps|état.*météo|météo|condition|dehors/i.test(text)) {
-    let reply = `À ${snap.entityId.replace(/^weather\./, '')} `;
-    if (snap.condition) {
-      reply += `il est ${snap.condition}`;
-    }
-    if (snap.temperature !== undefined) {
-      reply += ` (${Math.round(snap.temperature)}°C)`;
-    }
-    reply += '.';
-    return reply;
-  }
-
-  return null;
 }

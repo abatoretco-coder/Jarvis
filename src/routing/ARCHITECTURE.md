@@ -10,7 +10,7 @@
 src/routing/
 ├── semanticRouter.ts                  ← Orchestration principale
 ├── semanticRouter.types.ts            ← Types TypeScript
-├── semanticRouteCatalog.ts            ← Catalogue 40+ routes
+├── semanticRouteCatalog.ts            ← Catalogue aligné runtime (E2 + E1)
 ├── embeddingClient.ts                 ← Client Ollama/OpenAI
 ├── routeScoring.ts                    ← Calcul similarity + ranking
 ├── routeDecision.ts                   ← Logique d'acceptation/rejet
@@ -40,10 +40,14 @@ src/routing/
 
 ```ts
 export type SemanticRouteDefinition = {
-  key: string;                    // 'spotify.pause' | 'search.news.weather'
+  key: string;                    // 'spotify.pause' | 'search.news.external_weather'
   level: 'D0' | 'E2' | 'E1';
   targetAgentId?: string;         // 'spotify' | 'search' | 'todo' | 'mail' | 'ha_executor'
-  directAction?: string;          // 'pause' | 'list_inbox' | 'now_playing'
+  directRequest?: {               // contrat runtime: domain/action/slots
+    domain: string;
+    action: string;
+    slots?: Record<string, unknown>;
+  };
   plannerRequired?: boolean;      // true = E1 (needs LLM planner)
   examples: string[];             // ['pause', 'arrête le son', 'coupe Spotify']
   highRisk?: boolean;             // true = delete/send (E1+ only)
@@ -175,7 +179,7 @@ const scored = scoreRoutesAgainstEmbedding(
 
 // Résultat (trié):
 // [
-//   { routeKey: 'search.news.weather', score: 0.91 },
+//   { routeKey: 'search.news.external_weather', score: 0.91 },
 //   { routeKey: 'search.web.lookup',   score: 0.61 },
 //   { routeKey: 'search.deep.analysis', score: 0.58 },
 //   ...
@@ -192,7 +196,7 @@ cosine_similarity(A, B) = (A·B) / (||A|| × ||B||)
 
 **routeDecision.ts** :
 ```ts
-const top1 = scored[0];    // search.news.weather, 0.91
+const top1 = scored[0];    // search.news.external_weather, 0.91
 const top2 = scored[1];    // search.web.lookup, 0.61
 const margin = 0.91 - 0.61 = 0.30
 
@@ -211,9 +215,9 @@ if (top1.score >= 0.84 && margin >= 0.08 && !multiIntent) {
 
 **routeDispatcher.ts** :
 ```ts
-if (route.level === 'E2' && route.directAction) {
+if (route.level === 'E2' && route.directRequest) {
   // Exécution directe (pas de planner)
-  return executeDirectAction(route.targetAgentId, route.directAction, userText);
+  return executeDirectAction(route.directRequest.domain, route.directRequest.action, route.directRequest.slots);
 }
 
 if (route.level === 'E1') {
@@ -236,7 +240,7 @@ export const SPOTIFY_E2_ROUTES: SemanticRouteDefinition[] = [
     key: 'spotify.pause',
     level: 'E2',
     targetAgentId: 'spotify',
-    directAction: 'pause',
+    directRequest: { domain: 'spotify', action: 'pause' },
     plannerRequired: false,
     examples: [
       'pause',
@@ -251,7 +255,7 @@ export const SPOTIFY_E2_ROUTES: SemanticRouteDefinition[] = [
     key: 'spotify.play',
     level: 'E2',
     targetAgentId: 'spotify',
-    directAction: 'play',
+    directRequest: { domain: 'spotify', action: 'play' },
     plannerRequired: false,
     examples: [
       'play',
@@ -419,7 +423,7 @@ Tous les logs sémantiques doivent inclure :
   "requestId": "uuid",
   "semanticRouter": {
     "userText": "quel temps demain",
-    "top1_intent": "search.news.weather",
+    "top1_intent": "search.news.external_weather",
     "top1_score": 0.91,
     "top2_intent": "search.web.lookup",
     "top2_score": 0.61,
@@ -476,7 +480,7 @@ SEMANTIC_ROUTER_LOG_LEVEL=info                     # debug | info | warn
 ```json
 {
   "text": "quel temps demain",
-  "expectedRoute": "search.news.weather",
+  "expectedRoute": "search.news.external_weather",
   "expectedLevel": "E2",
   "shouldAccept": true,
   "expectedScore": 0.85,  // approx
@@ -493,12 +497,12 @@ SEMANTIC_ROUTER_LOG_LEVEL=info                     # debug | info | warn
   {"text": "play", "expectedRoute": "spotify.play", "expectedLevel": "E2", "shouldAccept": true},
 
   // E2 Search
-  {"text": "quel temps demain ?", "expectedRoute": "search.news.weather", "expectedLevel": "E2", "shouldAccept": true},
+  {"text": "quel temps à Paris demain ?", "expectedRoute": "search.news.external_weather", "expectedLevel": "E2", "shouldAccept": true},
   {"text": "qui a gagné le match ?", "expectedRoute": "search.news.live_sport", "expectedLevel": "E2", "shouldAccept": true},
 
-  // E2 Todo/Mail
-  {"text": "mes tâches", "expectedRoute": "todo.list_tasks", "expectedLevel": "E2", "shouldAccept": true},
-  {"text": "lis mes mails", "expectedRoute": "mail.list_inbox", "expectedLevel": "E2", "shouldAccept": true},
+  // E1 Todo/Mail (démarrage)
+  {"text": "mes tâches", "expectedRoute": "todo.list_tasks", "expectedLevel": "E1", "shouldAccept": true},
+  {"text": "lis mes mails", "expectedRoute": "mail.list_inbox", "expectedLevel": "E1", "shouldAccept": true},
 
   // Fallback LLM
   {"text": "mets du jazz et donne-moi les actus", "shouldAccept": false, "fallbackReason": "multi_intent"},
@@ -578,7 +582,7 @@ Dashboard Grafana recommandé avec ces métriques.
 ## 🔄 Évolutions futures
 
 ### Phase 2
-- routeDispatcher + directActions
+- routeDispatcher + directRequest executors
 - E1 catalog complet
 - Agent wiring
 
