@@ -9,6 +9,7 @@ import type { Env } from '../src/env';
 import { registerIngestRoute } from '../src/routes/ingest';
 import type { AppDeps } from '../src/server';
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
+import { trySemanticRouter } from '../src/routing/semanticRouter';
 
 jest.mock('../src/conversation/orchestratorRouter', () => {
   const actual = jest.requireActual('../src/conversation/orchestratorRouter') as Record<string, unknown>;
@@ -17,8 +18,12 @@ jest.mock('../src/conversation/orchestratorRouter', () => {
     routeUserRequest: jest.fn(),
   };
 });
+jest.mock('../src/routing/semanticRouter', () => ({
+  trySemanticRouter: jest.fn(),
+}));
 
 const mockedRouteUserRequest = routeUserRequest as jest.MockedFunction<typeof routeUserRequest>;
+const mockedTrySemanticRouter = trySemanticRouter as jest.MockedFunction<typeof trySemanticRouter>;
 
 function makeEnv(dbPath: string, overrides: Partial<Env> = {}): Env {
   const base = {
@@ -85,6 +90,7 @@ describe('/v1/ingest integration', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'jarvis-ingest-test-'));
     app = Fastify({ logger: false });
     mockedRouteUserRequest.mockReset();
+    mockedTrySemanticRouter.mockReset();
   });
 
   afterEach(async () => {
@@ -234,6 +240,172 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).toContain('veste imperméable');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
     expect((global.fetch as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  it('semantic activation: allowed E2 weather route bypasses LLM router', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'partiel-nuageux',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 18.5,
+          humidity: 64,
+          precipitation_probability: 15,
+        },
+      },
+    ];
+
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e2',
+      matchedRoute: {
+        key: 'weather.current_temperature',
+        level: 'E2',
+        targetAgentId: 'weather',
+        plannerRequired: false,
+        directRequest: { domain: 'weather', action: 'current_temperature' },
+        examples: ['quelle température chez moi'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.70,
+      margin: 0.25,
+      top1Intent: 'weather.current_temperature',
+      top2Intent: 'weather.current_conditions',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'weather.current_temperature',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-allowed',
+        text: 'Quelle température chez moi ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Il fait actuellement');
+    expect(mockedTrySemanticRouter).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic activation: non-allowlisted E2 route falls back to LLM router', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'partiel-nuageux',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 18.5,
+          humidity: 64,
+          precipitation_probability: 15,
+        },
+      },
+    ];
+
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e2',
+      matchedRoute: {
+        key: 'weather.current_temperature',
+        level: 'E2',
+        targetAgentId: 'weather',
+        plannerRequired: false,
+        directRequest: { domain: 'weather', action: 'current_temperature' },
+        examples: ['quelle température chez moi'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.70,
+      margin: 0.25,
+      top1Intent: 'weather.current_temperature',
+      top2Intent: 'weather.current_conditions',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'weather', confidence: 0.99 }],
+      reason: 'llm_weather_route',
+    });
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'spotify.pause',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-not-allowlisted',
+        text: 'Quelle température chez moi ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedTrySemanticRouter).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('semantic activation: semantic errors fall back to LLM router', async () => {
+    mockedTrySemanticRouter.mockRejectedValue(new Error('semantic_router_down'));
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.news', confidence: 0.95 }],
+      reason: 'external_weather_forecast',
+    });
+    (global as { fetch: typeof fetch }).fetch = jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Prévision fallback.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    )) as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'weather.current_temperature',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-error',
+        text: 'Meteo a Paris demain',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedTrySemanticRouter).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 
   it('structured spotify uses effective thread id and keeps conversation window active', async () => {
