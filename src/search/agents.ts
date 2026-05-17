@@ -1,7 +1,6 @@
 import { buildSearchAgentSystemPrompt } from './prompts/searchAgentsPrompts';
 
-
- *
+/**
  * Each entry defines a Perplexity/OpenAI search strategy keyed by the
  * HA_AGENT_MAP `key` field. Any key equal to "search" or starting with
  * "search." is handled as a direct search agent (bypasses Home Assistant).

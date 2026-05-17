@@ -231,6 +231,78 @@ function buildWeatherSnapshot(states: HaStateLike[]): WeatherSnapshot | null {
   };
 }
 
+/**
+ * Synthesizes a deterministic weather response for trivial requests.
+ * Returns null if the request is not a simple/deterministic weather question.
+ * 
+ * Trivial requests: current temperature, humidity, condition, or precipitation.
+ * Examples: "Quelle température?" "Il pleut?" "Quel temps fait-il?"
+ */
+function synthesizeDeterministicWeatherReply(params: {
+  userText: string;
+  weather: WeatherSnapshot;
+  log?: { info: (obj: Record<string, unknown>, msg: string) => void };
+}): string | null {
+  const text = params.userText.toLowerCase().trim();
+  const snap = params.weather.current;
+
+  if (!snap) return null;
+
+  // Pattern 1: Current temperature (e.g., "Quelle température?", "Il fait combien?")
+  if (/temp|fait.*combi|combien.*temp/i.test(text)) {
+    if (snap.temperature !== undefined) {
+      const temp = Math.round(snap.temperature);
+      params.log?.info({ temperature: temp }, 'weather_deterministic_temperature');
+      return `Il fait actuellement ${temp}°C.`;
+    }
+  }
+
+  // Pattern 2: Current humidity (e.g., "Quelle est l'humidité?")
+  if (/humidité|hygrométrie/i.test(text)) {
+    if (snap.humidity !== undefined) {
+      const humidity = Math.round(snap.humidity);
+      params.log?.info({ humidity }, 'weather_deterministic_humidity');
+      return `L'humidité est actuellement de ${humidity}%.`;
+    }
+  }
+
+  // Pattern 3: Current precipitation (e.g., "Il pleut?", "Pluie?")
+  if (/plu|rain|précipitation|goutte|mouillé|sec/i.test(text)) {
+    // Check precipitation probability first
+    if (snap.precipitation !== undefined && snap.precipitation > 0) {
+      const proba = Math.round(snap.precipitation);
+      params.log?.info({ precipitation: proba }, 'weather_deterministic_precipitation');
+      return `Il y a ${proba}% de chance de pluie actuellement.`;
+    }
+    // Fallback to condition
+    if (snap.condition) {
+      const isRainy = /pluie|rain|averse|ondée/i.test(snap.condition);
+      const msg = isRainy
+        ? 'Il pleut actuellement.'
+        : 'Il ne pleut pas actuellement.';
+      params.log?.info({ condition: snap.condition }, 'weather_deterministic_condition_precipitation');
+      return msg;
+    }
+  }
+
+  // Pattern 4: General current weather (e.g., "Quel temps fait-il à la maison?")
+  if (/quel.*temps|état.*météo|météo|condition|dehors/i.test(text)) {
+    let reply = `À ${snap.entityId.replace(/^weather\./, '')} `;
+    if (snap.condition) {
+      reply += `il est ${snap.condition}`;
+    }
+    if (snap.temperature !== undefined) {
+      const temp = Math.round(snap.temperature);
+      reply += ` (${temp}°C)`;
+    }
+    reply += '.';
+    params.log?.info({ condition: snap.condition, temperature: snap.temperature }, 'weather_deterministic_general');
+    return reply;
+  }
+
+  return null;
+}
+
 async function synthesizeWeatherReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
@@ -1015,6 +1087,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       const haStates = toEntityStates(statesRaw);
                       const weather = buildWeatherSnapshot(haStates);
                       if (!weather) return null;
+
+                      // Try deterministic path first (current temp, humidity, condition, precipitation)
+                      const deterministicReply = synthesizeDeterministicWeatherReply({
+                        userText: assistantInputText,
+                        weather,
+                        log: app.log,
+                      });
+                      if (deterministicReply) {
+                        app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'weather_deterministic_used');
+                        return deterministicReply;
+                      }
+
+                      // Fallback to OpenAI synthesis for complex queries
                       return synthesizeWeatherReplyWithOpenAi({
                         openAiApiKey: deps.env.OPENAI_API_KEY!,
                         openAiBaseUrl: deps.env.OPENAI_BASE_URL,
@@ -1023,7 +1108,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         userText: assistantInputText,
                         weather,
                         log: app.log,
-                      }).then((txt): SpecializedResult => ({ kind: 'ha_text', agentId: haTarget.agentId, text: txt }));
+                      });
+                    })
+                    .then((txt): SpecializedResult | null => {
+                      if (!txt) return null;
+                      return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                     })
                     .catch((err) => {
                       app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'weather_agent_direct_failed');
@@ -1110,7 +1199,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (assistantText === undefined) {
       try {
         app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
-        const haText = await conversationService.callHomeAssistantConversation(assistantInputText, threadId, undefined, generalAgentId);
+        const haText = await conversationService.callHomeAssistantConversation(assistantInputText, effectiveThreadId, undefined, generalAgentId);
         if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
           app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
           assistantText = toDeterministicHaFailureMessage();
