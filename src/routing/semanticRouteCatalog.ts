@@ -564,11 +564,190 @@ export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HA EXECUTORS — E2 Routes (placeholder Phase 3)
+// HA EXECUTORS — E1 Routes (Phase 3)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const HA_E2_ROUTES: SemanticRouteDefinition[] = [
-  // Phase 3: ajouter routes HA simples
+export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
+  {
+    key: 'executor.greeting',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'greeting' },
+    plannerRequired: true,
+    examples: ['salut jarvis', 'bonjour', 'hello assistant maison'],
+    metadata: { category: 'smart_home', latencyTarget: 80 },
+  },
+  {
+    key: 'executor.help',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'help' },
+    plannerRequired: true,
+    examples: ['aide moi avec les commandes', 'qu est ce que tu peux faire', 'montre les commandes disponibles'],
+    metadata: { category: 'smart_home', latencyTarget: 85 },
+  },
+  {
+    key: 'executor.status',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'status' },
+    plannerRequired: true,
+    examples: ['etat de la maison', 'status maison', 'resume des capteurs'],
+    metadata: { category: 'smart_home', latencyTarget: 90 },
+  },
+  {
+    key: 'executor.timer',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'timer' },
+    plannerRequired: true,
+    examples: ['mets un minuteur de dix minutes', 'lance un timer de cinq minutes', 'demarre un compte a rebours'],
+    metadata: { category: 'smart_home', latencyTarget: 90 },
+  },
+  {
+    key: 'executor.note',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'note' },
+    plannerRequired: true,
+    examples: ['prends une note', 'note que le colis arrive demain', 'ajoute un memo'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.scene_set',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'scene_set' },
+    plannerRequired: true,
+    examples: ['active la scene cinema', 'mets la scene nuit', 'scene detente dans le salon'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.media_play_pause',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'media_play_pause' },
+    plannerRequired: true,
+    examples: ['mets la tele en pause', 'reprends la lecture media', 'play pause multimedia'],
+    metadata: { category: 'smart_home', latencyTarget: 90 },
+  },
+  {
+    key: 'executor.media_next',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'media_next' },
+    plannerRequired: true,
+    examples: ['morceau suivant sur le media player', 'piste suivante', 'episode suivant'],
+    metadata: { category: 'smart_home', latencyTarget: 90 },
+  },
+  {
+    key: 'executor.media_previous',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'media_previous' },
+    plannerRequired: true,
+    examples: ['revient au media precedent', 'piste precedente', 'episode precedent'],
+    metadata: { category: 'smart_home', latencyTarget: 90 },
+  },
+  {
+    key: 'executor.volume_up',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'volume_up' },
+    plannerRequired: true,
+    examples: ['augmente le volume', 'monte le son du salon', 'plus fort'],
+    metadata: { category: 'smart_home', latencyTarget: 85 },
+  },
+  {
+    key: 'executor.volume_down',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'volume_down' },
+    plannerRequired: true,
+    examples: ['baisse le volume', 'moins fort', 'diminue le son'],
+    metadata: { category: 'smart_home', latencyTarget: 85 },
+  },
+  {
+    key: 'executor.mute',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'mute' },
+    plannerRequired: true,
+    examples: ['coupe le son', 'mute le media player', 'mets en sourdine'],
+    metadata: { category: 'smart_home', latencyTarget: 85 },
+  },
+  {
+    key: 'executor.unmute',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'unmute' },
+    plannerRequired: true,
+    examples: ['remets le son', 'unmute le media player', 'enleve la sourdine'],
+    metadata: { category: 'smart_home', latencyTarget: 85 },
+  },
+  {
+    key: 'executor.climate_set',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'climate_set' },
+    plannerRequired: true,
+    examples: ['mets le chauffage a vingt et un', 'regle la clim a vingt quatre', 'change la temperature du salon'],
+    metadata: { category: 'smart_home', latencyTarget: 100 },
+  },
+  {
+    key: 'executor.lock',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'lock' },
+    plannerRequired: true,
+    examples: ['verrouille la porte entree', 'active la serrure', 'ferme la porte connectee'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.unlock',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'unlock' },
+    plannerRequired: true,
+    examples: ['deverrouille la porte entree', 'ouvre la serrure connectee', 'retire le verrou'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.vacuum_start',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'vacuum_start' },
+    plannerRequired: true,
+    examples: ['demarre l aspirateur robot', 'lance le robot aspirateur', 'commence le nettoyage robot'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.vacuum_stop',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'vacuum_stop' },
+    plannerRequired: true,
+    examples: ['arrete l aspirateur robot', 'stop le robot', 'interromps le nettoyage robot'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.cover_open',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'cover_open' },
+    plannerRequired: true,
+    examples: ['ouvre les volets', 'remonte le store du salon', 'ouvre les stores'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
+  {
+    key: 'executor.cover_close',
+    level: 'E1',
+    targetAgentId: 'executors',
+    directRequest: { domain: 'executors', action: 'cover_close' },
+    plannerRequired: true,
+    examples: ['ferme les volets', 'descends le store du salon', 'ferme les stores'],
+    metadata: { category: 'smart_home', latencyTarget: 95 },
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -583,7 +762,7 @@ export const SEMANTIC_ROUTES: SemanticRouteDefinition[] = [
   ...SEARCH_DEEP_E1_ROUTES,
   ...TODO_E1_ROUTES,
   ...MAIL_E1_ROUTES,
-  ...HA_E2_ROUTES,           // 0 (Phase 3)
+  ...HA_E1_ROUTES,
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -636,7 +815,7 @@ export function getCatalogStats() {
     search: getCatalogByAgent('search').length,
     todo: getCatalogByAgent('todo').length,
     mail: getCatalogByAgent('mail').length,
-    ha_executor: getCatalogByAgent('ha_executor').length,
+    executors: getCatalogByAgent('executors').length,
   };
   return {
     totalRoutes: SEMANTIC_ROUTES.length,

@@ -2301,6 +2301,118 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
+  it('semantic E1 live executor.timer routes to HA specialized executors target', async () => {
+    const calls: Array<{ agent_id?: string }> = [];
+    (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { agent_id?: string };
+      calls.push({ agent_id: body.agent_id });
+      return haSpeechResponse('Minuteur lance.');
+    }) as unknown as typeof fetch;
+
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'executor.timer',
+        level: 'E1',
+        targetAgentId: 'executors',
+        plannerRequired: true,
+        directRequest: { domain: 'executors', action: 'timer' },
+        examples: ['mets un minuteur de dix minutes'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.71,
+      margin: 0.24,
+      top1Intent: 'executor.timer',
+      top2Intent: 'executor.note',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'executor.timer',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-executor-timer-live',
+        text: 'Mets un minuteur de dix minutes.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Minuteur lance');
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.agent_id).toBe('conversation.jarvis_broker');
+  });
+
+  it('semantic E1 executor route falls back when executors mapping is missing', async () => {
+    const calls: Array<{ agent_id?: string }> = [];
+    (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { agent_id?: string };
+      calls.push({ agent_id: body.agent_id });
+      return haSpeechResponse('Fallback general.');
+    }) as unknown as typeof fetch;
+
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'executor.timer',
+        level: 'E1',
+        targetAgentId: 'executors',
+        plannerRequired: true,
+        directRequest: { domain: 'executors', action: 'timer' },
+        examples: ['mets un minuteur de dix minutes'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.71,
+      margin: 0.24,
+      top1Intent: 'executor.timer',
+      top2Intent: 'executor.note',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockResolvedValue({ targets: [], reason: 'no_target' });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'search.news:search.news:Recherche internet',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'executor.timer',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-executor-timer-fallback',
+        text: 'Mets un minuteur de dix minutes.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.agent_id).toBe('conversation.openai_conversation');
+  });
+
   it('structured spotify uses effective thread id and keeps conversation window active', async () => {
     const calls: Array<{ conversation_id?: string }> = [];
     (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {

@@ -192,6 +192,27 @@ const SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS = new Set([
   'mail.reply_email',
   'mail.forward_email',
   'mail.trash_email',
+  // Phase 3
+  'executor.greeting',
+  'executor.help',
+  'executor.status',
+  'executor.timer',
+  'executor.note',
+  'executor.scene_set',
+  'executor.media_play_pause',
+  'executor.media_next',
+  'executor.media_previous',
+  'executor.volume_up',
+  'executor.volume_down',
+  'executor.mute',
+  'executor.unmute',
+  'executor.climate_set',
+  'executor.lock',
+  'executor.unlock',
+  'executor.vacuum_start',
+  'executor.vacuum_stop',
+  'executor.cover_open',
+  'executor.cover_close',
 ]);
 
 async function synthesizeWeatherReplyWithOpenAi(params: {
@@ -725,6 +746,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const weatherEntry = deps.ha
       ? { agentId: 'weather', hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes', key: 'weather' }
       : null;
+    const executorsEntry = agentEntries.find((entry) => entry.key === 'executors') ?? null;
     const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...(weatherEntry ? [weatherEntry] : []), ...agentEntries];
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
     const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
@@ -1005,6 +1027,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     ? 'todo'
                     : routeKey.startsWith('mail.')
                       ? 'mail'
+                      : routeKey.startsWith('executor.')
+                        ? 'executors'
                       : null;
               const safeRouteAllowed = SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS.has(routeKey);
               const supportedTarget = expectedTargetAgentId !== null && targetAgentId === expectedTargetAgentId;
@@ -1100,6 +1124,49 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 }
 
                 if (highRiskAllowed) {
+                if (routeKey.startsWith('executor.')) {
+                  if (!executorsEntry) {
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        routeLevel: 'E1',
+                        score: semResult.top1Score,
+                        margin: semResult.margin,
+                        decision: semResult.decision,
+                        activated: false,
+                        fallback: true,
+                        highRisk,
+                        elapsedMs: semResult.elapsedMs,
+                        targetAgentId,
+                      },
+                      'semantic_router_e1_activation_fallback_unsupported_target',
+                    );
+                  } else {
+                    semanticActivatedTarget = { agentId: executorsEntry.agentId, confidence: 1 };
+                    semanticActivatedRouteKey = routeKey;
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        routeLevel: 'E1',
+                        score: semResult.top1Score,
+                        margin: semResult.margin,
+                        decision: semResult.decision,
+                        activated: true,
+                        fallback: false,
+                        highRisk,
+                        elapsedMs: semResult.elapsedMs,
+                        targetAgentId,
+                        handled: true,
+                        mode: 'ha_executor_specialized',
+                      },
+                      'semantic_router_e1_live_handled',
+                    );
+                  }
+                } else {
                 const tE1 = Date.now();
                 app.log.info(
                   {
@@ -1308,6 +1375,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     },
                     highRisk ? 'semantic_router_e1_high_risk_live_error' : 'semantic_router_e1_live_error',
                   );
+                }
                 }
                 }
               }

@@ -277,12 +277,15 @@ multiIntent threshold = 0.5
 
 ---
 
-### Phase 3 : HA Executors & Tuning (après 2D+2E)
+### Phase 3 : HA Executors & Tuning ✅ COMPLETE
 
-**Commits** :
-18. HA Executor routes (E2 + E1)
-19. Threshold adaptive tuning (analyse logs Phase 1-2)
-20. Phase 3 tests
+**Livré** :
+- Intégration des routes `executor.*` en E1 (target `executors`) dans le catalogue
+- Activation live E1 conditionnée par allowlist (pas de route implicite)
+- Routage ingest `accepted_e1` vers la cible HA `executors` (si `HA_AGENT_MAP` contient la clé `executors`)
+- Fallback séquentiel inchangé si mapping absent ou exécution non aboutie
+- Ajout de `SEMANTIC_ROUTER_TUNING.md` (seuils, logs, méthode d'analyse)
+- Couverture tests catalogue + intégration ingest executor/fallback
 
 **Sorties** :
 - HA executors intégrés
@@ -290,7 +293,7 @@ multiIntent threshold = 0.5
 
 ---
 
-### Phase 4 : Advanced & Personalization (Semaine 9-10, 3 commits)
+### Phase 4 : Advanced & Personalization (Semaine 9-10, 3 commits) 🔜 NEXT
 
 **Commits** :
 21. Centroid learning (clustering par intent)
