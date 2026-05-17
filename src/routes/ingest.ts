@@ -594,8 +594,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         'ingest_spotify_capability_done'
       );
 
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+
       return reply.code(200).send({
-        threadId,
+        threadId: effectiveThreadId,
         responseText: spotifyResponse.tts,
         status: spotifyResponse.status,
         ...(spotifyResponse.data ? { data: spotifyResponse.data } : {}),
@@ -1614,4 +1616,3 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
 }
-
