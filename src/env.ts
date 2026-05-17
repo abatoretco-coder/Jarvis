@@ -143,6 +143,12 @@ const envSchema = z
   // Comma-separated route keys allowed for Phase 1B activation.
   // Example: "spotify.pause,spotify.play,weather.current_temperature"
   SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: optionalNonEmptyString,
+  // Phase 2A: when true (and shadow mode=false), accepted E1 routes can execute
+  // directly for the explicitly allowlisted safe routes.
+  SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: booleanFromEnv.default('false'),
+  // Comma-separated route keys allowed for Phase 2A E1 activation.
+  // Example: "search.deep.analysis,spotify.search_and_play"
+  SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: optionalNonEmptyString,
 
   // General fallback HA conversation agent (used when router is disabled or returns no confident target).
   // Override to point to your custom general agent instead of the default openai_conversation.

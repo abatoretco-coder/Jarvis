@@ -173,23 +173,37 @@ multiIntent threshold = 0.5
 
 ---
 
-### Phase 2A : E1 live progressif 🔴 NEXT
+### Phase 2A : E1 live progressif ✅ COMPLET
 
-**Priorité recommandée** (sans écriture destructive) :
-- `search.deep.*` (3 routes) → agent `search.deep` via Perplexity
-- `spotify.search` | `spotify.search_and_play` | `spotify.transfer` → Spotify planner
+**Activations live E1 (allowlistées)** :
+- `search.deep.analysis`
+- `search.deep.history`
+- `search.deep.comparison`
+- `spotify.search`
+- `spotify.search_and_play`
+- `spotify.transfer`
 
-**Ne pas activer** encore : `todo.*` (écriture), `mail.*` (écriture), `mail.send_email`
+**Comportement** :
+- Bypass du routeur LLM quand une route E1 est acceptée ET allowlistée.
+- `search.deep.*` dispatch direct vers Search Agent Deep.
+- `spotify.search|search_and_play|transfer` dispatch vers planner Spotify puis executor existant.
+- Fallback systématique vers routeur LLM si route non allowlistée / non supportée / erreur dispatcher.
 
-**Commits** :
-21. Wire E1 Search Deep → `e1RouteDispatcher` → `dispatchE1Route` → `callSearchAgent`
-22. Wire E1 Spotify → `e1RouteDispatcher` → `planSpotifyActionFromTextWithOpenAi`
-23. Phase 2A test fixtures
+**Non activé en Phase 2A** :
+- `todo.*`
+- `mail.*`
+- `spotify.queue_add`
+- `spotify.add_to_playlist`
+- `spotify.volume_set`
 
-**Sorties** :
-- 22 routes E1 disponibles
-- Direct executors E2 fonctionnels
-- E1 routes routées vers planners existants
+### Phase 2B : E1 lecture productivité 🔜 NEXT
+
+**Scope prévu** :
+- `todo.list_tasks*`
+- `todo.list_lists`
+- `mail.list_inbox`
+- `mail.list_inbox.unread`
+- `mail.search_emails`
 
 ---
 

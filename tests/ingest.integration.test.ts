@@ -10,6 +10,7 @@ import { registerIngestRoute } from '../src/routes/ingest';
 import type { AppDeps } from '../src/server';
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
+import { planSpotifyActionFromTextWithOpenAi } from '../src/spotify/musicAgentPlanner';
 
 jest.mock('../src/conversation/orchestratorRouter', () => {
   const actual = jest.requireActual('../src/conversation/orchestratorRouter') as Record<string, unknown>;
@@ -21,9 +22,17 @@ jest.mock('../src/conversation/orchestratorRouter', () => {
 jest.mock('../src/routing/semanticRouter', () => ({
   trySemanticRouter: jest.fn(),
 }));
+jest.mock('../src/spotify/musicAgentPlanner', () => {
+  const actual = jest.requireActual('../src/spotify/musicAgentPlanner') as Record<string, unknown>;
+  return {
+    ...actual,
+    planSpotifyActionFromTextWithOpenAi: jest.fn(),
+  };
+});
 
 const mockedRouteUserRequest = routeUserRequest as jest.MockedFunction<typeof routeUserRequest>;
 const mockedTrySemanticRouter = trySemanticRouter as jest.MockedFunction<typeof trySemanticRouter>;
+const mockedPlanSpotifyAction = planSpotifyActionFromTextWithOpenAi as jest.MockedFunction<typeof planSpotifyActionFromTextWithOpenAi>;
 
 function makeEnv(dbPath: string, overrides: Partial<Env> = {}): Env {
   const base = {
@@ -91,6 +100,7 @@ describe('/v1/ingest integration', () => {
     app = Fastify({ logger: false });
     mockedRouteUserRequest.mockReset();
     mockedTrySemanticRouter.mockReset();
+    mockedPlanSpotifyAction.mockReset();
   });
 
   afterEach(async () => {
@@ -580,6 +590,407 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('semantic router receives raw text even when contextNote is provided', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: false,
+      decision: 'fallback_llm',
+      top1Score: 0.6,
+      top2Score: 0.55,
+      margin: 0.05,
+      top1Intent: 'search.web.definition',
+      top2Intent: 'search.web.quick_lookup',
+      confidence: 0.6,
+      fallbackReason: 'low_score',
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.news', confidence: 0.95 }],
+      reason: 'external_weather_forecast',
+    });
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Paris: 20 degres demain.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    )) as unknown) as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'search.web.definition',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-raw-text',
+        text: 'C est quoi une ZTL ?',
+        contextNote: '[Time: 15:45]',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedTrySemanticRouter).toHaveBeenCalledTimes(1);
+    expect(mockedTrySemanticRouter.mock.calls[0]?.[0]?.userText).toBe('C est quoi une ZTL ?');
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest.mock.calls[0]?.[0]?.text).toContain('Time: 15:45');
+    expect(mockedRouteUserRequest.mock.calls[0]?.[0]?.text).toContain('Question utilisateur');
+  });
+
+  it('semantic activation: search E2 live emits SSE ack before response', async () => {
+    const searchReply = 'Une ZTL est une zone a trafic limite reservee a certains vehicules.';
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e2',
+      matchedRoute: {
+        key: 'search.web.definition',
+        level: 'E2',
+        targetAgentId: 'search',
+        plannerRequired: false,
+        directRequest: { domain: 'search.web', action: 'definition' },
+        examples: ["c'est quoi"],
+      },
+      top1Score: 0.95,
+      top2Score: 0.71,
+      margin: 0.24,
+      top1Intent: 'search.web.definition',
+      top2Intent: 'search.web.quick_lookup',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    const fetchMock = jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    ));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'search.web.definition',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest?sse=1',
+      headers: {
+        accept: 'text/event-stream',
+      },
+      payload: {
+        threadId: 'thread-semantic-search-sse',
+        text: "C'est quoi une ZTL ?",
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const body = res.body;
+    const ackPos = body.indexOf('event: ack');
+    const responsePos = body.indexOf('event: response');
+    expect(ackPos).toBeGreaterThanOrEqual(0);
+    expect(responsePos).toBeGreaterThanOrEqual(0);
+    expect(ackPos).toBeLessThan(responsePos);
+    expect(body).toContain('Je cherche ca, une seconde.');
+    expect(body).toContain('zone a trafic limite');
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('semantic E1 live: search.deep.comparison bypasses LLM router and persists messages', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'search.deep.comparison',
+        level: 'E1',
+        targetAgentId: 'search',
+        plannerRequired: true,
+        directRequest: { domain: 'search.deep', action: 'comparison' },
+        examples: ['compare f22 et f35'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.74,
+      margin: 0.2,
+      top1Intent: 'search.deep.comparison',
+      top2Intent: 'search.web.quick_lookup',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    const fetchMock = jest.fn(async (url: string) => {
+      if (url.includes('/chat/completions')) {
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: 'F-22: superiorite aerienne. F-35: multirole et fusion capteurs.' } }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return haSpeechResponse('Réponse HA');
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'search.deep.comparison',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-search',
+        text: 'Compare F-22 et F-35',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { threadId: string; responseText: string };
+    expect(payload.threadId).toBe('thread-semantic-e1-search');
+    expect(payload.responseText).toContain('F-22');
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/v1/threads/thread-semantic-e1-search/history?limit=10',
+    });
+    expect(history.statusCode).toBe(200);
+    const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
+    expect(historyPayload.messages.some((m) => m.role === 'user' && m.text.includes('Compare F-22 et F-35'))).toBe(true);
+    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('F-22'))).toBe(true);
+
+    mockedTrySemanticRouter.mockResolvedValueOnce({
+      accepted: false,
+      decision: 'fallback_llm',
+      top1Score: 0.5,
+      top2Score: 0.45,
+      margin: 0.05,
+      top1Intent: 'search.web.quick_lookup',
+      top2Intent: 'search.news.current_news',
+      confidence: 0.5,
+      fallbackReason: 'low_score',
+    });
+    mockedRouteUserRequest.mockResolvedValueOnce({
+      targets: [],
+      reason: 'none',
+    });
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-other-id',
+        text: 'bonjour',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    const secondPayload = second.json() as { threadId: string };
+    expect(secondPayload.threadId).toBe('thread-semantic-e1-search');
+  });
+
+  it('semantic E1 live: spotify.search_and_play bypasses LLM router and avoids double planning', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'spotify.search_and_play',
+        level: 'E1',
+        targetAgentId: 'spotify',
+        plannerRequired: true,
+        directRequest: { domain: 'spotify', action: 'search_and_play' },
+        examples: ['mets du jazz'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.7,
+      margin: 0.25,
+      top1Intent: 'spotify.search_and_play',
+      top2Intent: 'spotify.search',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedPlanSpotifyAction.mockResolvedValue({
+      route: 'spotify',
+      reason: 'planner_ok',
+      request: {
+        domain: 'spotify',
+        action: 'pause',
+        slots: {},
+        text: 'Mets du jazz au salon',
+      },
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'spotify.search_and_play',
+    });
+    const deps = makeDeps(env, []);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      getNowPlaying: async () => ({ ok: false, status: 204, error: 'no_active_playback' }),
+      scheduleSituationRefresh: jest.fn(),
+    } as unknown as AppDeps['spotifyWebApi'];
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-spotify',
+        text: 'Mets du jazz au salon',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; planner?: { source?: string; route?: string } };
+    expect(payload.responseText).toContain('Rien ne joue actuellement');
+    expect(payload.planner?.source).toBe('openai_music_agent');
+    expect(payload.planner?.route).toBe('spotify');
+    expect(mockedPlanSpotifyAction).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 accepted but not allowlisted falls back to LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'spotify.transfer',
+        level: 'E1',
+        targetAgentId: 'spotify',
+        plannerRequired: true,
+        directRequest: { domain: 'spotify', action: 'transfer' },
+        examples: ['mets la musique au salon'],
+      },
+      top1Score: 0.93,
+      top2Score: 0.68,
+      margin: 0.25,
+      top1Intent: 'spotify.transfer',
+      top2Intent: 'spotify.search_and_play',
+      confidence: 0.93,
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.news', confidence: 0.95 }],
+      reason: 'external_weather_forecast',
+    });
+    const fetchMock = jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    ));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: '',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-not-allowlisted',
+        text: 'Mets la musique sur le salon',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    expect(mockedPlanSpotifyAction).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 search.deep error falls back to LLM router', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'partiel-nuageux',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 18.5,
+          humidity: 64,
+          precipitation_probability: 15,
+        },
+      },
+    ];
+
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'search.deep.analysis',
+        level: 'E1',
+        targetAgentId: 'search',
+        plannerRequired: true,
+        directRequest: { domain: 'search.deep', action: 'analysis' },
+        examples: ['analyse ce sujet'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.7,
+      margin: 0.24,
+      top1Intent: 'search.deep.analysis',
+      top2Intent: 'search.web.quick_lookup',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'weather', confidence: 0.99 }],
+      reason: 'llm_weather_route',
+    });
+    const fetchMock = jest.fn(async () => new Response('search_down', { status: 500 }));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'search.deep.analysis',
+    });
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-search-error',
+        text: 'Analyse ce sujet',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Je n’ai pas pu joindre l’agent Home Assistant');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 

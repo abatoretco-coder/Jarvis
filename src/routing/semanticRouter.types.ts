@@ -170,7 +170,6 @@ export type SemanticRouteResult = {
   debug?: {
     cachedEmbedding?: boolean;
     cachedRoutes?: boolean;
-    embeddingProvider?: string;
     routesScored?: number;
   };
 };

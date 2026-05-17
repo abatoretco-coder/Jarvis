@@ -21,7 +21,7 @@ import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
-import { buildWeatherSnapshotFromStates, type HaStateLike, type WeatherSnapshot } from '../weather/weatherSnapshot';
+import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
 import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import {
@@ -34,6 +34,7 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
@@ -697,12 +698,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
     }
 
-    const semanticActivationEnabled =
+    const semanticLiveModeEnabled =
       deps.env.SEMANTIC_ROUTER_ENABLED
-      && deps.env.SEMANTIC_ROUTER_ACTIVATION_ENABLED
       && !deps.env.SEMANTIC_ROUTER_SHADOW_MODE;
+    const semanticE2ActivationEnabled =
+      semanticLiveModeEnabled
+      && deps.env.SEMANTIC_ROUTER_ACTIVATION_ENABLED;
     const semanticActivatedRouteKeys = new Set(
       uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES ?? '').split(',')),
+    );
+    const semanticE1ActivationEnabled =
+      semanticLiveModeEnabled
+      && deps.env.SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED === true;
+    const semanticActivatedE1RouteKeys = new Set(
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES ?? '').split(',')),
     );
 
     const toSemanticActivationTarget = (candidate: {
@@ -729,6 +738,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     let semanticActivatedTarget: RouterTarget | null = null;
     let semanticActivatedRouteKey: string | undefined;
+  type MusicAgentPlan = Awaited<ReturnType<typeof planSpotifyActionFromTextWithOpenAi>>;
+  let semanticE1SpotifyPlan: MusicAgentPlan | undefined;
 
     if (deps.env.SEMANTIC_ROUTER_ENABLED) {
       const embeddingCfg: EmbeddingClientConfig = {
@@ -752,7 +763,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       };
 
       app.log.info({ threadId, requestId, text_len: text.length }, 'semantic_router_start');
-      if (semanticActivationEnabled) {
+      if (semanticLiveModeEnabled) {
         try {
           const semResult = await trySemanticRouter(semanticInput);
           app.log.info(
@@ -768,14 +779,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               elapsedMs: semResult.elapsedMs,
               cachedEmbedding: semResult.debug?.cachedEmbedding,
               shadow: false,
-              activationEnabled: true,
+              activationEnabled: semanticE2ActivationEnabled,
+              e1ActivationEnabled: semanticE1ActivationEnabled,
             },
             semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
           );
 
           if (semResult.accepted && semResult.decision === 'accepted_e2' && semResult.matchedRoute) {
             const routeKey = semResult.matchedRoute.key;
-            if (!semanticActivatedRouteKeys.has(routeKey)) {
+            if (!semanticE2ActivationEnabled) {
+              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
+            } else if (!semanticActivatedRouteKeys.has(routeKey)) {
               app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
             } else {
               if (semResult.matchedRoute.targetAgentId === 'search') {
@@ -891,6 +905,167 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               },
               'semantic_router_e1_candidate',
             );
+
+            const routeKey = semResult.matchedRoute.key;
+            if (!semanticE1ActivationEnabled) {
+              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_e1_activation_fallback_not_allowlisted');
+            } else if (!semanticActivatedE1RouteKeys.has(routeKey)) {
+              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_e1_activation_fallback_not_allowlisted');
+            } else {
+              const targetAgentId = semResult.matchedRoute.targetAgentId;
+              const isSearchDeep = targetAgentId === 'search' && routeKey.startsWith('search.deep.');
+              const isSpotifyE1 = targetAgentId === SPOTIFY_AGENT_ID && routeKey.startsWith('spotify.');
+              if (!isSearchDeep && !isSpotifyE1) {
+                app.log.info(
+                  { threadId, requestId, routeKey, targetAgentId },
+                  'semantic_router_e1_activation_fallback_unsupported_target',
+                );
+              } else {
+                const tE1 = Date.now();
+                app.log.info(
+                  {
+                    threadId,
+                    requestId,
+                    route: routeKey,
+                    decision: semResult.decision,
+                    targetAgentId,
+                    handled: false,
+                  },
+                  'semantic_router_e1_live_attempt',
+                );
+
+                if (isSearchDeep && sseStream !== null) {
+                  const ackMsg = getIngestAckText([routeKey]);
+                  if (ackMsg) pushSseAck(ackMsg);
+                }
+
+                try {
+                  const e1Result = await dispatchAcceptedE1Route({
+                    route: semResult.matchedRoute,
+                    text: assistantInputText,
+                    deps: {
+                      planSpotifyAction: async (plannerText: string) => (
+                        planSpotifyActionFromTextWithOpenAi({
+                          env: deps.env,
+                          spotifyWebApi: deps.spotifyWebApi,
+                          text: plannerText,
+                          correlationId: correlationId || undefined,
+                          userId: typeof parsed.data.user_id === 'string'
+                            ? parsed.data.user_id.trim() || undefined
+                            : undefined,
+                        })
+                      ),
+                      callSearchAgent: async (agentKey, params) => (
+                        callSearchAgent(agentKey, {
+                          text: params.text,
+                          openAiApiKey: deps.env.OPENAI_API_KEY ?? '',
+                          openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                          perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
+                          perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
+                          timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                          log: app.log,
+                        })
+                      ),
+                      callTodoAgent: async () => {
+                        throw new Error('e1_todo_live_not_enabled_in_phase_2a');
+                      },
+                      callMailAgent: async () => {
+                        throw new Error('e1_mail_live_not_enabled_in_phase_2a');
+                      },
+                    },
+                  });
+
+                  if (!e1Result) {
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        decision: semResult.decision,
+                        targetAgentId,
+                        handled: false,
+                        elapsed_ms: Date.now() - tE1,
+                      },
+                      'semantic_router_e1_live_fallback_llm',
+                    );
+                  } else if (e1Result.kind === 'search_text') {
+                    assistantText = e1Result.data;
+                    semanticActivatedRouteKey = e1Result.routeKey;
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: e1Result.routeKey,
+                        decision: semResult.decision,
+                        targetAgentId,
+                        handled: true,
+                        elapsed_ms: Date.now() - tE1,
+                      },
+                      'semantic_router_e1_live_handled',
+                    );
+                  } else if (e1Result.kind === 'spotify_plan') {
+                    const maybePlan = e1Result.data as MusicAgentPlan;
+                    if (maybePlan.route !== 'spotify' || !maybePlan.request) {
+                      app.log.info(
+                        {
+                          threadId,
+                          requestId,
+                          route: e1Result.routeKey,
+                          decision: semResult.decision,
+                          targetAgentId,
+                          handled: false,
+                          elapsed_ms: Date.now() - tE1,
+                        },
+                        'semantic_router_e1_live_fallback_llm',
+                      );
+                    } else {
+                      semanticE1SpotifyPlan = maybePlan;
+                      semanticActivatedTarget = { agentId: SPOTIFY_AGENT_ID, confidence: 1 };
+                      semanticActivatedRouteKey = e1Result.routeKey;
+                      app.log.info(
+                        {
+                          threadId,
+                          requestId,
+                          route: e1Result.routeKey,
+                          decision: semResult.decision,
+                          targetAgentId,
+                          planner: 'spotify_music_agent',
+                          handled: true,
+                          elapsed_ms: Date.now() - tE1,
+                        },
+                        'semantic_router_e1_live_handled',
+                      );
+                    }
+                  } else {
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        decision: semResult.decision,
+                        targetAgentId,
+                        handled: false,
+                        elapsed_ms: Date.now() - tE1,
+                      },
+                      'semantic_router_e1_live_fallback_llm',
+                    );
+                  }
+                } catch (err) {
+                  app.log.warn(
+                    {
+                      threadId,
+                      requestId,
+                      route: routeKey,
+                      decision: semResult.decision,
+                      targetAgentId,
+                      elapsed_ms: Date.now() - tE1,
+                      err,
+                    },
+                    'semantic_router_e1_live_error',
+                  );
+                }
+              }
+            }
           }
         } catch (err) {
           app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
@@ -937,7 +1112,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const routerPromise: Promise<RouterResult> = assistantText !== undefined
       ? Promise.resolve({
           targets: [],
-          reason: `semantic_router_search_e2_live:${semanticActivatedRouteKey ?? 'handled'}`,
+          reason: `semantic_router_live:${semanticActivatedRouteKey ?? 'handled'}`,
         })
       : semanticActivatedTarget
       ? Promise.resolve({
@@ -1026,24 +1201,26 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const routerDirectUsable =
             routerActionParsed?.success &&
             (routerActionParsed.data !== 'search_and_play' || routerHasUsableSearchAndPlay);
-          const resolveSpotifyPayload = routerDirectUsable
-            ? Promise.resolve({
-                route: 'spotify' as const,
-                reason: `router_direct:${routerActionParsed!.data}`,
-                request: {
-                  domain: 'spotify' as const,
-                  action: routerActionParsed!.data,
-                  slots: spotifyTarget.slots ?? {},
-                  text,
-                },
-              })
-            : planSpotifyActionFromTextWithOpenAi({
-                env: deps.env,
-                spotifyWebApi: deps.spotifyWebApi,
-                text: assistantInputText,
-                correlationId: correlationId || undefined,
-                userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
-              });
+          const resolveSpotifyPayload = semanticE1SpotifyPlan
+            ? Promise.resolve(semanticE1SpotifyPlan)
+            : routerDirectUsable
+              ? Promise.resolve({
+                  route: 'spotify' as const,
+                  reason: `router_direct:${routerActionParsed!.data}`,
+                  request: {
+                    domain: 'spotify' as const,
+                    action: routerActionParsed!.data,
+                    slots: spotifyTarget.slots ?? {},
+                    text,
+                  },
+                })
+              : planSpotifyActionFromTextWithOpenAi({
+                  env: deps.env,
+                  spotifyWebApi: deps.spotifyWebApi,
+                  text: assistantInputText,
+                  correlationId: correlationId || undefined,
+                  userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+                });
 
           tasks.push(
             resolveSpotifyPayload
