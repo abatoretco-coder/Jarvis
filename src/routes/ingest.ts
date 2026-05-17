@@ -36,6 +36,7 @@ import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanne
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
+import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
@@ -690,6 +691,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const recentMessages = routerEnabled ? recentMessages_ : [];
 
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
+    let assistantText: string | undefined;
 
     if (!routerEnabled) {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
@@ -746,7 +748,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           enableE1: true,
           enableD0: true,
         },
-        enabledLevels: ['D0', 'E2'],
+        enabledLevels: ['D0', 'E2', 'E1'],
         context: { threadId, requestId },
       };
 
@@ -777,6 +779,80 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             if (!semanticActivatedRouteKeys.has(routeKey)) {
               app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
             } else {
+              if (semResult.matchedRoute.targetAgentId === 'search') {
+                const tSearch = Date.now();
+                app.log.info(
+                  {
+                    threadId,
+                    requestId,
+                    route: routeKey,
+                    domain: semResult.matchedRoute.directRequest?.domain,
+                    decision: semResult.decision,
+                    handled: false,
+                  },
+                  'semantic_router_search_e2_live_attempt',
+                );
+                try {
+                  const handledSearchResult = await dispatchAcceptedSearchE2Route({
+                    route: semResult.matchedRoute,
+                    text: assistantInputText,
+                    callSearchAgent,
+                    searchCallParams: {
+                      openAiApiKey: deps.env.OPENAI_API_KEY ?? '',
+                      openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                      perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
+                      perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
+                      timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                      log: app.log,
+                    },
+                  });
+                  if (handledSearchResult) {
+                    assistantText = handledSearchResult.responseText;
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: handledSearchResult.routeKey,
+                        domain: handledSearchResult.domain,
+                        decision: semResult.decision,
+                        handled: true,
+                        elapsed_ms: Date.now() - tSearch,
+                      },
+                      'semantic_router_search_e2_live_handled',
+                    );
+                  } else {
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        domain: semResult.matchedRoute.directRequest?.domain,
+                        decision: semResult.decision,
+                        handled: false,
+                        elapsed_ms: Date.now() - tSearch,
+                      },
+                      'semantic_router_search_e2_live_fallback_llm',
+                    );
+                  }
+                } catch (err) {
+                  app.log.warn(
+                    {
+                      threadId,
+                      requestId,
+                      route: routeKey,
+                      domain: semResult.matchedRoute.directRequest?.domain,
+                      decision: semResult.decision,
+                      elapsed_ms: Date.now() - tSearch,
+                      err,
+                    },
+                    'semantic_router_search_e2_live_error',
+                  );
+                }
+              }
+
+              if (assistantText !== undefined) {
+                semanticActivatedRouteKey = routeKey;
+              } else {
               const candidate = toSemanticActivationTarget({
                 key: routeKey,
                 targetAgentId: semResult.matchedRoute.targetAgentId,
@@ -798,6 +874,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_unsupported_target');
               }
             }
+            }
+          }
+          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+            app.log.info(
+              {
+                threadId,
+                requestId,
+                route: semResult.matchedRoute.key,
+                decision: semResult.decision,
+                targetAgentId: semResult.matchedRoute.targetAgentId,
+                plannerRequired: semResult.matchedRoute.plannerRequired === true,
+              },
+              'semantic_router_e1_candidate',
+            );
           }
         } catch (err) {
           app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
@@ -822,13 +912,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             },
             semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
           );
+          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+            app.log.info(
+              {
+                threadId,
+                requestId,
+                route: semResult.matchedRoute.key,
+                decision: semResult.decision,
+                targetAgentId: semResult.matchedRoute.targetAgentId,
+                plannerRequired: semResult.matchedRoute.plannerRequired === true,
+              },
+              'semantic_router_e1_candidate',
+            );
+          }
         }).catch((err) => {
           app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
         });
       }
     }
 
-    const routerPromise: Promise<RouterResult> = semanticActivatedTarget
+    const routerPromise: Promise<RouterResult> = assistantText !== undefined
+      ? Promise.resolve({
+          targets: [],
+          reason: `semantic_router_search_e2_live:${semanticActivatedRouteKey ?? 'handled'}`,
+        })
+      : semanticActivatedTarget
       ? Promise.resolve({
           targets: [semanticActivatedTarget],
           reason: `semantic_router_activated:${semanticActivatedRouteKey ?? semanticActivatedTarget.agentId}`,
@@ -875,7 +983,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     // ── Resolve targets ───────────────────────────────────────────────────────
-    let assistantText: string | undefined;
 
     if (routerResult.status === 'fulfilled') {
       const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);

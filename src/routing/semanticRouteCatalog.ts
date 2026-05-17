@@ -222,6 +222,93 @@ export const WEATHER_E2_ROUTES: SemanticRouteDefinition[] = [
   },
 ];
 
+export const SPOTIFY_E1_ROUTES: SemanticRouteDefinition[] = [
+  {
+    key: 'spotify.search',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'search' },
+    plannerRequired: true,
+    examples: ['cherche la chanson imagine', 'trouve l album random access memories', 'cherche une playlist focus'],
+    metadata: { category: 'music', latencyTarget: 120 },
+  },
+  {
+    key: 'spotify.search_and_play',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'search_and_play' },
+    plannerRequired: true,
+    examples: ['mets du jazz', 'lance daft punk', 'joue la playlist chill'],
+    metadata: { category: 'music', latencyTarget: 130 },
+  },
+  {
+    key: 'spotify.queue_add',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'queue_add' },
+    plannerRequired: true,
+    examples: ['ajoute ce morceau à la file', 'mets ce titre dans la queue', 'rajoute la chanson en attente'],
+    metadata: { category: 'music', latencyTarget: 120 },
+  },
+  {
+    key: 'spotify.transfer',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'transfer' },
+    plannerRequired: true,
+    examples: ['mets la musique sur le salon', 'transfère sur mon téléphone', 'envoie sur le pc'],
+    metadata: { category: 'music', latencyTarget: 110 },
+  },
+  {
+    key: 'spotify.add_to_playlist',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'add_to_playlist' },
+    plannerRequired: true,
+    examples: ['ajoute ce titre à ma playlist running', 'mets cette chanson dans favoris', 'ajoute au mix du soir'],
+    metadata: { category: 'music', latencyTarget: 140 },
+  },
+  {
+    key: 'spotify.volume_set',
+    level: 'E1',
+    targetAgentId: 'spotify',
+    directRequest: { domain: 'spotify', action: 'volume_set' },
+    plannerRequired: true,
+    examples: ['mets le volume à 30', 'baisse le son à 20 pourcent', 'augmente le volume à 60'],
+    metadata: { category: 'music', latencyTarget: 110 },
+  },
+];
+
+export const SEARCH_DEEP_E1_ROUTES: SemanticRouteDefinition[] = [
+  {
+    key: 'search.deep.analysis',
+    level: 'E1',
+    targetAgentId: 'search',
+    directRequest: { domain: 'search.deep', action: 'analysis' },
+    plannerRequired: true,
+    examples: ['analyse les causes de la crise énergétique', 'fais une analyse complète de ce sujet', 'explique en profondeur cette problématique'],
+    metadata: { category: 'info', latencyTarget: 220 },
+  },
+  {
+    key: 'search.deep.history',
+    level: 'E1',
+    targetAgentId: 'search',
+    directRequest: { domain: 'search.deep', action: 'history' },
+    plannerRequired: true,
+    examples: ['raconte l historique du f35', 'donne le contexte historique de l otan', 'histoire de la ville de florence'],
+    metadata: { category: 'info', latencyTarget: 220 },
+  },
+  {
+    key: 'search.deep.comparison',
+    level: 'E1',
+    targetAgentId: 'search',
+    directRequest: { domain: 'search.deep', action: 'comparison' },
+    plannerRequired: true,
+    examples: ['compare f22 et f35', 'différences entre react et vue', 'comparaison entre deux modèles'],
+    metadata: { category: 'info', latencyTarget: 220 },
+  },
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TODO — E2 Routes (6)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,6 +374,87 @@ export const TODO_E1_ROUTES: SemanticRouteDefinition[] = [
     deterministicResponses: () => TODO_LIST_LISTS_RESPONSES,
     metadata: { category: 'productivity', latencyTarget: 40 },
   },
+  {
+    key: 'todo.add_task',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'add_task' },
+    plannerRequired: true,
+    examples: ['ajoute acheter du pain demain', 'crée une tâche appeler maman', 'note une tâche pour ce soir'],
+    metadata: { category: 'productivity', latencyTarget: 90 },
+  },
+  {
+    key: 'todo.complete_task',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'complete_task' },
+    plannerRequired: true,
+    examples: ['marque la tâche ménage comme faite', 'tâche terminée pour devis', 'valide la tâche rendez-vous'],
+    metadata: { category: 'productivity', latencyTarget: 90 },
+  },
+  {
+    key: 'todo.delete_task',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'delete_task' },
+    plannerRequired: true,
+    examples: ['supprime la tâche acheter du lait', 'efface la tâche de demain', 'retire cette tâche'],
+    metadata: { category: 'productivity', latencyTarget: 90 },
+  },
+  {
+    key: 'todo.update_task',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'update_task' },
+    plannerRequired: true,
+    examples: ['déplace la tâche à demain', 'change le titre de la tâche', 'mets la tâche en priorité haute'],
+    metadata: { category: 'productivity', latencyTarget: 95 },
+  },
+  {
+    key: 'todo.create_list',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'create_list' },
+    plannerRequired: true,
+    examples: ['crée une liste vacances', 'nouvelle liste courses', 'ajoute une liste travail'],
+    metadata: { category: 'productivity', latencyTarget: 90 },
+  },
+  {
+    key: 'todo.delete_list',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'delete_list' },
+    plannerRequired: true,
+    examples: ['supprime la liste courses', 'efface la liste archives', 'retire cette liste todo'],
+    metadata: { category: 'productivity', latencyTarget: 90 },
+  },
+  {
+    key: 'todo.add_checklist_item',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'add_checklist_item' },
+    plannerRequired: true,
+    examples: ['ajoute préparer les documents à la checklist', 'nouvel élément de checklist', 'rajoute un point à cette tâche'],
+    metadata: { category: 'productivity', latencyTarget: 95 },
+  },
+  {
+    key: 'todo.complete_checklist_item',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'complete_checklist_item' },
+    plannerRequired: true,
+    examples: ['coche le point appeler le client', 'marque cet item checklist comme fait', 'valide cet élément de liste'],
+    metadata: { category: 'productivity', latencyTarget: 95 },
+  },
+  {
+    key: 'todo.delete_checklist_item',
+    level: 'E1',
+    targetAgentId: 'todo',
+    directRequest: { domain: 'todo', action: 'delete_checklist_item' },
+    plannerRequired: true,
+    examples: ['supprime cet item de checklist', 'efface le point envoyer le mail', 'retire cet élément de tâche'],
+    metadata: { category: 'productivity', latencyTarget: 95 },
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,6 +482,78 @@ export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
     deterministicResponses: () => MAIL_LIST_INBOX_UNREAD_RESPONSES,
     metadata: { category: 'communication', latencyTarget: 50 },
   },
+  {
+    key: 'mail.search_emails',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'search_emails' },
+    plannerRequired: true,
+    examples: ['cherche mes mails de thomas', 'retrouve le mail du devis', 'recherche les emails sur le contrat'],
+    metadata: { category: 'communication', latencyTarget: 120 },
+  },
+  {
+    key: 'mail.send_email',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'send_email' },
+    plannerRequired: true,
+    examples: ['envoie un mail à marie', 'rédige et envoie ce message', 'envoie un email avec ce sujet'],
+    metadata: { category: 'communication', latencyTarget: 140 },
+  },
+  {
+    key: 'mail.reply_email',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'reply_email' },
+    plannerRequired: true,
+    examples: ['réponds à ce mail', 'réponds à thomas sur le devis', 'fais une réponse à cet email'],
+    metadata: { category: 'communication', latencyTarget: 140 },
+  },
+  {
+    key: 'mail.forward_email',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'forward_email' },
+    plannerRequired: true,
+    examples: ['transfère ce mail à claire', 'fais suivre cet email', 'forward ce message à l équipe'],
+    metadata: { category: 'communication', latencyTarget: 140 },
+  },
+  {
+    key: 'mail.mark_read',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'mark_read' },
+    plannerRequired: true,
+    examples: ['marque ce mail comme lu', 'passe cet email en lu', 'mettre le message en lu'],
+    metadata: { category: 'communication', latencyTarget: 100 },
+  },
+  {
+    key: 'mail.mark_unread',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'mark_unread' },
+    plannerRequired: true,
+    examples: ['marque ce mail comme non lu', 'remets ce message en non lu', 'passe cet email en non lu'],
+    metadata: { category: 'communication', latencyTarget: 100 },
+  },
+  {
+    key: 'mail.trash_email',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'trash_email' },
+    plannerRequired: true,
+    examples: ['mets ce mail à la corbeille', 'supprime cet email', 'jette ce message'],
+    metadata: { category: 'communication', latencyTarget: 100 },
+  },
+  {
+    key: 'mail.flag_email',
+    level: 'E1',
+    targetAgentId: 'mail',
+    directRequest: { domain: 'mail', action: 'flag_email' },
+    plannerRequired: true,
+    examples: ['marque ce mail important', 'flag cet email', 'ajoute un drapeau sur ce message'],
+    metadata: { category: 'communication', latencyTarget: 100 },
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,10 +572,11 @@ export const SEMANTIC_ROUTES: SemanticRouteDefinition[] = [
   ...SPOTIFY_E2_ROUTES,      // 7
   ...SEARCH_E2_ROUTES,       // 5
   ...WEATHER_E2_ROUTES,      // 4
-  ...TODO_E1_ROUTES,         // 6
-  ...MAIL_E1_ROUTES,         // 2
+  ...SPOTIFY_E1_ROUTES,
+  ...SEARCH_DEEP_E1_ROUTES,
+  ...TODO_E1_ROUTES,
+  ...MAIL_E1_ROUTES,
   ...HA_E2_ROUTES,           // 0 (Phase 3)
-  // Phase 2: E1 routes à ajouter ici
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
