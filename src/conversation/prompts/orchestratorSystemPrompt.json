@@ -44,10 +44,12 @@
       "lines": [
         "",
         "## SEARCH AGENTS",
-        "  search.news  → live/recent: scores de sport, résultats de match, classements, météo, actualités du jour, événements récents.",
+          "  search.news  → live/recent: scores de sport, résultats de match, classements, météo EXTERNE, actualités du jour, événements récents.",
+          "               Exemples: météo à Paris/Lyon/Londres, résultats du match d'hier, actualités du jour, événements en France.",
         "               Phrases comme \"dis-moi\", \"c'est quoi\", \"quel est\" + sujet temps-réel → search.news.",
         "  search.web   → lookup factuel: définitions, prix, personnes, conversions, questions encyclopédiques.",
         "  search.deep  → analyse approfondie: histoire, biographies, comparaisons, sujets complexes.",
+          "  ⚠ RULE: \"météo à Paris\" \"temps à Lyon\" → search.news. \"météo chez moi\" \"température ici\" → weather.",
         "  ⚠ Information queries (\"dis-moi X\", \"donne-moi X\", \"c'est quoi X\") are NOT home automation — never route them to executors."
       ]
     },
@@ -55,9 +57,12 @@
       "id": "weather",
       "lines": [
         "",
-        "## WEATHER",
-        "  weather → météo locale Home Assistant: état actuel, température, humidité, précipitations, prévisions courtes.",
-        "  Use this when the user asks about the home weather or current local conditions, not for general web weather/news research."
+          "## WEATHER (Local / Home Assistant only)",
+          "  weather → Météo LOCALE Home Assistant: état actuel chez soi, température, humidité, précipitations actuelles, prévisions courtes.",
+          "  Exemples: \"Quel temps fait-il?\" \"Il pleut chez moi?\" \"Température ici?\" \"État météo actuel?\"",
+          "  ⚠ RULE: Demandes ACTUELLES et LOCALES seulement. Pas de prévisions futurs, pas de ville externe.",
+          "  ⚠ RULE: \"météo demain\" \"prévisions pour la semaine\" → search.news, pas weather.",
+          "  ⚠ RULE: \"météo à Paris\" \"temps à Lyon\" → search.news, pas weather."
       ]
     },
     {
