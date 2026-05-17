@@ -2,7 +2,7 @@
  * Semantic Route Catalog
  *
  * Définition de tous les routages disponibles (D0, E2, E1).
-  * Phase 1C : 16 routes E2 (Spotify+Search+Weather) + 34 routes E1 (Spotify+Search+Todo+Mail) = 50 routes.
+  * Le volume de routes évolue par phase (voir getCatalogStats()).
   * Phase 2 : activation progressive E1 live.
  *
  * Chaque route contient :
@@ -751,7 +751,7 @@ export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MASTER CATALOG (Phase 1C : E2 + E1 — 50 routes)
+// MASTER CATALOG (routes E2 + E1)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SEMANTIC_ROUTES: SemanticRouteDefinition[] = [

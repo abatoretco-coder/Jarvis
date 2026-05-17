@@ -13,6 +13,7 @@ import {
   parseAgentMap,
   SPOTIFY_AGENT_ID,
   synthesizeAgentResponses,
+  type AgentRouteEntry,
   type RouterResult,
   type RouterTarget,
 } from '../conversation/orchestratorRouter';
@@ -36,6 +37,7 @@ import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanne
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
 import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
+import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
@@ -155,65 +157,28 @@ function normalizeClientChannel(value: unknown): string | undefined {
   return normalized;
 }
 
-const SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS = new Set([
-  // Phase 2A
-  'search.deep.analysis',
-  'search.deep.history',
-  'search.deep.comparison',
-  'spotify.search',
-  'spotify.search_and_play',
-  'spotify.transfer',
-  // Phase 2B
-  'todo.list_tasks',
-  'todo.list_tasks.today',
-  'todo.list_tasks.tomorrow',
-  'todo.list_tasks.this_week',
-  'todo.list_tasks.overdue',
-  'todo.list_lists',
-  'mail.list_inbox',
-  'mail.list_inbox.unread',
-  'mail.search_emails',
-  // Phase 2C
-  'todo.add_task',
-  'todo.complete_task',
-  'mail.mark_read',
-  'mail.mark_unread',
-  // Phase 2D
-  'todo.update_task',
-  'todo.delete_task',
-  'todo.create_list',
-  'todo.delete_list',
-  'todo.add_checklist_item',
-  'todo.complete_checklist_item',
-  'todo.delete_checklist_item',
-  'mail.flag_email',
-  // Phase 2E (still guarded by dedicated high-risk activation + thresholds)
-  'mail.send_email',
-  'mail.reply_email',
-  'mail.forward_email',
-  'mail.trash_email',
-  // Phase 3
-  'executor.greeting',
-  'executor.help',
-  'executor.status',
-  'executor.timer',
-  'executor.note',
-  'executor.scene_set',
-  'executor.media_play_pause',
-  'executor.media_next',
-  'executor.media_previous',
-  'executor.volume_up',
-  'executor.volume_down',
-  'executor.mute',
-  'executor.unmute',
-  'executor.climate_set',
-  'executor.lock',
-  'executor.unlock',
-  'executor.vacuum_start',
-  'executor.vacuum_stop',
-  'executor.cover_open',
-  'executor.cover_close',
-]);
+const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
+  SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key),
+);
+
+function resolveExecutorsEntry(agentEntries: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry | null {
+  // Preferred explicit mapping: key=executors or direct pseudo-agent id.
+  const explicit = agentEntries.find((entry) => entry.key === 'executors' || entry.agentId === 'executors');
+  if (explicit) return explicit;
+
+  // Compatibility fallback: if there is exactly one remaining HA specialized target,
+  // treat it as the executors route sink.
+  const candidates = agentEntries.filter((entry) => {
+    if (entry.agentId === generalAgentId) return false;
+    if (entry.key === 'weather') return false;
+    if (isSearchAgentKey(entry.key)) return false;
+    if (isTodoAgentKey(entry.key)) return false;
+    if (isMailAgentKey(entry.key)) return false;
+    if (entry.agentId === SPOTIFY_AGENT_ID) return false;
+    return true;
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
 
 async function synthesizeWeatherReplyWithOpenAi(params: {
   openAiApiKey: string;
@@ -746,14 +711,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const weatherEntry = deps.ha
       ? { agentId: 'weather', hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes', key: 'weather' }
       : null;
-    const executorsEntry = agentEntries.find((entry) => entry.key === 'executors') ?? null;
+    const generalAgentId = deps.env.HA_AGENT_GENERAL;
+    const executorsEntry = resolveExecutorsEntry(agentEntries, generalAgentId);
     const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...(weatherEntry ? [weatherEntry] : []), ...agentEntries];
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
     const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
 
     const recentMessages = routerEnabled ? recentMessages_ : [];
-
-    const generalAgentId = deps.env.HA_AGENT_GENERAL;
     let assistantText: string | undefined;
 
     if (!routerEnabled) {
@@ -1030,9 +994,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       : routeKey.startsWith('executor.')
                         ? 'executors'
                       : null;
-              const safeRouteAllowed = SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS.has(routeKey);
+              const safeRouteAllowed = SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS.has(routeKey);
               const supportedTarget = expectedTargetAgentId !== null && targetAgentId === expectedTargetAgentId;
-              const isSlowReadRoute = routeKey.startsWith('search.deep.') || routeKey.startsWith('todo.') || routeKey.startsWith('mail.');
+              const isSlowReadRoute = routeKey.startsWith('search.deep.')
+                || routeKey.startsWith('todo.')
+                || routeKey.startsWith('mail.')
+                || routeKey.startsWith('executor.');
 
               if (!safeRouteAllowed || !supportedTarget) {
                 app.log.info(
@@ -1263,7 +1230,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         handled: false,
                         elapsed_ms: Date.now() - tE1,
                       },
-                      'semantic_router_e1_live_fallback_llm',
+                      highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
                     );
                   } else if (e1Result.kind === 'search_text' || e1Result.kind === 'todo_text' || e1Result.kind === 'mail_text') {
                     assistantText = e1Result.data;
@@ -1307,7 +1274,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           handled: false,
                           elapsed_ms: Date.now() - tE1,
                         },
-                        'semantic_router_e1_live_fallback_llm',
+                        highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
                       );
                     } else {
                       semanticE1SpotifyPlan = maybePlan;
@@ -1352,7 +1319,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         handled: false,
                         elapsed_ms: Date.now() - tE1,
                       },
-                      'semantic_router_e1_live_fallback_llm',
+                      highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
                     );
                   }
                 } catch (err) {

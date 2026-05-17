@@ -40,6 +40,7 @@ This document defines how to tune semantic-router thresholds in live mode for:
   - `semantic_router_e1_high_risk_blocked_thresholds`
   - `semantic_router_e1_high_risk_live_attempt`
   - `semantic_router_e1_high_risk_live_handled`
+  - `semantic_router_e1_high_risk_live_fallback_llm`
   - `semantic_router_e1_high_risk_live_error`
 
 ## Daily Tuning Workflow
