@@ -1,6 +1,6 @@
 # 🚀 SEMANTIC ROUTER — QUICK START GUIDE
 
-**Vous êtes ici** : Phase 0 Deliverables Complete ✅
+**Vous êtes ici** : Phase 1A (Shadow Mode) Complete ✅
 
 ---
 
@@ -55,7 +55,7 @@
 
 ---
 
-## 📦 Ce qui a été livré (Phase 0)
+## 📦 Ce qui a été livré (Phase 0 + Phase 1A)
 
 ### Documentation (2500+ lignes)
 
@@ -66,23 +66,46 @@
 | [INDEX.md](./src/routing/INDEX.md) | 350 | Navigation hub | Everyone |
 | [deterministic/DETERMINISTIC_PROMPTS.md](./src/routing/deterministic/DETERMINISTIC_PROMPTS.md) | 400 | Patterns réponses | Developers |
 
-### Code TypeScript (950+ lignes)
+### Code TypeScript Phase 0 (Types + Catalog)
 
 | Fichier | Lignes | Status | Compilable |
 |---|---|---|---|
 | [semanticRouter.types.ts](./src/routing/semanticRouter.types.ts) | 280 | ✅ COMPLET | ✅ YES |
-| [semanticRouteCatalog.ts](./src/routing/semanticRouteCatalog.ts) | 450 | ✅ COMPLET | ✅ YES (with responses) |
+| [semanticRouteCatalog.ts](./src/routing/semanticRouteCatalog.ts) | 500+ | ✅ COMPLET (50 routes) | ✅ YES |
 | [spotifyResponses.ts](./src/routing/deterministic/spotifyResponses.ts) | 180 | ✅ COMPLET | ✅ YES |
-| [searchResponses.ts](./src/routing/deterministic/searchResponses.ts) | 18 | ⏳ STUBS | ✅ YES (stubs) |
-| [todoResponses.ts](./src/routing/deterministic/todoResponses.ts) | 16 | ⏳ STUBS | ✅ YES (stubs) |
-| [mailResponses.ts](./src/routing/deterministic/mailResponses.ts) | 13 | ⏳ STUBS | ✅ YES (stubs) |
+| [searchResponses.ts](./src/routing/deterministic/searchResponses.ts) | 18 | ⏳ STUBS | ✅ YES |
+| [todoResponses.ts](./src/routing/deterministic/todoResponses.ts) | 16 | ⏳ STUBS | ✅ YES |
+| [mailResponses.ts](./src/routing/deterministic/mailResponses.ts) | 13 | ⏳ STUBS | ✅ YES |
+
+### Code TypeScript Phase 1A (Infrastructure)
+
+| Fichier | Lignes | Status | Notes |
+|---|---|---|---|
+| [embeddingClient.ts](./src/routing/embeddingClient.ts) | ~150 | ✅ COMPLET | Ollama + OpenAI, LRU 512 |
+| [routeScoring.ts](./src/routing/routeScoring.ts) | ~120 | ✅ COMPLET | Cosine similarity, centroid |
+| [routeDecision.ts](./src/routing/routeDecision.ts) | ~100 | ✅ COMPLET | Accept/reject, multi-intent |
+| [semanticRouter.ts](./src/routing/semanticRouter.ts) | ~95 | ✅ COMPLET | Orchestration 5-step |
+| [routeDispatcher.ts](./src/routing/routeDispatcher.ts) | ~60 | ✅ COMPLET | Search E2 live dispatch |
+| [e1RouteDispatcher.ts](./src/routing/e1RouteDispatcher.ts) | ~50 | ✅ COMPLET | E1 dispatch vers agents |
+| [haAgentRouter.ts](./src/conversation/haAgentRouter.ts) | ~50 | ✅ COMPLET | Compat shim + parseAgentMap |
+
+### Tests Phase 1A
+
+| Fichier | Tests | Status |
+|---|---|---|
+| [semanticRouter.phase1a.test.ts](./tests/semanticRouter.phase1a.test.ts) | ~90 | ✅ PASS |
+| [routing/e1RouteDispatcher.test.ts](./tests/routing/e1RouteDispatcher.test.ts) | ~20 | ✅ PASS |
+| [routing/e1Catalog.test.ts](./tests/routing/e1Catalog.test.ts) | ~15 | ✅ PASS |
+| [routing/routeDispatcher.search.test.ts](./tests/routing/routeDispatcher.search.test.ts) | ~20 | ✅ PASS |
+| **Total (13 suites)** | **158** | **✅ ALL PASS** |
 
 ---
 
 ## 🎯 Etat actuel des routes
 
 ```
-┌─ SPOTIFY (7)
+┌─ SPOTIFY (7 E2 + 6 E1)
+│  E2 (direct executor) :
 │  ├─ pause              → 4 variantes
 │  ├─ play               → 4 variantes
 │  ├─ next               → 4 variantes
@@ -90,34 +113,32 @@
 │  ├─ now_playing        → template
 │  ├─ list_devices       → template
 │  └─ clear_queue        → 3 variantes
+│  E1 (agent planner) : search, search_and_play, queue_add, transfer, add_to_playlist, volume_set
 │
-├─ WEATHER LOCAL (4, E2)
+├─ WEATHER LOCAL (4 E2)
 │  ├─ current_temperature  → "quelle température à la maison ?"
 │  ├─ current_humidity     → "humidité actuelle maison"
 │  ├─ current_precipitation → "il pleut chez moi ?"
 │  └─ current_conditions   → "météo locale du moment"
 │
-├─ SEARCH EXTERNE (5, E2)
-│  ├─ external_weather    → "météo à Paris demain ?"
-│  ├─ live_sport         → "qui a gagné le match ?"
-│  ├─ current_news       → "quelles sont les actus ?"
-│  ├─ definition         → "c'est quoi ?"
-│  └─ quick_lookup       → "qui est Paul ?"
+├─ SEARCH EXTERNE (5 E2 + 3 E1 deep)
+│  E2 : external_weather, live_sport, current_news, definition, quick_lookup
+│  E1 deep : analysis, history, comparison
 │
-├─ TODO (6, E1)
-│  ├─ list_tasks         → "mes tâches"
-│  ├─ list_tasks.today   → "tâches du jour"
-│  ├─ list_tasks.tomorrow → "tâches demain"
-│  ├─ list_tasks.this_week → "tâches de la semaine"
-│  ├─ list_tasks.overdue → "tâches en retard"
-│  └─ list_lists         → "mes listes"
+├─ TODO (15 E1)
+│  ├─ list_tasks, list_tasks.today, list_tasks.tomorrow
+│  ├─ list_tasks.this_week, list_tasks.overdue, list_lists
+│  └─ add_task, complete_task, delete_task, update_task
+│     create_list, delete_list
+│     add_checklist_item, complete_checklist_item, delete_checklist_item
 │
-└─ MAIL (2, E1)
-   ├─ list_inbox         → "lis mes mails"
-   └─ list_inbox.unread  → "mails non lus"
+└─ MAIL (10 E1)
+   ├─ list_inbox, list_inbox.unread
+   ├─ search_emails, send_email, reply_email, forward_email
+   └─ mark_read, mark_unread, trash_email, flag_email
 ```
 
-**Total** : 16 routes E2 + 8 routes E1 (démarrage) + 32 Spotify variantes
+**Total** : 16 routes E2 + 34 routes E1 = **50 routes** + 32 Spotify variantes
 
 ---
 
@@ -159,11 +180,12 @@ Si échoue une check → **Fallback vers LLM Router existant**
 
 | Phase | Semaines | Routes | Status |
 |---|---|---|---|
-| **0** | S1-2 | Types | ✅ DONE |
-| **1** | S3-4 | E2 (Spotify/Search/Weather) | 🔴 Implementation (TODO) |
-| **2** | S5-6 | 22 E1 | 🔴 TODO |
-| **3** | S7-8 | 12 HA | 🔴 TODO |
-| **4** | S9-10 | Advanced | 🔴 TODO |
+| **0** | S1-2 | Types + Catalog | ✅ DONE |
+| **1A** | S3-4 | Shadow Mode (50 routes catalogées, infra live) | ✅ DONE |
+| **1B** | S5 | Activation (allowlist E2, tuning seuils) | 🔴 TODO |
+| **2** | S6-7 | E1 Wiring (Todo/Mail/Spotify agents) | 🔴 TODO |
+| **3** | S8-9 | HA Executors (12 routes) | 🔴 TODO |
+| **4** | S10 | Advanced (clustering, personalization) | 🔴 TODO |
 
 **Total** : 10 semaines pour la v1 complète
 

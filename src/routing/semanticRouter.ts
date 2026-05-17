@@ -55,7 +55,6 @@ export async function trySemanticRouter(input: SemanticRouterInput): Promise<Sem
       confidence: 0,
       fallbackReason: 'embedding_failed',
       elapsedMs: Date.now() - t0,
-      debug: { embeddingProvider: embeddingConfig.provider },
     };
   }
 
@@ -87,7 +86,6 @@ export async function trySemanticRouter(input: SemanticRouterInput): Promise<Sem
     debug: {
       ...result.debug,
       cachedEmbedding: embeddingResult.cached,
-      embeddingProvider: embeddingConfig.provider,
     },
   };
 }

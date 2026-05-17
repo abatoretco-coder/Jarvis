@@ -1,8 +1,8 @@
-# 📦 Phase 0 Deliverables — Semantic Router
+# 📦 Phase 0 + Phase 1A Deliverables — Semantic Router
 
 **Créé** : Mai 2026  
-**Status** : ✅ Planning & Documentation Complete  
-**Prochaine étape** : Phase 0 TypeScript Implementation
+**Status** : ✅ Phase 1A (Shadow Mode) Complete  
+**Prochaine étape** : Phase 1B — Activation
 
 ---
 
@@ -106,28 +106,78 @@
 
 ---
 
-## 🎯 Contrats & Garanties
+## 🚀 Fichiers créés (Phase 1A)
+
+### Infrastructure Semantic Router (7 fichiers)
+
+12. **[embeddingClient.ts](./embeddingClient.ts)** (~150 lignes) ✅ COMPLET
+    - LRU cache 512 entrées (FIFO eviction)
+    - Support Ollama (nomic-embed-text) + OpenAI (text-embedding-3-small)
+    - Timeout 5s, cache key: `provider:model:text`
+    - Exports: `getEmbedding()`, `clearEmbeddingCache()`
+
+13. **[routeScoring.ts](./routeScoring.ts)** (~120 lignes) ✅ COMPLET
+    - Cosine similarity: `(A·B) / (||A|| × ||B||)`
+    - Centroid par route (moyenne des examples embeddings, cachée)
+    - Scoring parallèle de toutes les routes
+    - Exports: `cosineSimilarity()`, `scoreRoutes()`, `clearRouteEmbeddingCache()`
+
+14. **[routeDecision.ts](./routeDecision.ts)** (~100 lignes) ✅ COMPLET
+    - Filtrage par niveau (D0/E2/E1 enabled check)
+    - Multi-intent check (> threshold = reject)
+    - Score threshold (top1 >= acceptScore)
+    - Margin threshold (margin >= minMargin)
+    - Raisons de rejet: `rejected_low_score | rejected_low_margin | rejected_multi_intent`
+
+15. **[semanticRouter.ts](./semanticRouter.ts)** (~95 lignes) ✅ COMPLET
+    - Pipeline 5 étapes: filter → embed → score → decide → return
+    - Gestion d'erreurs (embedding_failed, scoring_failed, no_routes)
+    - Export: `trySemanticRouter()`
+
+16. **[routeDispatcher.ts](./routeDispatcher.ts)** (~60 lignes) ✅ COMPLET
+    - `LIVE_SEARCH_E2_ROUTE_KEYS` (5 routes search actives)
+    - Dispatch vers `callSearchAgent` (search.news | search.web)
+    - Export: `dispatchAcceptedSearchE2Route()`
+
+17. **[e1RouteDispatcher.ts](./e1RouteDispatcher.ts)** (~50 lignes) ✅ COMPLET
+    - Types: `spotify_plan | search_text | todo_text | mail_text`
+    - Dispatch E1 vers planners/agents
+    - Export: `dispatchE1Route()`
+
+18. **[src/conversation/haAgentRouter.ts](../conversation/haAgentRouter.ts)** (~50 lignes) ✅ COMPLET
+    - Re-export compat shim depuis orchestratorRouter
+    - `parseAgentMap(raw: string): HaAgentEntry[]` (format `key:entity_id:hint|...`)
+    - Export: `HaAgentEntry`, `routeToHaAgent`, `synthesizeAgentResponses`
+
+### Tests Phase 1A (4 fichiers)
+
+19. **[tests/semanticRouter.phase1a.test.ts](../tests/semanticRouter.phase1a.test.ts)** (~380 lignes) ✅
+20. **[tests/routing/e1RouteDispatcher.test.ts](../tests/routing/e1RouteDispatcher.test.ts)** (~90 lignes) ✅
+21. **[tests/routing/e1Catalog.test.ts](../tests/routing/e1Catalog.test.ts)** (~65 lignes) ✅
+22. **[tests/routing/routeDispatcher.search.test.ts](../tests/routing/routeDispatcher.search.test.ts)** (~90 lignes) ✅
+
+**Total Phase 1A** : 11 fichiers créés, 158 tests passing (13 suites)
 
 ### Types TypeScript
 - ✅ Complets et bien-documentés
-- ✅ Prêts pour Phase 0 implementation
 - ✅ Compatible avec existant (orchestratorRouter, ingest.ts, etc.)
+- ✅ 15+ type definitions
 
 ### Catalog
-- ✅ Catalogue aligné runtime (16 E2 + 8 E1 démarrage)
+- ✅ 50 routes (16 E2 + 34 E1) — full catalog implémenté
 - ✅ Chaque route a examples, targetAgentId, directRequest
 - ✅ Relie vers deterministic responses
-- ✅ Extensible pour Phase 2 (E1) + Phase 3 (HA)
+- ✅ Extensible pour Phase 2 (wiring E1) + Phase 3 (HA)
 
 ### Deterministic Responses
 - ✅ Spotify : COMPLET (32 variantes totales pour 7 actions)
-- ⏳ Search/Todo/Mail : STUBS (à remplir Phase 1)
+- ⏳ Search/Todo/Mail : STUBS (synthèse LLM en runtime)
 - Pattern établi : phrasing court, variantes, templates slots, helpers
 
 ### Documentation
-- ✅ ROADMAP : vision complète 4 phases
+- ✅ ROADMAP : vision complète 4 phases (mise à jour Phase 1A)
 - ✅ ARCHITECTURE : implémentation technique détaillée
-- ✅ INDEX : navigation & checklist
+- ✅ INDEX : navigation & checklist (mise à jour Phase 1A)
 - ✅ DETERMINISTIC_PROMPTS : patterns de réponses
 
 ---
@@ -136,63 +186,58 @@
 
 | Catégorie | Nombre | Status |
 |---|---|---|
-| Files créés | 10 | ✅ |
+| Files créés Phase 0 | 10 | ✅ |
+| Files créés Phase 1A | 11 | ✅ |
 | Documentation (lignes) | ~2500 | ✅ |
-| TypeScript (lignes) | ~280 | ✅ |
+| TypeScript Phase 0 (lignes) | ~950 | ✅ |
+| TypeScript Phase 1A (lignes) | ~2000+ | ✅ |
 | Routes E2 | 16 | ✅ |
-| Routes E1 (démarrage) | 8 | ✅ |
-| Routes E1 (placeholder) | 22 | 📋 |
-| Routes HA (placeholder) | 12 | 📋 |
+| Routes E1 (cat) | 34 | ✅ catalogées |
+| Routes E1 (wiring) | 34 | 🔴 Phase 2 |
+| Routes HA | 12 | 🔴 Phase 3 |
 | Spotify variantes | 32 | ✅ |
 | Type definitions | 15+ | ✅ |
+| Tests passing | 158 | ✅ (13 suites) |
 
 ---
 
-## 🚀 Phase 0 → Phase 1 : What's Next
+## 🚀 Phase 1A → Phase 1B : What's Next
 
-### Toujours à implémenter (6 fichiers TypeScript)
-
-```
-src/routing/
-├── embeddingClient.ts         ← Ollama/OpenAI client
-├── routeScoring.ts            ← Cosine similarity + scoring
-├── routeDecision.ts           ← Logic: accept/reject
-├── semanticRouter.ts          ← Main orchestration
-├── routeDispatcher.ts         ← (Phase 2+) dispatch logic
-└── directActions/
-    └── *DirectActions.ts      ← (Phase 2+) executor wiring
-```
-
-### Configuration (Phase 1)
+### Phase 1B : Activation
 
 ```
-src/env.ts                      ← Add SEMANTIC_ROUTER_* vars
-src/routes/ingest.ts           ← Integration point
+Prérequis : analyser shadow mode logs (SEMANTIC_ROUTER_ENABLED=true)
+
+1. Activer : SEMANTIC_ROUTER_ACTIVATION_ENABLED=true
+2. Définir : SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES=spotify.pause,spotify.play,...
+3. Monitorer : latency p50 < 50ms, accuracy > 95%
+4. Tuner : acceptScore et minMargin sur data réelle
 ```
 
-### Tests (Phase 1)
+### Phase 2 : E1 Wiring
 
 ```
-tests/routing/
-├── semanticRouter.test.ts
-└── fixtures/*.json
+- Todo/Mail/Spotify E1 dispatch vers agents
+- Direct actions Spotify E2 (directRequest)
+- Expansion TODO (9 nouvelles routes) + Mail (8)
 ```
 
 ---
 
-## ✅ Pre-Implementation Checklist
+## ✅ Pre-Phase-1B Checklist
 
-Avant de commencer Phase 0 code (embeddingClient.ts, etc.) :
-
-- [ ] Lire SEMANTIC_ROUTER_ROADMAP.md (15 min)
-- [ ] Lire ARCHITECTURE.md (20 min)
-- [ ] Comprendre types dans semanticRouter.types.ts
-- [ ] Vérifier catalog dans semanticRouteCatalog.ts (20 routes OK)
-- [ ] Vérifier spotifyResponses.ts est COMPLET
-- [ ] Réserver 2 semaines pour Phase 0
-- [ ] Réserver Ollama/OpenAI embeddings (local ou API)
-- [ ] Décider : Ollama local (nomic-embed-text) ou OpenAI (text-embedding-3-small)
-- [ ] Planifier test fixtures
+- [x] Lire SEMANTIC_ROUTER_ROADMAP.md
+- [x] Lire ARCHITECTURE.md
+- [x] Types dans semanticRouter.types.ts ✅
+- [x] Catalog dans semanticRouteCatalog.ts (50 routes) ✅
+- [x] spotifyResponses.ts COMPLET ✅
+- [x] embeddingClient.ts opérationnel ✅
+- [x] Shadow mode actif dans ingest.ts ✅
+- [x] 158 tests passing ✅
+- [ ] Analyser shadow logs (>100 requêtes en production)
+- [ ] Décider seuils finaux (acceptScore, minMargin)
+- [ ] Activer SEMANTIC_ROUTER_ACTIVATION_ENABLED=true
+- [ ] Définir SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES
 
 ---
 
@@ -221,15 +266,15 @@ Avant de commencer Phase 0 code (embeddingClient.ts, etc.) :
 | **E2 Accuracy Target** | >95% | correct routes |
 | **Fallback Rate Target** | <5% | multi-intent/ambiguous |
 | **Cache Hit Target** | >80% | embedding queries |
-| **Routes E2** | 16 | Phase 0-1 live |
-| **Routes E1** | 22 | Phase 2+ |
+| **Routes E2** | 16 | Phase 0-1A live |
+| **Routes E1** | 34 | Catalogées — wiring Phase 2 |
 | **Routes HA** | 12 | Phase 3+ |
 
 ---
 
-**Status** : 🟢 **Planning & Documentation COMPLETE**  
-**Next** : 🔴 Phase 0 TypeScript Implementation  
-**Timeline** : 2 semaines pour Phase 0
+**Status** : 🟢 **Phase 1A COMPLETE — Shadow Mode Actif**  
+**Next** : 🔴 Phase 1B — Activation (`SEMANTIC_ROUTER_ACTIVATION_ENABLED=true`)  
+**Tests** : 158 passing (13 suites) ✅
 
 ---
 

@@ -1,6 +1,6 @@
 # Semantic Router Implementation Roadmap
 
-**Statut**: Planning  
+**Statut**: ✅ Phase 1C (E2 live Search) Complète — Pré-Phase 2 consolidée  
 **Dernière mise à jour**: Mai 2026  
 **Auteur**: AI-assisted architecture
 
@@ -80,21 +80,20 @@ multiIntent threshold = 0.5
 **E1** (3 routes) :
 - `search.deep.analysis` | `history` | `comparison`
 
-### To Do
+### Todo (6+9 routes — 15 total E1)
 
-**E1** (6 routes au demarrage) :
+**E1** :
 - `todo.list_tasks` | `today` | `tomorrow` | `this_week` | `overdue` | `list_lists`
+- `todo.add_task` | `complete_task` | `delete_task` | `update_task`
+- `todo.create_list` | `delete_list`
+- `todo.add_checklist_item` | `complete_checklist_item` | `delete_checklist_item`
 
-**E1** (9 routes) :
-- `todo.add_task` | `complete_task` | `delete_task` | `update_task` | `create_list` | `delete_list` | `checklist_add/complete/delete`
+### Mail (2+8 routes — 10 total E1)
 
-### Mail
-
-**E1** (2 routes au demarrage) :
+**E1** :
 - `mail.list_inbox` | `list_inbox.unread`
-
-**E1** (8 routes) :
-- `mail.search_emails` | `send_email` | `reply_email` | `forward_email` | `mark_read` | `mark_unread` | `trash_email` | `flag_email`
+- `mail.search_emails` | `send_email` | `reply_email` | `forward_email`
+- `mail.mark_read` | `mark_unread` | `trash_email` | `flag_email`
 
 ### Home Assistant Executors
 
@@ -108,54 +107,84 @@ multiIntent threshold = 0.5
 
 ## 🚀 Phases d'implémentation
 
-### Phase 0 : Fondations (Semaine 1-2, 6 commits)
+### Phase 0 : Fondations (Semaine 1-2) ✅ COMPLET
 
 **Commits** :
 1. `semanticRouter.types.ts` — types TypeScript
-2. `semanticRouteCatalog.ts` — catalogue aligné runtime (`directRequest`, Weather E2, Todo/Mail E1)
-3. `embeddingClient.ts` — client Ollama/OpenAI
-4. `routeScoring.ts` — calcul similarity + scoring
-5. `routeDecision.ts` — logique d'acceptation/rejet
+2. `semanticRouteCatalog.ts` — catalogue aligné runtime (`directRequest`, Weather E2, Todo/Mail E1, 50 routes)
+3. `embeddingClient.ts` — client OpenAI uniquement (LRU cache 512)
+4. `routeScoring.ts` — calcul similarity + scoring (centroid par route)
+5. `routeDecision.ts` — logique d'acceptation/rejet + multi-intent check
 6. `semanticRouter.ts` — orchestration principale + conversion RouterResult
 
 **Fichiers déterministes** :
-- `src/routing/deterministic/spotifyResponses.ts`
-- `src/routing/deterministic/searchResponses.ts`
-- `src/routing/deterministic/todoResponses.ts`
-- `src/routing/deterministic/mailResponses.ts`
-- `src/routing/deterministic/haResponses.ts`
+- `src/routing/deterministic/spotifyResponses.ts` ✅ COMPLET (32 variantes)
+- `src/routing/deterministic/searchResponses.ts` ⏳ STUBS
+- `src/routing/deterministic/todoResponses.ts` ⏳ STUBS
+- `src/routing/deterministic/mailResponses.ts` ⏳ STUBS
 
 **Sorties** :
 - Infrastructure de routage sémantique fonctionnelle
-- Routes E2 testables + routes E1 de base Todo/Mail
+- 50 routes catalogées (16 E2 + 34 E1)
+- 158 tests passing
 
 ---
 
-### Phase 1 : Intégration & E2 (Semaine 3-4, 5 commits)
+### Phase 1A : Integration Shadow Mode (Semaine 3-4) ✅ COMPLET
 
 **Commits** :
 7. Config env + `src/env.ts` → `SEMANTIC_ROUTER_*` vars
-8. Integration `src/routes/ingest.ts` → appel semantic router avant LLM router
-9. E2 Catalog complete (Spotify + Search + Weather local)
-10. Logging & metrics
-11. Phase 1 test fixtures + tests
+8. Integration `src/routes/ingest.ts` → appel `trySemanticRouter` avant LLM router (shadow mode)
+9. `routeDispatcher.ts` → dispatch search E2 live routes
+10. `e1RouteDispatcher.ts` → dispatch E1 vers agents/planners
+11. `haAgentRouter.ts` → compat shim + `parseAgentMap()`
+12. Phase 1A test suites (semanticRouter.phase1a, e1RouteDispatcher, e1Catalog, routeDispatcher.search)
 
 **Sorties** :
-- Semantic router actif en production
-- E2 routes live → 20 actions ultra-rapides
-- Logs détaillés pour tuning
+- Shadow mode actif (evaluation seulement, pas d'override LLM)
+- Logs `semantic_router_*` disponibles pour tuning
+- 158 tests passing (13 suites)
 
 ---
 
-### Phase 2 : E1 Agents & Expansion (Semaine 5-6, 6 commits)
+### Phase 1B : Activation Spotify+Weather E2 live ✅ COMPLET
 
 **Commits** :
-12. E1 Catalog (22 routes)
-13. `routeDispatcher.ts` → acheminer vers agents
-14. Direct actions Spotify E2 (via `directRequest`)
-15. Direct actions Search E2 + evolution Todo/Mail vers E2 quand direct readers prets
-16. E1 Catalog complet + wiring agents
-17. Phase 2 test fixtures
+13. `SEMANTIC_ROUTER_ACTIVATION_ENABLED=true` + `SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES` Spotify+Weather
+14. Spotify E2 direct executor via `toSemanticActivationTarget` + `HA_AGENT_MAP`
+15. Weather E2 direct executor (local HA states)
+
+---
+
+### Phase 1C : E2 live Search ✅ COMPLET
+
+**Commits** :
+16. Search E2 live routes (`search.news.*`, `search.web.*`) via `dispatchAcceptedSearchE2Route`
+17. SSE ack avant dispatch Search E2 live
+18. Semantic router classifie sur `text` brut (pas `assistantInputText` enrichi)
+
+---
+
+### Pré-Phase 2 : Consolidation ✅ COMPLET
+
+**Commits** :
+19. OpenAI-only embeddings (suppression Ollama, `SEMANTIC_ROUTER_EMBEDDING_MODEL`)
+20. Doc alignée sur stade réel (Phase 1C, 50 routes E2+E1)
+
+---
+
+### Phase 2A : E1 live progressif 🔴 NEXT
+
+**Priorité recommandée** (sans écriture destructive) :
+- `search.deep.*` (3 routes) → agent `search.deep` via Perplexity
+- `spotify.search` | `spotify.search_and_play` | `spotify.transfer` → Spotify planner
+
+**Ne pas activer** encore : `todo.*` (écriture), `mail.*` (écriture), `mail.send_email`
+
+**Commits** :
+21. Wire E1 Search Deep → `e1RouteDispatcher` → `dispatchE1Route` → `callSearchAgent`
+22. Wire E1 Spotify → `e1RouteDispatcher` → `planSpotifyActionFromTextWithOpenAi`
+23. Phase 2A test fixtures
 
 **Sorties** :
 - 22 routes E1 disponibles
@@ -279,7 +308,7 @@ Route embedding:   [0.15, 0.30, ..., 0.48]
 Score: 0.91
 ```
 
-Répeté pour tous les 20+ routes, trié par score.
+Répété pour tous les 50 routes, trié par score.
 
 ### 3. **routeDecision.ts**
 
@@ -337,12 +366,13 @@ async function executeSpotifyDirectAction(action, text, env) {
 ### Tests
 
 ```bash
-npm run test:semantic-router
+npm test -- --runInBand
 
-# Fixtures pour chaque phase
-tests/routing/semanticRouter.phase1.fixtures.json
-tests/routing/semanticRouter.phase2.fixtures.json
-tests/routing/semanticRouter.phase3.fixtures.json
+# Suites Phase 1A
+tests/semanticRouter.phase1a.test.ts
+tests/routing/e1RouteDispatcher.test.ts
+tests/routing/e1Catalog.test.ts
+tests/routing/routeDispatcher.search.test.ts
 ```
 
 ---
@@ -400,14 +430,19 @@ tests/routing/semanticRouter.phase3.fixtures.json
 
 ## 🎯 Checklist avant Go Live
 
-- [ ] Phase 0 : types + infra testée
-- [ ] Phase 1 : routes E2 live + <50ms latency
-- [ ] Logging : semantic_router_* events capturées
-- [ ] Fallback LLM : toujours fonctionnel
-- [ ] Tests : >90% pass rate
-- [ ] Deterministic responses : à jour et variées
-- [ ] Docs : ARCHITECTURE.md complet
+- [x] Phase 0 : types + catalog + Spotify responses
+- [x] Phase 1A : embeddingClient, routeScoring, routeDecision, semanticRouter
+- [x] Phase 1A : routeDispatcher (search E2), e1RouteDispatcher (E1)
+- [x] Phase 1A : integration ingest.ts (shadow mode)
+- [x] Logging : semantic_router_* events capturées
+- [x] Fallback LLM : toujours fonctionnel
+- [x] Tests : 158 passing (13 suites)
+- [ ] Phase 1B : analyser shadow logs pour calibrer seuils
+- [ ] Phase 1B : activer SEMANTIC_ROUTER_ACTIVATION_ENABLED=true
+- [ ] Phase 1B : valider latency p50 < 50ms en production
+- [ ] Phase 1B : valider accuracy > 95% sur routes allowlistées
+- [ ] Phase 2 : wiring E1 agents (Todo/Mail/Spotify)
 
 ---
 
-**Prêt pour Phase 0 ?** → [ARCHITECTURE.md](./ARCHITECTURE.md)
+**Suite** → Analyser shadow mode logs, puis activer [Phase 1B](./src/routing/INDEX.md)

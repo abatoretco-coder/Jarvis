@@ -128,13 +128,12 @@ const envSchema = z
   SPOTIFY_WEBAPI_PRE_REFRESH_WINDOW_MS: numberFromEnv.default('1800000'),
 
   // ── Semantic Router (Phase 1A — shadow mode) ────────────────────────────────
-  // When enabled, the semantic router evaluates every request and logs its decision,
-  // but does NOT override the LLM router (shadow_mode=true in Phase 1A).
+  // When enabled, the semantic router classifies every request via OpenAI embeddings.
+  // shadow_mode=true → log only, no LLM override.
   SEMANTIC_ROUTER_ENABLED: booleanFromEnv.default('false'),
   SEMANTIC_ROUTER_SHADOW_MODE: booleanFromEnv.default('true'),
-  SEMANTIC_ROUTER_PROVIDER: z.enum(['ollama', 'openai']).default('ollama'),
-  SEMANTIC_ROUTER_BASE_URL: z.string().url().default('http://localhost:11434'),
-  SEMANTIC_ROUTER_MODEL: z.string().default('nomic-embed-text'),
+  // OpenAI embedding model used by the semantic router.
+  SEMANTIC_ROUTER_EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
   SEMANTIC_ROUTER_ACCEPT_SCORE: z.coerce.number().min(0.5).max(0.99).default(0.84),
   SEMANTIC_ROUTER_MIN_MARGIN: z.coerce.number().min(0.01).max(0.30).default(0.08),
   SEMANTIC_ROUTER_TIMEOUT_MS: numberFromEnv.default('5000'),

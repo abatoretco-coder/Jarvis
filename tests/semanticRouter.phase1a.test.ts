@@ -200,9 +200,8 @@ import { trySemanticRouter } from '../src/routing/semanticRouter';
 const mockedGetEmbedding = getEmbedding as jest.MockedFunction<typeof getEmbedding>;
 
 const MOCK_EMBEDDING_CONFIG = {
-  provider: 'ollama' as const,
-  baseUrl: 'http://localhost:11434',
-  model: 'nomic-embed-text',
+  baseUrl: 'https://api.openai.com/v1',
+  model: 'text-embedding-3-small',
 };
 
 describe('trySemanticRouter', () => {
@@ -233,7 +232,7 @@ describe('trySemanticRouter', () => {
     mockedGetEmbedding.mockImplementation(async (text: string) => {
       // User query → returns PAUSE_VECTOR
       if (text === 'pause la musique') {
-        return { vector: PAUSE_VECTOR, cached: false, provider: 'ollama', model: 'nomic-embed-text', elapsedMs: 5 };
+        return { vector: PAUSE_VECTOR, cached: false, model: 'text-embedding-3-small', elapsedMs: 5 };
       }
       // Spotify pause examples → PAUSE_VECTOR (high match)
       if (
@@ -243,10 +242,10 @@ describe('trySemanticRouter', () => {
         text === 'coupe la musique' ||
         text === 'mets en pause'
       ) {
-        return { vector: PAUSE_VECTOR, cached: false, provider: 'ollama', model: 'nomic-embed-text', elapsedMs: 5 };
+        return { vector: PAUSE_VECTOR, cached: false, model: 'text-embedding-3-small', elapsedMs: 5 };
       }
       // All other examples → OTHER_VECTOR (low match)
-      return { vector: OTHER_VECTOR, cached: false, provider: 'ollama', model: 'nomic-embed-text', elapsedMs: 5 };
+      return { vector: OTHER_VECTOR, cached: false, model: 'text-embedding-3-small', elapsedMs: 5 };
     });
 
     const result = await trySemanticRouter({
@@ -271,8 +270,7 @@ describe('trySemanticRouter', () => {
     mockedGetEmbedding.mockResolvedValue({
       vector: SIMILAR_VECTOR,
       cached: false,
-      provider: 'ollama',
-      model: 'nomic-embed-text',
+      model: 'text-embedding-3-small',
       elapsedMs: 5,
     });
 
@@ -335,8 +333,7 @@ describe('Phase 1A fixtures — acceptance criteria', () => {
         return {
           vector: isMatch ? matchVector : noMatchVector,
           cached: false,
-          provider: 'ollama' as const,
-          model: 'nomic-embed-text',
+          model: 'text-embedding-3-small',
           elapsedMs: 1,
         };
       });
@@ -363,8 +360,7 @@ describe('Phase 1A fixtures — acceptance criteria', () => {
       mockedGetEmbedding.mockResolvedValue({
         vector: someVector,
         cached: false,
-        provider: 'ollama' as const,
-        model: 'nomic-embed-text',
+        model: 'text-embedding-3-small',
         elapsedMs: 1,
       });
 

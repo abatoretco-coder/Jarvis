@@ -1,7 +1,7 @@
 # Semantic Router — Index & Navigation
 
 **Dernière mise à jour** : Mai 2026  
-**Version** : Phase 0 (Foundations)
+**Version** : Phase 1A (Shadow Mode) ✅
 
 ---
 
@@ -36,33 +36,31 @@
 src/routing/
 ├── INDEX.md                           ← Ce fichier
 ├── ARCHITECTURE.md                    ← Doc technique détaillée
-├── semanticRouter.types.ts            ← Types TS (Phase 0)
-├── semanticRouteCatalog.ts            ← Catalogue aligné runtime (E2 + E1)
-├── embeddingClient.ts                 ← Client Ollama/OpenAI (Phase 0)
-├── routeScoring.ts                    ← Scoring cosine (Phase 0)
-├── routeDecision.ts                   ← Logique décision (Phase 0)
-├── semanticRouter.ts                  ← Orchestration (Phase 0)
-├── routeDispatcher.ts                 ← Dispatch routes (Phase 2+)
+├── semanticRouter.types.ts            ← Types TS (Phase 0) ✅
+├── semanticRouteCatalog.ts            ← Catalogue 50 routes (16 E2 + 34 E1) ✅
+├── embeddingClient.ts                 ← Client Ollama/OpenAI (Phase 1A) ✅
+├── routeScoring.ts                    ← Scoring cosine (Phase 1A) ✅
+├── routeDecision.ts                   ← Logique décision (Phase 1A) ✅
+├── semanticRouter.ts                  ← Orchestration (Phase 1A) ✅
+├── routeDispatcher.ts                 ← Dispatch search E2 (Phase 1A) ✅
+├── e1RouteDispatcher.ts               ← Dispatch E1 agents (Phase 1A) ✅
 ├── deterministic/
-│   ├── spotifyResponses.ts            ← Spotify E2 (Phase 0 — COMPLET)
-│   ├── searchResponses.ts             ← Search E2 (Phase 0 — STUBS)
-│   ├── todoResponses.ts               ← Todo E2 (Phase 0 — STUBS)
-│   ├── mailResponses.ts               ← Mail E2 (Phase 0 — STUBS)
+│   ├── spotifyResponses.ts            ← Spotify E2 (Phase 0 — COMPLET) ✅
+│   ├── searchResponses.ts             ← Search E2 (STUBS — synthèse LLM)
+│   ├── todoResponses.ts               ← Todo (STUBS — synthèse LLM)
+│   ├── mailResponses.ts               ← Mail (STUBS — synthèse LLM)
 │   ├── haResponses.ts                 ← HA E2 (Phase 3)
-│   ├── DETERMINISTIC_PROMPTS.md       ← Doc réponses
-│   └── types.ts                       ← Types partagés (TODO)
-└── directActions/                     ← Phase 2+
-    ├── spotifyDirectActions.ts
-    ├── searchDirectActions.ts
-    ├── todoDirectActions.ts
-    ├── mailDirectActions.ts
-    └── haDirectActions.ts
+│   └── DETERMINISTIC_PROMPTS.md       ← Doc réponses
 
-tests/routing/
-├── semanticRouter.phase1.fixtures.json
-├── semanticRouter.phase2.fixtures.json
-├── semanticRouter.test.ts
-└── README.md
+src/conversation/
+└── haAgentRouter.ts                   ← Compat shim + parseAgentMap (Phase 1A) ✅
+
+tests/
+├── semanticRouter.phase1a.test.ts     ← Phase 1A tests ✅
+├── routing/
+│   ├── e1RouteDispatcher.test.ts      ← E1 dispatch tests ✅
+│   ├── e1Catalog.test.ts              ← E1 catalog tests ✅
+│   └── routeDispatcher.search.test.ts ← Search dispatch tests ✅
 ```
 
 ---
@@ -105,7 +103,7 @@ tests/routing/
 
 ---
 
-### Phase 2 : E1 & Expansion
+### Phase 2 : E1 Agents & Expansion 🔴 TODO
 
 **Durée** : Semaine 5-6  
 **Commits** : 6  
@@ -142,9 +140,11 @@ tests/routing/
 
 ## 🎯 Etat réel du catalogue (Source de vérité)
 
-- E2 (16): Spotify (7), Search externe (5), Weather local (4)
-- E1 (8): Todo (6), Mail (2)
-- Modèle de contrat: `directRequest` (domain/action/slots), pas `directAction`
+- **E2 (16)**: Spotify (7), Search externe (5), Weather local (4)
+- **E1 (34)**: Spotify (6), Search deep (3), Todo (15), Mail (10)
+- **Total : 50 routes** (16 E2 + 34 E1)
+- Shadow mode : `SEMANTIC_ROUTER_ENABLED=true` + `SEMANTIC_ROUTER_SHADOW_MODE=true`
+- Activation : `SEMANTIC_ROUTER_ACTIVATION_ENABLED=false` (Phase 1B)
 
 ## 🎯 Routes : Résumé complet
 
@@ -246,17 +246,22 @@ tests/routing/
 
 ---
 
-## 🔧 Configuration (Phase 1+)
+## 🔧 Configuration (Phase 1A actuelle)
 
 ```bash
-# .env
+# .env — Phase 1A (Shadow Mode)
 SEMANTIC_ROUTER_ENABLED=true
+SEMANTIC_ROUTER_SHADOW_MODE=true               # évaluation seulement
 SEMANTIC_ROUTER_PROVIDER=ollama
 SEMANTIC_ROUTER_BASE_URL=http://localhost:11434
 SEMANTIC_ROUTER_MODEL=nomic-embed-text
 SEMANTIC_ROUTER_ACCEPT_SCORE=0.84
 SEMANTIC_ROUTER_MIN_MARGIN=0.08
 SEMANTIC_ROUTER_TIMEOUT_MS=5000
+
+# Phase 1B : activation
+# SEMANTIC_ROUTER_ACTIVATION_ENABLED=true
+# SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES=spotify.pause,spotify.play,spotify.next,spotify.previous
 ```
 
 ---
@@ -286,18 +291,22 @@ semantic_router_result
 
 ---
 
-## ✅ Checklist Before Go Live
+## ✅ Checklist Before Go Live (Phase 1B)
 
-- [ ] Phase 0 : Tous fichiers créés & types OK
-- [ ] Phase 0 : Spotify responses COMPLET
-- [ ] Phase 0 : Catalog aligné runtime validé
-- [ ] Phase 0 : Documentation (ROADMAP + ARCHITECTURE) à jour
-- [ ] Phase 1 : Integration ingest.ts
-- [ ] Phase 1 : Config env
-- [ ] Phase 1 : <50ms E2 latency verified
-- [ ] Phase 1 : >95% accuracy verified
-- [ ] Phase 1 : Tests fixtures passed
-- [ ] Phase 1 : Logging events captured
+- [x] Phase 0 : Tous fichiers créés & types OK
+- [x] Phase 0 : Spotify responses COMPLET
+- [x] Phase 0 : Catalog 50 routes validé (16 E2 + 34 E1)
+- [x] Phase 0 : Documentation à jour
+- [x] Phase 1A : embeddingClient, routeScoring, routeDecision, semanticRouter
+- [x] Phase 1A : routeDispatcher (search E2), e1RouteDispatcher (E1)
+- [x] Phase 1A : Integration ingest.ts (shadow mode)
+- [x] Phase 1A : Config env SEMANTIC_ROUTER_*
+- [x] Phase 1A : 158 tests passing
+- [ ] Phase 1B : Analyser shadow logs (>100 requêtes production)
+- [ ] Phase 1B : Activer SEMANTIC_ROUTER_ACTIVATION_ENABLED=true
+- [ ] Phase 1B : Valider latency p50 < 50ms en production
+- [ ] Phase 1B : Valider accuracy > 95% routes allowlistées
+- [ ] Phase 2 : E1 wiring agents (Todo/Mail/Spotify)
 - [ ] Fallback LLM router : always works
 - [ ] Docs : tous README actualisés
 

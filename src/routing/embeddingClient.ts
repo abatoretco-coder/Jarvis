@@ -1,17 +1,15 @@
 /**
- * embeddingClient.ts — Embedding vector client
+ * embeddingClient.ts � Embedding vector client (OpenAI only)
  *
- * Supports Ollama (local) and OpenAI (cloud) embedding providers.
+ * Calls the OpenAI embeddings API.
  * Includes a simple in-memory LRU cache to avoid redundant API calls.
- *
- * Phase 1A: used by the Semantic Router in shadow mode.
  */
 
 import type { EmbeddingClientConfig } from './semanticRouter.types';
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // LRU Cache (simple bounded map, FIFO eviction)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 const CACHE_MAX = 512;
 const embeddingCache = new Map<string, number[]>();
@@ -33,14 +31,13 @@ export function clearEmbeddingCache(): void {
   embeddingCache.clear();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Core embedding fetch
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export type EmbeddingResult = {
   vector: number[];
   cached: boolean;
-  provider: string;
   model: string;
   elapsedMs: number;
 };
@@ -49,10 +46,10 @@ export async function getEmbedding(
   text: string,
   config: EmbeddingClientConfig,
 ): Promise<EmbeddingResult> {
-  const cacheKey = `${config.provider}:${config.model}:${text}`;
+  const cacheKey = `${config.model}:${text}`;
   const cached = cacheGet(cacheKey);
   if (cached) {
-    return { vector: cached, cached: true, provider: config.provider, model: config.model, elapsedMs: 0 };
+    return { vector: cached, cached: true, model: config.model, elapsedMs: 0 };
   }
 
   const t0 = Date.now();
@@ -61,19 +58,11 @@ export async function getEmbedding(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    let vector: number[];
-
-    if (config.provider === 'ollama') {
-      vector = await fetchOllamaEmbedding(text, config, controller.signal);
-    } else {
-      vector = await fetchOpenAiEmbedding(text, config, controller.signal);
-    }
-
+    const vector = await fetchOpenAiEmbedding(text, config, controller.signal);
     cacheSet(cacheKey, vector);
     return {
       vector,
       cached: false,
-      provider: config.provider,
       model: config.model,
       elapsedMs: Date.now() - t0,
     };
@@ -82,39 +71,9 @@ export async function getEmbedding(
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Ollama provider
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function fetchOllamaEmbedding(
-  text: string,
-  config: EmbeddingClientConfig,
-  signal: AbortSignal,
-): Promise<number[]> {
-  const base = config.baseUrl.replace(/\/$/, '');
-  const response = await fetch(`${base}/api/embeddings`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: config.model, prompt: text }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`embedding_ollama_http_${response.status}: ${body.slice(0, 200)}`);
-  }
-
-  const data = (await response.json()) as { embedding?: number[] };
-  const vector = data.embedding;
-  if (!Array.isArray(vector) || vector.length === 0) {
-    throw new Error('embedding_ollama_empty_vector');
-  }
-  return vector;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // OpenAI provider
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 async function fetchOpenAiEmbedding(
   text: string,

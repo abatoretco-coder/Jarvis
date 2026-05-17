@@ -732,14 +732,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (deps.env.SEMANTIC_ROUTER_ENABLED) {
       const embeddingCfg: EmbeddingClientConfig = {
-        provider: deps.env.SEMANTIC_ROUTER_PROVIDER,
-        baseUrl: deps.env.SEMANTIC_ROUTER_BASE_URL,
-        model: deps.env.SEMANTIC_ROUTER_MODEL,
+        baseUrl: deps.env.OPENAI_BASE_URL,
+        model: deps.env.SEMANTIC_ROUTER_EMBEDDING_MODEL,
         timeoutMs: deps.env.SEMANTIC_ROUTER_TIMEOUT_MS,
-        apiKey: deps.env.SEMANTIC_ROUTER_PROVIDER === 'openai' ? deps.env.OPENAI_API_KEY : undefined,
+        apiKey: deps.env.OPENAI_API_KEY,
       };
       const semanticInput: SemanticRouterInput = {
-        userText: assistantInputText,
+        userText: text,
         embeddingConfig: embeddingCfg,
         options: {
           acceptScore: deps.env.SEMANTIC_ROUTER_ACCEPT_SCORE,
@@ -752,7 +751,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         context: { threadId, requestId },
       };
 
-      app.log.info({ threadId, requestId, text_len: assistantInputText.length }, 'semantic_router_start');
+      app.log.info({ threadId, requestId, text_len: text.length }, 'semantic_router_start');
       if (semanticActivationEnabled) {
         try {
           const semResult = await trySemanticRouter(semanticInput);
@@ -792,6 +791,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   },
                   'semantic_router_search_e2_live_attempt',
                 );
+                if (sseStream !== null) {
+                  const ackMsg = getIngestAckText([routeKey]);
+                  if (ackMsg) pushSseAck(ackMsg);
+                }
                 try {
                   const handledSearchResult = await dispatchAcceptedSearchE2Route({
                     route: semResult.matchedRoute,

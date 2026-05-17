@@ -48,7 +48,7 @@ async function getRouteEmbedding(
   route: SemanticRouteDefinition,
   config: EmbeddingClientConfig,
 ): Promise<number[]> {
-  const cacheKey = `${config.provider}:${config.model}:${route.key}`;
+  const cacheKey = `${config.model}:${route.key}`;
   const cached = routeEmbeddingCache.get(cacheKey);
   if (cached) return cached;
 
@@ -89,7 +89,7 @@ export async function scoreRoutes(
   config: EmbeddingClientConfig,
 ): Promise<RouteScoringResult> {
   const allCached = routes.every((r) =>
-    routeEmbeddingCache.has(`${config.provider}:${config.model}:${r.key}`)
+    routeEmbeddingCache.has(`${config.model}:${r.key}`)
   );
 
   const scored: ScoredRoute[] = await Promise.all(

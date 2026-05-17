@@ -179,27 +179,16 @@ export type SemanticRouteResult = {
 // Embedding Client Config
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type EmbeddingProvider = 'ollama' | 'openai';
-
 export type EmbeddingClientConfig = {
   /**
-   * Provider d'embeddings.
-   * 'ollama' : local, ~40-50ms latency
-   * 'openai' : cloud, ~100-150ms latency
-   */
-  provider: EmbeddingProvider;
-
-  /**
-   * URL de base du serveur.
-   * Ollama: "http://localhost:11434"
-   * OpenAI: "https://api.openai.com/v1"
+  * URL de base OpenAI (OPENAI_BASE_URL).
+  * Example: "https://api.openai.com/v1"
    */
   baseUrl: string;
 
   /**
-   * Modèle d'embedding.
-   * Ollama:  "nomic-embed-text" (384 dims)
-   * OpenAI:  "text-embedding-3-small" (1536 dims)
+  * Modèle d'embedding OpenAI.
+  * Example: "text-embedding-3-small" (1536 dims)
    */
   model: string;
 
@@ -210,8 +199,7 @@ export type EmbeddingClientConfig = {
   timeoutMs?: number;
 
   /**
-   * Clé API (pour OpenAI).
-   * Ignorée pour Ollama.
+   * Clé API OpenAI (OPENAI_API_KEY).
    */
   apiKey?: string;
 };
