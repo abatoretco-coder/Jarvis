@@ -224,7 +224,7 @@ describe('/v1/ingest integration', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-weather-2',
-        text: 'Comment je m habille demain ?',
+        text: 'Il va pleuvoir demain ?',
         clientContext: { channel: 'desktop' },
       },
     });
@@ -234,6 +234,61 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).toContain('veste imperméable');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
     expect((global.fetch as jest.Mock)).toHaveBeenCalledTimes(1);
+  });
+
+  it('structured spotify uses effective thread id and keeps conversation window active', async () => {
+    const calls: Array<{ conversation_id?: string }> = [];
+    (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { conversation_id?: string };
+      calls.push({ conversation_id: body.conversation_id });
+      return haSpeechResponse('Réponse HA après Spotify');
+    }) as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      getNowPlaying: async () => ({ ok: false, status: 204, error: 'no_active_playback' }),
+      scheduleSituationRefresh: jest.fn(),
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const spotify = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-1',
+        domain: 'spotify',
+        action: 'pause',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(spotify.statusCode).toBe(200);
+    const spotifyPayload = spotify.json() as { threadId: string; responseText: string };
+    expect(spotifyPayload.threadId).toBe('thread-spotify-1');
+    expect(spotifyPayload.responseText).toContain('Rien ne joue actuellement');
+
+    const afterSpotify = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-after-spotify',
+        text: 'bonjour',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(afterSpotify.statusCode).toBe(200);
+    const afterSpotifyPayload = afterSpotify.json() as { threadId: string };
+    expect(afterSpotifyPayload.threadId).toBe('thread-spotify-1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.conversation_id).toBe('thread-spotify-1');
   });
 
   it('search external weather: routes to search.news without HA fallback', async () => {

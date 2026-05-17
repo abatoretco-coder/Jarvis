@@ -1,82 +1,108 @@
-/**
- * Deterministic weather reply synthesis.
- *
- * Combines matchers + snapshot data to produce zero-LLM French TTS-friendly
- * responses for simple current-state weather questions.
- * Returns null for any question that requires LLM synthesis (forecasts, complex).
- */
-
-export {
-  isTemperatureQuestion,
-  isHumidityQuestion,
-  isPrecipitationQuestion,
-  isGeneralWeatherQuestion,
-  isDeterministicWeatherQuestion,
-} from './deterministicWeatherMatchers';
-
-export { isClearlyLocalWeather, isClearlyExternalWeather } from './weatherScope';
-
-import { isDeterministicWeatherQuestion, isTemperatureQuestion, isHumidityQuestion, isPrecipitationQuestion, isGeneralWeatherQuestion } from './deterministicWeatherMatchers';
 import type { WeatherSnapshot } from './weatherSnapshot';
 
-type MinLogger = {
-  info: (obj: Record<string, unknown>, msg: string) => void;
-  warn: (obj: Record<string, unknown>, msg: string) => void;
-};
+export function isTemperatureQuestion(text: string): boolean {
+  return /temp(é?rature)?\b|fait.*combi|combien.*degr|combien.*il.*fait/i.test(text);
+}
 
+export function isHumidityQuestion(text: string): boolean {
+  return /humidité|hygrométrie/i.test(text);
+}
+
+export function isPrecipitationQuestion(text: string): boolean {
+  return /pleu|plu|rain|précipitation|goutte|mouillé|averse/i.test(text);
+}
+
+export function isGeneralWeatherQuestion(text: string): boolean {
+  return /quel.*temps|état.*météo|météo|condition|dehors/i.test(text);
+}
+
+export function isDeterministicWeatherQuestion(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const hasCurrentIndicator = /actuel|maintenant|en ce moment|ici|à la maison|du moment|dehors/i.test(normalized);
+  const isComplexQuery = /demain|après-demain|semaine|prévision|prévisions|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|va\s+pleuvoir|fera|pleuvra|dans|quand|comment.*habill/i.test(normalized);
+
+  if (isComplexQuery) return false;
+
+  return (
+    isTemperatureQuestion(normalized)
+    || isHumidityQuestion(normalized)
+    || isPrecipitationQuestion(normalized)
+    || (isGeneralWeatherQuestion(normalized) && (hasCurrentIndicator || !isComplexQuery))
+  );
+}
+
+export function isClearlyLocalWeather(text: string): boolean {
+  const localIndicators = /chez.*moi|maison|local|actuellement|maintenant|ici|salon|cuisine|chambre|du moment/i;
+  const externalLocations = /paris|lyon|marseille|london|tokyo|france|italie|allemagne|espagne|florence|venise|rome/i;
+
+  return localIndicators.test(text) || !externalLocations.test(text);
+}
+
+export function isClearlyExternalWeather(text: string): boolean {
+  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome|ville|externe|ailleurs|autre/i;
+  return externalLocations.test(text);
+}
+
+/**
+ * Synthesizes a deterministic weather response for trivial requests.
+ * Returns null if the request is not a simple/deterministic weather question.
+ */
 export function synthesizeDeterministicWeatherReply(params: {
   userText: string;
   weather: WeatherSnapshot;
-  log?: MinLogger;
+  log?: { info: (obj: Record<string, unknown>, msg: string) => void };
 }): string | null {
-  const { userText, weather } = params;
+  const text = params.userText.toLowerCase().trim();
+  const snap = params.weather.current;
 
-  if (!isDeterministicWeatherQuestion(userText)) return null;
-  if (!weather.current) return null;
+  if (!isDeterministicWeatherQuestion(text)) return null;
+  if (!snap) return null;
 
-  const { condition, temperature, humidity, precipitation } = weather.current;
-  const location = weather.location || 'ici';
-
-  // Humidity question (check before general so 'humidité' doesn't match 'temps')
-  if (isHumidityQuestion(userText)) {
-    if (humidity === undefined) return null;
-    return `L'humidité est actuellement de ${Math.round(humidity)}%.`;
+  if (isTemperatureQuestion(text)) {
+    if (snap.temperature !== undefined) {
+      const temp = Math.round(snap.temperature);
+      params.log?.info({ temperature: temp }, 'weather_deterministic_temperature');
+      return `Il fait actuellement ${temp}°C.`;
+    }
   }
 
-  // Precipitation question
-  if (isPrecipitationQuestion(userText)) {
-    if (precipitation !== undefined) {
-      return `${Math.round(precipitation)}% de chance de pluie en ce moment.`;
+  if (isHumidityQuestion(text)) {
+    if (snap.humidity !== undefined) {
+      const humidity = Math.round(snap.humidity);
+      params.log?.info({ humidity }, 'weather_deterministic_humidity');
+      return `L'humidité est actuellement de ${humidity}%.`;
     }
-    // Fall back to condition-based answer
-    if (!condition) return null;
-    const cond = condition.toLowerCase();
-    if (['pluie', 'rain', 'averse', 'storm', 'orage', 'drizzle'].some((w) => cond.includes(w))) {
-      return 'Il pleut actuellement.';
-    }
-    if (['clear', 'ensoleillé', 'sunny', 'dégagé', 'degage'].some((w) => cond.includes(w))) {
-      return 'Il ne pleut pas actuellement.';
-    }
-    return 'Pas de pluie détectée en ce moment.';
   }
 
-  // Specific temperature question (e.g. "quelle température", "il fait combien")
-  // but NOT generic "quel temps" (which should go to general weather below).
-  // We disambiguate: if isGeneralWeatherQuestion also matches, treat it as a general question.
-  if (isTemperatureQuestion(userText) && !isGeneralWeatherQuestion(userText)) {
-    if (temperature === undefined) return null;
-    return `Il fait actuellement ${Math.round(temperature)}°C.`;
+  if (isPrecipitationQuestion(text)) {
+    if (snap.precipitation !== undefined && snap.precipitation > 0) {
+      const proba = Math.round(snap.precipitation);
+      params.log?.info({ precipitation: proba }, 'weather_deterministic_precipitation');
+      return `Il y a ${proba}% de chance de pluie actuellement.`;
+    }
+
+    if (snap.condition) {
+      const isRainy = /pluie|rain|averse|ondée/i.test(snap.condition);
+      const msg = isRainy
+        ? 'Il pleut actuellement.'
+        : 'Il ne pleut pas actuellement.';
+      params.log?.info({ condition: snap.condition }, 'weather_deterministic_condition_precipitation');
+      return msg;
+    }
   }
 
-  // General weather question (includes "quel temps", "météo", "dehors", etc.)
-  if (isGeneralWeatherQuestion(userText) || isTemperatureQuestion(userText)) {
-    if (temperature !== undefined) {
-      return `À ${location} il est ${condition} (${Math.round(temperature)}°C).`;
+  if (isGeneralWeatherQuestion(text)) {
+    let reply = `À ${snap.entityId.replace(/^weather\./, '')} `;
+    if (snap.condition) {
+      reply += `il est ${snap.condition}`;
     }
-    if (condition) {
-      return `À ${location} le temps est ${condition}.`;
+    if (snap.temperature !== undefined) {
+      const temp = Math.round(snap.temperature);
+      reply += ` (${temp}°C)`;
     }
-    return null;
+    reply += '.';
+    params.log?.info({ condition: snap.condition, temperature: snap.temperature }, 'weather_deterministic_general');
+    return reply;
   }
 
   return null;

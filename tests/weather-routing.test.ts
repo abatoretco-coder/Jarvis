@@ -308,6 +308,23 @@ describe('Weather Routing & Deterministic Responses', () => {
       expect(response).toBeNull();
     });
 
+    it('should return null for future forecast phrasings', () => {
+      const snapshot = mockSnapshot({ temperature: 18, precipitation: 30 });
+      const testCases = [
+        'Il va pleuvoir demain ?',
+        'Météo demain ?',
+        'Quel temps fera-t-il jeudi ?',
+      ];
+
+      for (const userText of testCases) {
+        const response = synthesizeDeterministicWeatherReply({
+          userText,
+          weather: snapshot,
+        });
+        expect(response).toBeNull();
+      }
+    });
+
     it('should return null if required data is missing', () => {
       const snapshot = mockSnapshot();
       snapshot.current!.temperature = undefined;
