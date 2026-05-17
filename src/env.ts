@@ -127,6 +127,24 @@ const envSchema = z
   SPOTIFY_WEBAPI_REFRESH_BLACKOUT_END: hhmmFromEnv.default('03:20'),
   SPOTIFY_WEBAPI_PRE_REFRESH_WINDOW_MS: numberFromEnv.default('1800000'),
 
+  // ── Semantic Router (Phase 1A — shadow mode) ────────────────────────────────
+  // When enabled, the semantic router evaluates every request and logs its decision,
+  // but does NOT override the LLM router (shadow_mode=true in Phase 1A).
+  SEMANTIC_ROUTER_ENABLED: booleanFromEnv.default('false'),
+  SEMANTIC_ROUTER_SHADOW_MODE: booleanFromEnv.default('true'),
+  SEMANTIC_ROUTER_PROVIDER: z.enum(['ollama', 'openai']).default('ollama'),
+  SEMANTIC_ROUTER_BASE_URL: z.string().url().default('http://localhost:11434'),
+  SEMANTIC_ROUTER_MODEL: z.string().default('nomic-embed-text'),
+  SEMANTIC_ROUTER_ACCEPT_SCORE: z.coerce.number().min(0.5).max(0.99).default(0.84),
+  SEMANTIC_ROUTER_MIN_MARGIN: z.coerce.number().min(0.01).max(0.30).default(0.08),
+  SEMANTIC_ROUTER_TIMEOUT_MS: numberFromEnv.default('5000'),
+  // Phase 1B: when true (and shadow mode=false), semantic accepted E2 routes can
+  // execute directly, but only if explicitly allowlisted.
+  SEMANTIC_ROUTER_ACTIVATION_ENABLED: booleanFromEnv.default('false'),
+  // Comma-separated route keys allowed for Phase 1B activation.
+  // Example: "spotify.pause,spotify.play,weather.current_temperature"
+  SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: optionalNonEmptyString,
+
   // General fallback HA conversation agent (used when router is disabled or returns no confident target).
   // Override to point to your custom general agent instead of the default openai_conversation.
   HA_AGENT_GENERAL: z.string().min(1).default('conversation.openai_conversation'),
@@ -247,5 +265,4 @@ export function loadEnv(rawEnv: NodeJS.ProcessEnv = process.env): Env {
   }
   return parsed.data;
 }
-
 

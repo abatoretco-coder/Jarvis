@@ -8,7 +8,14 @@ import { z } from 'zod';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
 import { enrichWithContextNote } from '../conversation/contextNote';
-import { routeUserRequest, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentResponses } from '../conversation/orchestratorRouter';
+import {
+  routeUserRequest,
+  parseAgentMap,
+  SPOTIFY_AGENT_ID,
+  synthesizeAgentResponses,
+  type RouterResult,
+  type RouterTarget,
+} from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
@@ -27,6 +34,9 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { trySemanticRouter } from '../routing/semanticRouter';
+import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
+import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
@@ -681,28 +691,273 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const recentMessages = routerEnabled ? recentMessages_ : [];
 
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
+    let assistantText: string | undefined;
 
     if (!routerEnabled) {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
     }
 
-    const routerPromise = routerEnabled
-      ? routeUserRequest({
-          text: assistantInputText,
-          agents: allAgentEntries,
-          summary: threadBefore.summary?.trim() || undefined,
-          recentMessages,
-          options: {
-            openAiApiKey: deps.env.OPENAI_API_KEY!,
-            openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-            model: deps.env.OPENAI_MODEL_ROUTER,
-            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
-            confidenceThreshold: threshold,
-            generalAgentId,
-            log: app.log,
-          },
+    const semanticActivationEnabled =
+      deps.env.SEMANTIC_ROUTER_ENABLED
+      && deps.env.SEMANTIC_ROUTER_ACTIVATION_ENABLED
+      && !deps.env.SEMANTIC_ROUTER_SHADOW_MODE;
+    const semanticActivatedRouteKeys = new Set(
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES ?? '').split(',')),
+    );
+
+    const toSemanticActivationTarget = (candidate: {
+      key: string;
+      targetAgentId?: string;
+      directRequest?: { action: string; slots?: Record<string, unknown> };
+    }): RouterTarget | null => {
+      if (!semanticActivatedRouteKeys.has(candidate.key)) return null;
+      if (candidate.targetAgentId === SPOTIFY_AGENT_ID) {
+        if (!spotifyEntry || !candidate.directRequest?.action) return null;
+        return {
+          agentId: SPOTIFY_AGENT_ID,
+          confidence: 1,
+          action: candidate.directRequest.action,
+          slots: candidate.directRequest.slots ?? {},
+        };
+      }
+      if (candidate.targetAgentId === 'weather') {
+        if (!weatherEntry) return null;
+        return { agentId: 'weather', confidence: 1 };
+      }
+      return null;
+    };
+
+    let semanticActivatedTarget: RouterTarget | null = null;
+    let semanticActivatedRouteKey: string | undefined;
+
+    if (deps.env.SEMANTIC_ROUTER_ENABLED) {
+      const embeddingCfg: EmbeddingClientConfig = {
+        provider: deps.env.SEMANTIC_ROUTER_PROVIDER,
+        baseUrl: deps.env.SEMANTIC_ROUTER_BASE_URL,
+        model: deps.env.SEMANTIC_ROUTER_MODEL,
+        timeoutMs: deps.env.SEMANTIC_ROUTER_TIMEOUT_MS,
+        apiKey: deps.env.SEMANTIC_ROUTER_PROVIDER === 'openai' ? deps.env.OPENAI_API_KEY : undefined,
+      };
+      const semanticInput: SemanticRouterInput = {
+        userText: assistantInputText,
+        embeddingConfig: embeddingCfg,
+        options: {
+          acceptScore: deps.env.SEMANTIC_ROUTER_ACCEPT_SCORE,
+          minMargin: deps.env.SEMANTIC_ROUTER_MIN_MARGIN,
+          enableE2: true,
+          enableE1: true,
+          enableD0: true,
+        },
+        enabledLevels: ['D0', 'E2', 'E1'],
+        context: { threadId, requestId },
+      };
+
+      app.log.info({ threadId, requestId, text_len: assistantInputText.length }, 'semantic_router_start');
+      if (semanticActivationEnabled) {
+        try {
+          const semResult = await trySemanticRouter(semanticInput);
+          app.log.info(
+            {
+              threadId,
+              requestId,
+              semanticTop1: semResult.top1Intent,
+              semanticScore: semResult.top1Score,
+              semanticTop2: semResult.top2Intent,
+              margin: semResult.margin,
+              decision: semResult.decision,
+              accepted: semResult.accepted,
+              elapsedMs: semResult.elapsedMs,
+              cachedEmbedding: semResult.debug?.cachedEmbedding,
+              shadow: false,
+              activationEnabled: true,
+            },
+            semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
+          );
+
+          if (semResult.accepted && semResult.decision === 'accepted_e2' && semResult.matchedRoute) {
+            const routeKey = semResult.matchedRoute.key;
+            if (!semanticActivatedRouteKeys.has(routeKey)) {
+              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
+            } else {
+              if (semResult.matchedRoute.targetAgentId === 'search') {
+                const tSearch = Date.now();
+                app.log.info(
+                  {
+                    threadId,
+                    requestId,
+                    route: routeKey,
+                    domain: semResult.matchedRoute.directRequest?.domain,
+                    decision: semResult.decision,
+                    handled: false,
+                  },
+                  'semantic_router_search_e2_live_attempt',
+                );
+                try {
+                  const handledSearchResult = await dispatchAcceptedSearchE2Route({
+                    route: semResult.matchedRoute,
+                    text: assistantInputText,
+                    callSearchAgent,
+                    searchCallParams: {
+                      openAiApiKey: deps.env.OPENAI_API_KEY ?? '',
+                      openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                      perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
+                      perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
+                      timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                      log: app.log,
+                    },
+                  });
+                  if (handledSearchResult) {
+                    assistantText = handledSearchResult.responseText;
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: handledSearchResult.routeKey,
+                        domain: handledSearchResult.domain,
+                        decision: semResult.decision,
+                        handled: true,
+                        elapsed_ms: Date.now() - tSearch,
+                      },
+                      'semantic_router_search_e2_live_handled',
+                    );
+                  } else {
+                    app.log.info(
+                      {
+                        threadId,
+                        requestId,
+                        route: routeKey,
+                        domain: semResult.matchedRoute.directRequest?.domain,
+                        decision: semResult.decision,
+                        handled: false,
+                        elapsed_ms: Date.now() - tSearch,
+                      },
+                      'semantic_router_search_e2_live_fallback_llm',
+                    );
+                  }
+                } catch (err) {
+                  app.log.warn(
+                    {
+                      threadId,
+                      requestId,
+                      route: routeKey,
+                      domain: semResult.matchedRoute.directRequest?.domain,
+                      decision: semResult.decision,
+                      elapsed_ms: Date.now() - tSearch,
+                      err,
+                    },
+                    'semantic_router_search_e2_live_error',
+                  );
+                }
+              }
+
+              if (assistantText !== undefined) {
+                semanticActivatedRouteKey = routeKey;
+              } else {
+              const candidate = toSemanticActivationTarget({
+                key: routeKey,
+                targetAgentId: semResult.matchedRoute.targetAgentId,
+                directRequest: semResult.matchedRoute.directRequest
+                  ? {
+                    action: semResult.matchedRoute.directRequest.action,
+                    slots: semResult.matchedRoute.directRequest.slots,
+                  }
+                  : undefined,
+              });
+              if (candidate) {
+                semanticActivatedTarget = candidate;
+                semanticActivatedRouteKey = routeKey;
+                app.log.info(
+                  { threadId, requestId, routeKey, targetAgentId: candidate.agentId },
+                  'semantic_router_activated_e2',
+                );
+              } else {
+                app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_unsupported_target');
+              }
+            }
+            }
+          }
+          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+            app.log.info(
+              {
+                threadId,
+                requestId,
+                route: semResult.matchedRoute.key,
+                decision: semResult.decision,
+                targetAgentId: semResult.matchedRoute.targetAgentId,
+                plannerRequired: semResult.matchedRoute.plannerRequired === true,
+              },
+              'semantic_router_e1_candidate',
+            );
+          }
+        } catch (err) {
+          app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
+        }
+      } else {
+        // Phase 1A shadow mode (observation only)
+        trySemanticRouter(semanticInput).then((semResult) => {
+          app.log.info(
+            {
+              threadId,
+              requestId,
+              semanticTop1: semResult.top1Intent,
+              semanticScore: semResult.top1Score,
+              semanticTop2: semResult.top2Intent,
+              margin: semResult.margin,
+              decision: semResult.decision,
+              accepted: semResult.accepted,
+              elapsedMs: semResult.elapsedMs,
+              cachedEmbedding: semResult.debug?.cachedEmbedding,
+              shadow: deps.env.SEMANTIC_ROUTER_SHADOW_MODE,
+              activationEnabled: false,
+            },
+            semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
+          );
+          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+            app.log.info(
+              {
+                threadId,
+                requestId,
+                route: semResult.matchedRoute.key,
+                decision: semResult.decision,
+                targetAgentId: semResult.matchedRoute.targetAgentId,
+                plannerRequired: semResult.matchedRoute.plannerRequired === true,
+              },
+              'semantic_router_e1_candidate',
+            );
+          }
+        }).catch((err) => {
+          app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
+        });
+      }
+    }
+
+    const routerPromise: Promise<RouterResult> = assistantText !== undefined
+      ? Promise.resolve({
+          targets: [],
+          reason: `semantic_router_search_e2_live:${semanticActivatedRouteKey ?? 'handled'}`,
         })
-      : Promise.reject(new Error('router_disabled'));
+      : semanticActivatedTarget
+      ? Promise.resolve({
+          targets: [semanticActivatedTarget],
+          reason: `semantic_router_activated:${semanticActivatedRouteKey ?? semanticActivatedTarget.agentId}`,
+        })
+      : routerEnabled
+        ? routeUserRequest({
+            text: assistantInputText,
+            agents: allAgentEntries,
+            summary: threadBefore.summary?.trim() || undefined,
+            recentMessages,
+            options: {
+              openAiApiKey: deps.env.OPENAI_API_KEY!,
+              openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+              model: deps.env.OPENAI_MODEL_ROUTER,
+              timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+              confidenceThreshold: threshold,
+              generalAgentId,
+              log: app.log,
+            },
+          })
+        : Promise.reject(new Error('router_disabled'));
 
     // Early SSE ack: fire as soon as the router decides, without waiting for HA general.
     // This gives the user immediate feedback ("Je cherche...") before Perplexity/todo/mail respond.
@@ -728,7 +983,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     // ── Resolve targets ───────────────────────────────────────────────────────
-    let assistantText: string | undefined;
 
     if (routerResult.status === 'fulfilled') {
       const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
