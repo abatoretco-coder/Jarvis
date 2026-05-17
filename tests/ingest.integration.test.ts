@@ -2525,6 +2525,307 @@ describe('/v1/ingest integration', () => {
     expect(calls[0]?.conversation_id).toBe('thread-spotify-1');
   });
 
+  it('structured spotify remains robust with noisy STT-like text across all music actions', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      getNowPlaying: async () => ({
+        ok: true,
+        data: {
+          is_playing: true,
+          device: { id: 'dev-salon', name: 'Salon', volume_percent: 55, is_active: true },
+          item: { id: 'trk-1', name: 'Around the World', artists: [{ name: 'Daft Punk' }] },
+        },
+      }),
+      listDevicesPublic: async () => ({
+        ok: true,
+        devices: [
+          { id: 'dev-salon', name: 'Salon', type: 'Speaker', isActive: true },
+          { id: 'dev-phone', name: 'Galaxy S22', type: 'Smartphone', isActive: false },
+        ],
+      }),
+      pause: async () => ({ ok: true }),
+      play: async () => ({ ok: true }),
+      next: async () => ({ ok: true }),
+      previous: async () => ({ ok: true }),
+      setVolume: async () => ({ ok: true }),
+      searchCatalog: async (type: string, query: string) => ({
+        ok: true,
+        items: [
+          { id: `${type}-1`, name: `${query} result`, uri: `spotify:${type}:1` },
+          { id: `${type}-2`, name: `${query} alt`, uri: `spotify:${type}:2` },
+        ],
+      }),
+      searchTopTrackUri: async () => ({ ok: true, uri: 'spotify:track:1' }),
+      transferPlayback: async () => ({ ok: true }),
+      addToQueueUri: async () => ({ ok: true }),
+      likeTrack: async () => ({ ok: true }),
+      unlikeTrack: async () => ({ ok: true }),
+      addUrisToPlaylist: async () => ({ ok: true }),
+      playUris: async () => ({ ok: true }),
+      playContextUri: async () => ({ ok: true }),
+      searchUserPlaylistContextUri: async () => ({ ok: true, uri: 'spotify:playlist:focus', name: 'Focus Flow' }),
+      getFirstTrackUriFromContext: async () => ({ ok: true, uri: 'spotify:track:ctx1' }),
+      clearQueue: async () => ({ ok: true, cleared: 3, was_empty: false }),
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const sttCases: Array<{
+      action:
+        | 'pause'
+        | 'play'
+        | 'next'
+        | 'previous'
+        | 'volume_set'
+        | 'search'
+        | 'search_and_play'
+        | 'queue_add'
+        | 'clear_queue'
+        | 'transfer'
+        | 'like_track'
+        | 'add_to_playlist'
+        | 'list_devices'
+        | 'now_playing';
+      text: string;
+      slots?: Record<string, unknown>;
+    }> = [
+      { action: 'pause', text: 'paus la muzik stp' },
+      { action: 'play', text: 'relanse la musiq' },
+      { action: 'next', text: 'titre suivan pliz' },
+      { action: 'previous', text: 'retour chansson davan' },
+      { action: 'volume_set', text: 'met le volumm a 30 porcenn', slots: { volume_percent: 30 } },
+      { action: 'search', text: 'cherche d aft punk hardr bttr', slots: { query: 'daft punk harder better' } },
+      { action: 'search_and_play', text: 'met qlq choz chill lofi', slots: { context_uri: 'spotify:playlist:focus', display_name: 'Focus Flow' } },
+      { action: 'queue_add', text: 'ajou sa ds la file', slots: { uri: 'spotify:track:ctx1' } },
+      { action: 'clear_queue', text: 'vide la q ueue' },
+      { action: 'transfer', text: 'met sur le fone', slots: { device: 'alias:phone' } },
+      { action: 'like_track', text: 'j aime se morso', slots: { state: true } },
+      { action: 'add_to_playlist', text: 'ajou ds playlist fokus', slots: { playlist_id: 'pl-1', uris: ['spotify:track:ctx1'] } },
+      { action: 'list_devices', text: 'quels apareils spoti dispo' },
+      { action: 'now_playing', text: 'keski jou la mtn' },
+    ];
+
+    for (const c of sttCases) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/ingest',
+        payload: {
+          threadId: `thread-stt-music-${c.action}`,
+          domain: 'spotify',
+          action: c.action,
+          text: c.text,
+          slots: c.slots ?? {},
+          clientContext: { channel: 'desktop' },
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const payload = res.json() as { responseText: string };
+      expect(payload.responseText.length).toBeGreaterThan(0);
+      expect(payload.responseText).not.toContain('Action Spotify non supportée');
+    }
+  });
+
+  it('semantic live remains robust with noisy STT-like text across all non-spotify agents', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'partiel-nuageux',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 19,
+          humidity: 60,
+          precipitation_probability: 20,
+        },
+      },
+    ];
+
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('Voici tes taches du jour.');
+    mockedCallMailAgent.mockResolvedValue('Voici tes mails non lus.');
+
+    const fetchMock = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { agent_id?: string };
+      if (body.agent_id === 'conversation.jarvis_broker') {
+        return haSpeechResponse('Minuteur lance.');
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Une ZTL est une zone a trafic limite.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'search.web.definition,weather.current_temperature',
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.list_tasks.today,mail.list_inbox.unread,executor.timer',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const noisyCases: Array<{
+      name: string;
+      text: string;
+      semantic: Awaited<ReturnType<typeof trySemanticRouter>>;
+      expectedContains?: string;
+    }> = [
+      {
+        name: 'search',
+        text: 'c koi une zetel ???',
+        semantic: {
+          accepted: true,
+          decision: 'accepted_e2',
+          matchedRoute: {
+            key: 'search.web.definition',
+            level: 'E2',
+            targetAgentId: 'search',
+            plannerRequired: false,
+            directRequest: { domain: 'search.web', action: 'definition' },
+            examples: ["c'est quoi"],
+          },
+          top1Score: 0.95,
+          top2Score: 0.72,
+          margin: 0.23,
+          top1Intent: 'search.web.definition',
+          top2Intent: 'search.web.quick_lookup',
+          confidence: 0.95,
+        },
+        expectedContains: 'zone a trafic limite',
+      },
+      {
+        name: 'weather',
+        text: 'kel temp dan la meyson mtn',
+        semantic: {
+          accepted: true,
+          decision: 'accepted_e2',
+          matchedRoute: {
+            key: 'weather.current_temperature',
+            level: 'E2',
+            targetAgentId: 'weather',
+            plannerRequired: false,
+            directRequest: { domain: 'weather', action: 'current_temperature' },
+            examples: ['quelle temperature chez moi'],
+          },
+          top1Score: 0.95,
+          top2Score: 0.7,
+          margin: 0.25,
+          top1Intent: 'weather.current_temperature',
+          top2Intent: 'weather.current_conditions',
+          confidence: 0.95,
+        },
+        expectedContains: 'Il fait actuellement',
+      },
+      {
+        name: 'todo',
+        text: 'mes taches ojrd stp',
+        semantic: {
+          accepted: true,
+          decision: 'accepted_e1',
+          matchedRoute: {
+            key: 'todo.list_tasks.today',
+            level: 'E1',
+            targetAgentId: 'todo',
+            plannerRequired: true,
+            directRequest: { domain: 'todo', action: 'list_tasks', slots: { period: 'today' } },
+            examples: ['taches du jour'],
+          },
+          top1Score: 0.95,
+          top2Score: 0.72,
+          margin: 0.23,
+          top1Intent: 'todo.list_tasks.today',
+          top2Intent: 'todo.list_tasks',
+          confidence: 0.95,
+        },
+        expectedContains: 'taches du jour',
+      },
+      {
+        name: 'mail',
+        text: 'mes mail non lu la',
+        semantic: {
+          accepted: true,
+          decision: 'accepted_e1',
+          matchedRoute: {
+            key: 'mail.list_inbox.unread',
+            level: 'E1',
+            targetAgentId: 'mail',
+            plannerRequired: true,
+            directRequest: { domain: 'mail', action: 'list_inbox', slots: { unread_only: true } },
+            examples: ['mails non lus'],
+          },
+          top1Score: 0.95,
+          top2Score: 0.72,
+          margin: 0.23,
+          top1Intent: 'mail.list_inbox.unread',
+          top2Intent: 'mail.list_inbox',
+          confidence: 0.95,
+        },
+        expectedContains: 'mails non lus',
+      },
+      {
+        name: 'executors',
+        text: 'met un miniter 10 min',
+        semantic: {
+          accepted: true,
+          decision: 'accepted_e1',
+          matchedRoute: {
+            key: 'executor.timer',
+            level: 'E1',
+            targetAgentId: 'executors',
+            plannerRequired: true,
+            directRequest: { domain: 'executors', action: 'timer' },
+            examples: ['mets un minuteur'],
+          },
+          top1Score: 0.95,
+          top2Score: 0.72,
+          margin: 0.23,
+          top1Intent: 'executor.timer',
+          top2Intent: 'executor.note',
+          confidence: 0.95,
+        },
+        expectedContains: 'Minuteur lance',
+      },
+    ];
+
+    for (const scenario of noisyCases) {
+      mockedTrySemanticRouter.mockResolvedValueOnce(scenario.semantic);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/ingest',
+        payload: {
+          threadId: `thread-stt-agent-${scenario.name}`,
+          text: scenario.text,
+          clientContext: { channel: 'desktop' },
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const payload = res.json() as { responseText: string };
+      expect(payload.responseText.length).toBeGreaterThan(0);
+      if (scenario.expectedContains) {
+        expect(payload.responseText).toContain(scenario.expectedContains);
+      }
+    }
+
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+  });
+
   it('search external weather: routes to search.news without HA fallback', async () => {
     const searchReply = 'Demain a Paris, prevois 22 degres avec un risque de pluie en fin de journee.';
     const fetchMock = jest.fn(async (url: string) => {
