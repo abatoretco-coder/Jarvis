@@ -216,20 +216,37 @@ multiIntent threshold = 0.5
 - Fallback systématique vers routeur LLM si route non allowlistée / non supportée / erreur agent.
 - Les routes de mutation restent non activées en live.
 
-### Phase 2C : E1 actions sûres de mutation limitées 🔜 NEXT
+### Phase 2C : E1 actions sûres de mutation limitées ✅ COMPLET
 
-**Scope prévu** :
+**Activations live E1 (allowlistées)** :
 - `todo.add_task`
 - `todo.complete_task`
 - `mail.mark_read`
 - `mail.mark_unread`
 
-**Hors scope (toujours non activé)** :
-- suppressions (todo/mail)
-- envoi d'email
-- réponse/forward email
-- suppression de listes
-- trash
+**Comportement** :
+- Bypass du routeur LLM quand la route est acceptée et allowlistée.
+- Dispatch direct vers les agents spécialisés Todo/Mail (extraction/planning inchangés).
+- Ack SSE avant réponse pour les routes Todo/Mail lentes.
+- Fallback systématique vers routeur LLM sur route non allowlistée/non supportée ou erreur agent.
+
+### Phase 2D : E1 mutations sensibles 🔜 NEXT
+
+**Scope prévu** :
+- `todo.update_task`
+- `todo.delete_task`
+- `todo.create_list`
+- `todo.delete_list`
+- `todo.add_checklist_item`
+- `todo.complete_checklist_item`
+- `todo.delete_checklist_item`
+- `mail.flag_email`
+
+**Toujours hors scope à ce palier** :
+- `mail.send_email`
+- `mail.reply_email`
+- `mail.forward_email`
+- `mail.trash_email`
 
 ---
 

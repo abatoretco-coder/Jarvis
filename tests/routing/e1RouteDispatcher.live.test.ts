@@ -195,6 +195,98 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(deps.callMailAgent).toHaveBeenCalledWith('Retrouve mes mails de Thomas sur le devis');
   });
 
+  it('todo.add_task dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.add_task');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Tache ajoutee.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Ajoute appeler Arthur demain dans mes taches.',
+      deps,
+    });
+
+    expect(result).toEqual({
+      kind: 'todo_text',
+      routeKey: 'todo.add_task',
+      data: 'Tache ajoutee.',
+    });
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Ajoute appeler Arthur demain dans mes taches.');
+  });
+
+  it('todo.complete_task dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.complete_task');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Tache marquee comme faite.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Marque envoyer le devis comme fait.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Marque envoyer le devis comme fait.');
+  });
+
+  it('mail.mark_read dispatches to mail agent', async () => {
+    const route = findRouteByKey('mail.mark_read');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'unused'),
+      callMailAgent: jest.fn(async () => 'Mail marque comme lu.'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Marque le dernier mail de Thomas comme lu.',
+      deps,
+    });
+
+    expect(result).toEqual({
+      kind: 'mail_text',
+      routeKey: 'mail.mark_read',
+      data: 'Mail marque comme lu.',
+    });
+    expect(deps.callMailAgent).toHaveBeenCalledWith('Marque le dernier mail de Thomas comme lu.');
+  });
+
+  it('mail.mark_unread dispatches to mail agent', async () => {
+    const route = findRouteByKey('mail.mark_unread');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'unused'),
+      callMailAgent: jest.fn(async () => 'Mail remis en non lu.'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Remets le mail de Marie en non lu.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('mail_text');
+    expect(deps.callMailAgent).toHaveBeenCalledWith('Remets le mail de Marie en non lu.');
+  });
+
   it('returns null for todo route when level is not E1', async () => {
     const todoRoute: SemanticRouteDefinition = {
       key: 'todo.list_tasks.today',
@@ -245,5 +337,35 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     });
 
     expect(mailResult).toBeNull();
+  });
+
+  it('returns null for unsupported E1 route', async () => {
+    const route = {
+      key: 'executor.timer',
+      level: 'E1',
+      targetAgentId: 'executors',
+      plannerRequired: true,
+      directRequest: { domain: 'executors', action: 'timer' },
+      examples: ['lance un minuteur'],
+    } as unknown as SemanticRouteDefinition;
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'unused'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route,
+      text: 'Lance un minuteur de 10 minutes',
+      deps,
+    });
+
+    expect(result).toBeNull();
+    expect(deps.planSpotifyAction).not.toHaveBeenCalled();
+    expect(deps.callSearchAgent).not.toHaveBeenCalled();
+    expect(deps.callTodoAgent).not.toHaveBeenCalled();
+    expect(deps.callMailAgent).not.toHaveBeenCalled();
   });
 });
