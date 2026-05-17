@@ -196,14 +196,40 @@ multiIntent threshold = 0.5
 - `spotify.add_to_playlist`
 - `spotify.volume_set`
 
-### Phase 2B : E1 lecture productivité 🔜 NEXT
+### Phase 2B : E1 lecture productivité ✅ COMPLET
 
-**Scope prévu** :
-- `todo.list_tasks*`
+**Activations live E1 (allowlistées)** :
+- `todo.list_tasks`
+- `todo.list_tasks.today`
+- `todo.list_tasks.tomorrow`
+- `todo.list_tasks.this_week`
+- `todo.list_tasks.overdue`
 - `todo.list_lists`
 - `mail.list_inbox`
 - `mail.list_inbox.unread`
 - `mail.search_emails`
+
+**Comportement** :
+- Bypass du routeur LLM quand une route Todo/Mail de lecture est acceptée ET allowlistée.
+- Dispatch direct vers les agents spécialisés Todo/Mail existants (pas de nouveau planner).
+- Ack SSE avant réponse pour les routes lentes Todo/Mail.
+- Fallback systématique vers routeur LLM si route non allowlistée / non supportée / erreur agent.
+- Les routes de mutation restent non activées en live.
+
+### Phase 2C : E1 actions sûres de mutation limitées 🔜 NEXT
+
+**Scope prévu** :
+- `todo.add_task`
+- `todo.complete_task`
+- `mail.mark_read`
+- `mail.mark_unread`
+
+**Hors scope (toujours non activé)** :
+- suppressions (todo/mail)
+- envoi d'email
+- réponse/forward email
+- suppression de listes
+- trash
 
 ---
 

@@ -154,6 +154,26 @@ function normalizeClientChannel(value: unknown): string | undefined {
   return normalized;
 }
 
+const SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS = new Set([
+  // Phase 2A
+  'search.deep.analysis',
+  'search.deep.history',
+  'search.deep.comparison',
+  'spotify.search',
+  'spotify.search_and_play',
+  'spotify.transfer',
+  // Phase 2B
+  'todo.list_tasks',
+  'todo.list_tasks.today',
+  'todo.list_tasks.tomorrow',
+  'todo.list_tasks.this_week',
+  'todo.list_tasks.overdue',
+  'todo.list_lists',
+  'mail.list_inbox',
+  'mail.list_inbox.unread',
+  'mail.search_emails',
+]);
+
 async function synthesizeWeatherReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
@@ -738,8 +758,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     let semanticActivatedTarget: RouterTarget | null = null;
     let semanticActivatedRouteKey: string | undefined;
-  type MusicAgentPlan = Awaited<ReturnType<typeof planSpotifyActionFromTextWithOpenAi>>;
-  let semanticE1SpotifyPlan: MusicAgentPlan | undefined;
+    type MusicAgentPlan = Awaited<ReturnType<typeof planSpotifyActionFromTextWithOpenAi>>;
+    let semanticE1SpotifyPlan: MusicAgentPlan | undefined;
 
     if (deps.env.SEMANTIC_ROUTER_ENABLED) {
       const embeddingCfg: EmbeddingClientConfig = {
@@ -913,9 +933,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               app.log.info({ threadId, requestId, routeKey }, 'semantic_router_e1_activation_fallback_not_allowlisted');
             } else {
               const targetAgentId = semResult.matchedRoute.targetAgentId;
-              const isSearchDeep = targetAgentId === 'search' && routeKey.startsWith('search.deep.');
-              const isSpotifyE1 = targetAgentId === SPOTIFY_AGENT_ID && routeKey.startsWith('spotify.');
-              if (!isSearchDeep && !isSpotifyE1) {
+              const expectedTargetAgentId = routeKey.startsWith('search.deep.')
+                ? 'search'
+                : routeKey.startsWith('spotify.')
+                  ? SPOTIFY_AGENT_ID
+                  : routeKey.startsWith('todo.')
+                    ? 'todo'
+                    : routeKey.startsWith('mail.')
+                      ? 'mail'
+                      : null;
+              const safeRouteAllowed = SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS.has(routeKey);
+              const supportedTarget = expectedTargetAgentId !== null && targetAgentId === expectedTargetAgentId;
+              const isSlowReadRoute = routeKey.startsWith('search.deep.') || routeKey.startsWith('todo.') || routeKey.startsWith('mail.');
+
+              if (!safeRouteAllowed || !supportedTarget) {
                 app.log.info(
                   { threadId, requestId, routeKey, targetAgentId },
                   'semantic_router_e1_activation_fallback_unsupported_target',
@@ -934,7 +965,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   'semantic_router_e1_live_attempt',
                 );
 
-                if (isSearchDeep && sseStream !== null) {
+                if (isSlowReadRoute && sseStream !== null) {
                   const ackMsg = getIngestAckText([routeKey]);
                   if (ackMsg) pushSseAck(ackMsg);
                 }
@@ -967,10 +998,27 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         })
                       ),
                       callTodoAgent: async () => {
-                        throw new Error('e1_todo_live_not_enabled_in_phase_2a');
+                        return callTodoAgent(assistantInputText, {
+                          MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
+                          MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
+                          MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
+                          MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
+                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+                          OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
+                          OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
+                          OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+                          OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
+                        }, app.log);
                       },
                       callMailAgent: async () => {
-                        throw new Error('e1_mail_live_not_enabled_in_phase_2a');
+                        return callMailAgent(assistantInputText, {
+                          mailAccounts:    buildMailAccounts(deps.env),
+                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+                          OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
+                          OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+                          OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+                          OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+                        }, app.log);
                       },
                     },
                   });
@@ -988,7 +1036,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       },
                       'semantic_router_e1_live_fallback_llm',
                     );
-                  } else if (e1Result.kind === 'search_text') {
+                  } else if (e1Result.kind === 'search_text' || e1Result.kind === 'todo_text' || e1Result.kind === 'mail_text') {
                     assistantText = e1Result.data;
                     semanticActivatedRouteKey = e1Result.routeKey;
                     app.log.info(
