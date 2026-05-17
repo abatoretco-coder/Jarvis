@@ -1,0 +1,7 @@
+{
+  "date_line":             "Date: {{DATE}}",
+  "summary_line":          "Conversation summary: {{SUMMARY}}",
+  "recent_messages_line":  "Recent messages:\n{{RECENT_MESSAGES}}",
+  "agents_line":           "Available agents:\n{{AGENTS_LIST}}",
+  "user_message_line":     "User message: {{USER_TEXT}}"
+}

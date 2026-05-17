@@ -1,0 +1,7 @@
+{
+  "description": "JSON payload sent as user message to the mail synthesis model.",
+  "fields": {
+    "user_request":    "Original user request verbatim.",
+    "executor_result": "Raw string returned by the Gmail executor (data or confirmation)."
+  }
+}

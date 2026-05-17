@@ -19,6 +19,17 @@
  */
 
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { buildTodoSynthesisSystemPrompt } from './prompts/todoSynthesisSystemPrompt';
+import { buildTodoSynthesisUserPrompt } from './prompts/todoSynthesisUserTemplate';
+
+const TODO_SYNTHESIS_SYSTEM_PROMPT = buildTodoSynthesisSystemPrompt();
+
+/** Returns the first sentence of a TTS-friendly string, capped at maxChars. */
+function firstSentence(text: string, maxChars = 140): string {
+  const m = text.match(/^[^.!?]+[.!?]/);
+  const s = m ? m ? m[0] : text : text;
+  return s.length > maxChars ? s.slice(0, maxChars).trimEnd() + '…' : s;
+}
 
 // ─── Action types ─────────────────────────────────────────────────────────────
 
@@ -65,7 +76,41 @@ export type TodoEnv = {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
+  OPENAI_MODEL_SUMMARY?: string;
 };
+
+async function synthesizeTodoReplyWithOpenAi(params: {
+  openAiApiKey: string;
+  openAiBaseUrl: string;
+  model: string;
+  timeoutMs: number;
+  userText: string;
+  executorResult: string;
+}): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), params.timeoutMs);
+    const res = await fetch(`${params.openAiBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${params.openAiApiKey}` },
+      body: JSON.stringify({
+        model: params.model,
+        max_tokens: 180,
+        messages: [
+          { role: 'system', content: TODO_SYNTHESIS_SYSTEM_PROMPT },
+          { role: 'user',   content: buildTodoSynthesisUserPrompt(params.userText, params.executorResult) },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return firstSentence(params.executorResult);
+    const data = await res.json() as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content?.trim() || firstSentence(params.executorResult);
+  } catch {
+    return firstSentence(params.executorResult);
+  }
+}
 
 type MinLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -932,9 +977,17 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
   }
 
   try {
-    const result = await executeTodo(action, token);
-    log?.info({ action: action.action, result_len: result.length }, 'todo_agent_done');
-    return result;
+    const rawResult = await executeTodo(action, token);
+    log?.info({ action: action.action, result_len: rawResult.length }, 'todo_agent_done');
+    const synthesized = await synthesizeTodoReplyWithOpenAi({
+      openAiApiKey:  env.OPENAI_API_KEY!,
+      openAiBaseUrl: env.OPENAI_BASE_URL,
+      model:         env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      timeoutMs:     env.OPENAI_TIMEOUT_MS,
+      userText:      text,
+      executorResult: rawResult,
+    });
+    return synthesized;
   } catch (err) {
     log?.warn({ err: String(err), action: action.action }, 'todo_agent_execute_error');
     return 'Une erreur s\'est produite lors de l\'accès à Microsoft To Do. Réessaie dans un instant.';

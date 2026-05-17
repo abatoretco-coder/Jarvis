@@ -15,7 +15,7 @@ type DashboardSection = {
   lines: string[];
   source: string;
   status: 'ok' | 'empty' | 'error';
-  items?: TodoTaskItem[] | DashboardMailItem[];
+  items?: TodoTaskItem[] | DashboardMailItem[] | AgendaEventItem[];
 };
 
 type CalendarPreview = {
@@ -23,6 +23,16 @@ type CalendarPreview = {
   message: string;
   start: Date;
   end: Date;
+};
+
+type AgendaEventItem = {
+  id: string;
+  title: string;
+  details?: string;
+  start: string;
+  end: string;
+  isAllDay: boolean;
+  durationDays: number;
 };
 
 type DashboardTask = {
@@ -82,6 +92,11 @@ type TodoListItem = {
 
 type GmailMessageRef = {
   id: string;
+};
+
+type GmailListPayload = {
+  messages?: GmailMessageRef[];
+  nextPageToken?: string;
 };
 
 type GmailDashboardMessage = {
@@ -208,7 +223,7 @@ function makeSection(title: string, source: string, summary: string): DashboardS
   };
 }
 
-function formatDateTime(value: unknown): string {
+function _formatDateTime(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -295,12 +310,35 @@ function buildAgendaSection(states: HaState[], now = new Date()): DashboardSecti
     return `${formatDateForLine(item.start)} | ${headline}`;
   });
 
+  // Build structured event items
+  const items: AgendaEventItem[] = calendars.map((item, idx) => {
+    // Calculate duration in days (number of calendar days spanned)
+    const startDate = startOfToday(item.start);
+    const endDate = startOfToday(item.end);
+    const durationDays = Math.ceil((endDate.getTime() - startDate.getTime()) / 86_400_000) || 1;
+    
+    // Determine if it's an all-day event (no time component, full days)
+    const isAllDay = item.start.getHours() === 0 && item.start.getMinutes() === 0 &&
+                     item.end.getHours() === 0 && item.end.getMinutes() === 0;
+    
+    return {
+      id: `ha-event-${idx}`,
+      title: item.title,
+      details: item.message || undefined,
+      start: item.start.toISOString(),
+      end: item.end.toISOString(),
+      isAllDay,
+      durationDays,
+    };
+  });
+
   return {
     title: 'Agenda',
     source: 'home-assistant',
     summary: `${calendars.length} evenement${calendars.length > 1 ? 's' : ''} prevu${calendars.length > 1 ? 's' : ''} cette semaine.`,
     lines,
     status: 'ok',
+    items,
   };
 }
 
@@ -768,13 +806,36 @@ function gmailHeader(message: GmailDashboardMessage, headerName: string): string
 }
 
 async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
+  const payload = await fetchMailItemsPageForAccount(account, 0, 40);
+  return payload.items;
+}
+
+async function fetchMailItemsPageForAccount(
+  account: MailAccount,
+  page: number,
+  pageSize: number,
+): Promise<{ items: DashboardMailItem[]; hasMore: boolean }> {
   const token = await refreshGoogleAccessToken(account);
-  const listPayload = await gmailGet<{ messages?: GmailMessageRef[] }>(
-    `/messages?q=${encodeURIComponent('in:inbox')}&maxResults=40`,
-    token,
-  );
+  const safePage = Math.max(0, Math.floor(page));
+  const safePageSize = Math.max(1, Math.min(100, Math.floor(pageSize)));
+
+  let pageToken = '';
+  let listPayload: GmailListPayload = { messages: [] };
+  for (let idx = 0; idx <= safePage; idx += 1) {
+    const params = new URLSearchParams({
+      q: 'in:inbox',
+      maxResults: String(safePageSize),
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+    listPayload = await gmailGet<GmailListPayload>(`/messages?${params.toString()}`, token);
+    pageToken = listPayload.nextPageToken ?? '';
+    if (!pageToken && idx < safePage) {
+      return { items: [], hasMore: false };
+    }
+  }
+
   const messages = listPayload.messages ?? [];
-  if (messages.length === 0) return [];
+  if (messages.length === 0) return { items: [], hasMore: false };
 
   const detailedPayloads = await Promise.allSettled(
     messages.map((message) =>
@@ -785,7 +846,7 @@ async function fetchMailItemsForAccount(account: MailAccount): Promise<Dashboard
     ),
   );
 
-  return detailedPayloads
+  const items = detailedPayloads
     .filter((result): result is PromiseFulfilledResult<GmailDashboardMessage> => result.status === 'fulfilled')
     .map((result) => {
       const from = gmailHeader(result.value, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
@@ -801,6 +862,11 @@ async function fetchMailItemsForAccount(account: MailAccount): Promise<Dashboard
         snippet: result.value.snippet?.trim() || undefined,
       };
     });
+
+  return {
+    items,
+    hasMore: Boolean(listPayload.nextPageToken),
+  };
 }
 
 async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']): Promise<DashboardSection> {
@@ -900,6 +966,37 @@ function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null 
 }
 
 export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): void {
+  app.get('/v1/mail/messages', async (req, reply) => {
+    try {
+      const query = (req.query ?? {}) as { page?: unknown; pageSize?: unknown; accountLabel?: unknown };
+      const page = Number(query.page ?? 0);
+      const pageSize = Number(query.pageSize ?? 40);
+      const accountLabel = typeof query.accountLabel === 'string' ? query.accountLabel.trim().toLowerCase() : '';
+
+      const accounts = buildMailAccounts(deps.env);
+      if (accounts.length === 0) {
+        return reply.code(400).send({ error: 'mail_not_configured' });
+      }
+
+      const account = accountLabel
+        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
+        : accounts[0];
+
+      const safePage = Number.isFinite(page) ? Math.max(0, Math.floor(page)) : 0;
+      const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.min(100, Math.floor(pageSize))) : 40;
+      const payload = await fetchMailItemsPageForAccount(account, safePage, safePageSize);
+      return reply.code(200).send({
+        page: safePage,
+        pageSize: safePageSize,
+        hasMore: payload.hasMore,
+        items: payload.items,
+      });
+    } catch (error) {
+      app.log.warn({ error }, 'dashboard_mail_messages_failed');
+      return reply.code(500).send({ error: 'mail_messages_failed' });
+    }
+  });
+
   app.post('/v1/mail/trash', async (req, reply) => {
     try {
       const body = (req.body ?? {}) as { messageId?: unknown; accountLabel?: unknown };

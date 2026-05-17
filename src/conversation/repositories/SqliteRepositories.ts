@@ -43,7 +43,7 @@ export class SqliteThreadRepository implements ThreadRepository {
 
     const row = this.db
       .prepare(
-        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count
+        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, last_response_time_ms, conversation_window_expires_at_ms
          FROM conversation_threads
          WHERE thread_id = ?`
       )
@@ -58,6 +58,8 @@ export class SqliteThreadRepository implements ThreadRepository {
           summary_candidate_upto_seq: number | null;
           summary_status: string;
           interaction_count: number;
+          last_response_time_ms: number;
+          conversation_window_expires_at_ms: number;
         }
       | undefined;
 
@@ -75,6 +77,8 @@ export class SqliteThreadRepository implements ThreadRepository {
       summaryCandidateUptoSeq: row.summary_candidate_upto_seq === null ? null : Number(row.summary_candidate_upto_seq),
       summaryStatus: assertSummaryStatus(row.summary_status),
       interactionCount: Number(row.interaction_count ?? 0),
+      lastResponseTimeMs: Number(row.last_response_time_ms ?? 0),
+      conversationWindowExpiresAtMs: Number(row.conversation_window_expires_at_ms ?? 0),
     };
   }
 
@@ -238,6 +242,65 @@ export class SqliteThreadRepository implements ThreadRepository {
     const safeCutoff = Math.max(0, Math.floor(cutoffMs));
     const result = this.db.prepare('DELETE FROM conversation_threads WHERE updated_at_ms < ?').run(safeCutoff);
     return Number(result.changes ?? 0);
+  }
+
+  async updateResponseTime(threadId: string, responseTimeMs: number): Promise<void> {
+    const nowMs = Date.now();
+    const windowExpiresAtMs = nowMs + 10000; // Fenêtre de 10 secondes
+    this.db
+      .prepare(
+        `UPDATE conversation_threads 
+         SET last_response_time_ms = ?, conversation_window_expires_at_ms = ?, updated_at_ms = ? 
+         WHERE thread_id = ?`
+      )
+      .run(responseTimeMs, windowExpiresAtMs, nowMs, threadId);
+  }
+
+  async getActiveConversationThread(channel?: string | null): Promise<ThreadRecord | null> {
+    const nowMs = Date.now();
+    const channelFilter = typeof channel === 'string' ? channel.trim() : '';
+    
+    const row = this.db
+      .prepare(
+        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, last_response_time_ms, conversation_window_expires_at_ms
+         FROM conversation_threads
+         WHERE conversation_window_expires_at_ms > ? AND (? = '' OR channel = ?)
+         ORDER BY conversation_window_expires_at_ms DESC
+         LIMIT 1`
+      )
+      .get(nowMs, channelFilter, channelFilter) as
+      | {
+          thread_id: string;
+          channel: string | null;
+          summary: string;
+          summary_upto_seq: number;
+          summary_version: number;
+          summary_candidate: string | null;
+          summary_candidate_upto_seq: number | null;
+          summary_status: string;
+          interaction_count: number;
+          last_response_time_ms: number;
+          conversation_window_expires_at_ms: number;
+        }
+      | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      threadId: row.thread_id,
+      channel: row.channel,
+      summary: row.summary ?? '',
+      summaryUptoSeq: Number(row.summary_upto_seq ?? 0),
+      summaryVersion: Number(row.summary_version ?? 0),
+      summaryCandidate: row.summary_candidate,
+      summaryCandidateUptoSeq: row.summary_candidate_upto_seq === null ? null : Number(row.summary_candidate_upto_seq),
+      summaryStatus: assertSummaryStatus(row.summary_status),
+      interactionCount: Number(row.interaction_count ?? 0),
+      lastResponseTimeMs: Number(row.last_response_time_ms ?? 0),
+      conversationWindowExpiresAtMs: Number(row.conversation_window_expires_at_ms ?? 0),
+    };
   }
 }
 
@@ -407,6 +470,19 @@ export function createConversationDb(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_conversation_threads_channel_updated
       ON conversation_threads(channel, updated_at_ms DESC);
   `);
+
+  // Ajouter colonnes pour gérer la fenêtre de conversation (10s)
+  const threadColumnsAfterMigration = db
+    .prepare('PRAGMA table_info(conversation_threads)')
+    .all() as Array<{ name: string }>;
+  
+  if (!threadColumnsAfterMigration.some((col) => col.name === 'last_response_time_ms')) {
+    db.exec('ALTER TABLE conversation_threads ADD COLUMN last_response_time_ms INTEGER DEFAULT 0;');
+  }
+  
+  if (!threadColumnsAfterMigration.some((col) => col.name === 'conversation_window_expires_at_ms')) {
+    db.exec('ALTER TABLE conversation_threads ADD COLUMN conversation_window_expires_at_ms INTEGER DEFAULT 0;');
+  }
 
   return db;
 }

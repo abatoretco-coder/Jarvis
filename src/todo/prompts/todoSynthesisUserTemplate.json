@@ -1,0 +1,7 @@
+{
+  "description": "JSON payload sent as user message to the todo synthesis model.",
+  "fields": {
+    "user_request":    "Original user request verbatim.",
+    "executor_result": "Raw string returned by the To Do executor (data or confirmation)."
+  }
+}

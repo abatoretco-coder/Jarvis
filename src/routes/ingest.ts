@@ -5,10 +5,12 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { ConversationService, JARVIS_HA_AGENT_GENERAL } from '../conversation/ConversationService';
-import { routeToHaAgent, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentResponses } from '../conversation/haAgentRouter';
+import { ConversationService } from '../conversation/ConversationService';
+import { routeUserRequest, parseAgentMap, SPOTIFY_AGENT_ID, synthesizeAgentResponses } from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
+import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
+import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
 import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import {
@@ -58,6 +60,12 @@ const ttsRequestSchema = z.object({
 
 type EntityStateLike = {
   entity_id: string;
+  attributes?: Record<string, unknown>;
+};
+
+type HaStateLike = {
+  entity_id: string;
+  state?: string;
   attributes?: Record<string, unknown>;
 };
 
@@ -135,6 +143,146 @@ function normalizeClientChannel(value: unknown): string | undefined {
   if (!normalized) return undefined;
   if (!/^[a-z0-9._-]{2,64}$/.test(normalized)) return undefined;
   return normalized;
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+type WeatherSnapshot = {
+  location: string;
+  current?: {
+    entityId: string;
+    condition: string;
+    temperature?: number;
+    feelsLike?: number;
+    humidity?: number;
+    windSpeed?: number;
+    windBearing?: number;
+    precipitation?: number;
+  };
+  sensors: Array<{ entityId: string; label?: string; value?: number }>;
+  forecast: Array<{
+    date: string;
+    condition: string;
+    temperature?: number;
+    tempLow?: number;
+    precipitation?: number;
+    windSpeed?: number;
+  }>;
+};
+
+function buildWeatherSnapshot(states: HaStateLike[]): WeatherSnapshot | null {
+  const weatherEntity = states.find((state) => state.entity_id === 'weather.maison')
+    ?? states.find((state) => state.entity_id.startsWith('weather.'));
+  const weatherSensors = states.filter((state) =>
+    state.entity_id.startsWith('sensor.maison_weather')
+    || state.entity_id === 'sensor.maison_temperature'
+    || state.entity_id === 'sensor.maison_apparent_temperature'
+    || state.entity_id === 'sensor.maison_heat_index_temperature'
+    || state.entity_id === 'sensor.maison_humidity'
+  );
+
+  if (!weatherEntity && weatherSensors.length === 0) return null;
+
+  const attributes = weatherEntity?.attributes ?? {};
+  const forecast = Array.isArray(attributes.forecast) ? attributes.forecast as Array<Record<string, unknown>> : [];
+  const location = String(attributes.friendly_name ?? weatherEntity?.entity_id.replace(/^weather\./, '') ?? 'Maison');
+  const currentCondition = String(weatherEntity?.state ?? attributes.condition ?? 'nuageux');
+  const currentTemperature = asFiniteNumber(attributes.temperature);
+  const currentFeelsLike = asFiniteNumber(attributes.apparent_temperature);
+  const currentHumidity = asFiniteNumber(attributes.humidity);
+  const currentWindSpeed = asFiniteNumber(attributes.wind_speed);
+  const currentWindBearing = asFiniteNumber(attributes.wind_bearing);
+  const currentPrecipitation = asFiniteNumber(attributes.precipitation_probability);
+
+  return {
+    location,
+    current: weatherEntity
+      ? {
+          entityId: weatherEntity.entity_id,
+          condition: currentCondition,
+          ...(currentTemperature !== undefined ? { temperature: currentTemperature } : {}),
+          ...(currentFeelsLike !== undefined ? { feelsLike: currentFeelsLike } : {}),
+          ...(currentHumidity !== undefined ? { humidity: currentHumidity } : {}),
+          ...(currentWindSpeed !== undefined ? { windSpeed: currentWindSpeed } : {}),
+          ...(currentWindBearing !== undefined ? { windBearing: currentWindBearing } : {}),
+          ...(currentPrecipitation !== undefined ? { precipitation: currentPrecipitation } : {}),
+        }
+      : undefined,
+    sensors: weatherSensors.map((sensor) => ({
+      entityId: sensor.entity_id,
+      label: typeof sensor.attributes?.friendly_name === 'string' ? sensor.attributes.friendly_name : undefined,
+      value: asFiniteNumber(sensor.state) ?? asFiniteNumber(sensor.attributes?.state),
+    })),
+    forecast: forecast.slice(0, 7).map((item, index) => ({
+      date: typeof item.datetime === 'string' ? item.datetime : new Date(Date.now() + index * 86_400_000).toISOString(),
+      condition: String(item.condition ?? currentCondition),
+      ...(asFiniteNumber(item.temperature) !== undefined ? { temperature: asFiniteNumber(item.temperature) } : {}),
+      ...(asFiniteNumber(item.templow) !== undefined ? { tempLow: asFiniteNumber(item.templow) } : {}),
+      ...(asFiniteNumber(item.precipitation) !== undefined ? { precipitation: asFiniteNumber(item.precipitation) } : {}),
+      ...(asFiniteNumber(item.wind_speed) !== undefined ? { windSpeed: asFiniteNumber(item.wind_speed) } : {}),
+    })),
+  };
+}
+
+async function synthesizeWeatherReplyWithOpenAi(params: {
+  openAiApiKey: string;
+  openAiBaseUrl: string;
+  model: string;
+  timeoutMs: number;
+  userText: string;
+  weather: WeatherSnapshot;
+  log?: { info: (obj: Record<string, unknown>, msg: string) => void; warn: (obj: Record<string, unknown>, msg: string) => void };
+}): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), params.timeoutMs);
+
+  const systemPrompt = buildWeatherSystemPrompt();
+
+  const userPrompt = buildWeatherUserPrompt(params.userText, params.weather);
+
+  try {
+    const response = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${params.openAiApiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: params.model,
+        temperature: 0.2,
+        max_tokens: 220,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`weather_openai_failed:${response.status}:${raw.slice(0, 500)}`);
+    }
+
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const choices = Array.isArray(parsed.choices) ? parsed.choices as Array<{ message?: { content?: string } }> : [];
+    const content = choices[0]?.message?.content?.trim() ?? '';
+    if (!content) {
+      throw new Error('weather_openai_empty_response');
+    }
+
+    params.log?.info({ model: params.model, content_len: content.length }, 'weather_openai_done');
+    return toSingleParagraphPlainText(content);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /**
@@ -331,8 +479,10 @@ function getIngestAckText(keys: (string | undefined)[]): string | null {
   const hasMail   = ks.some((k) => k === 'mail'  || k.startsWith('mail.'));
   const hasTodo   = ks.some((k) => k === 'todo'  || k.startsWith('todo.'));
   const hasSearch = ks.some((k) => k.startsWith('search'));
+  const hasWeather = ks.some((k) => k === 'weather' || k.startsWith('weather.'));
   if (hasMail  && !hasTodo && !hasSearch) return 'Deux secondes, je consulte tes emails.';
   if (hasTodo  && !hasMail && !hasSearch) return 'Deux secondes, je regarde tes taches.';
+  if (hasWeather && !hasMail && !hasTodo && !hasSearch) return 'Je regarde la meteo, une seconde.';
   if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return 'Je cherche ca, une seconde.';
   return 'Deux secondes, je traite ta demande.';
 }
@@ -388,7 +538,29 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
   let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
-  const TTS_PROVIDER_CACHE_TTL_MS = 60_000;
+  let ttsProviderRefreshPromise: Promise<void> | null = null;
+  const TTS_PROVIDER_CACHE_TTL_MS = 15 * 60_000;
+
+  const refreshTtsProviderCache = (): Promise<void> => {
+    if (!deps.ha) return Promise.resolve();
+    if (ttsProviderRefreshPromise) return ttsProviderRefreshPromise;
+    ttsProviderRefreshPromise = deps.ha.getStates()
+      .then((statesRaw) => {
+        const providers = new Set(
+          toEntityStates(statesRaw)
+            .map((item) => item.entity_id)
+            .filter((entityId) => entityId.startsWith('tts.'))
+        );
+        ttsProviderCache = { providers, at: Date.now() };
+      })
+      .catch((err) => {
+        app.log.warn({ err }, 'tts_provider_discovery_failed');
+      })
+      .finally(() => {
+        ttsProviderRefreshPromise = null;
+      });
+    return ttsProviderRefreshPromise;
+  };
 
   // ─── TTS circuit breaker ─────────────────────────────────────────────────
   const ttsCb = new Map<string, { failures: number; openUntil: number }>();
@@ -458,7 +630,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
     const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
 
-    await threadRepository.getOrCreate(threadId, { channel: clientChannel ?? null });
+    // Vérifier si une fenêtre de conversation active existe (10s post-réponse)
+    // Si oui, réutiliser le threadId actif pour maintenir le contexte
+    let effectiveThreadId = threadId;
+    const activeThread = await threadRepository.getActiveConversationThread(clientChannel ?? undefined);
+    if (activeThread) {
+      app.log.info(
+        {
+          requestedThreadId: threadId,
+          activeThreadId: activeThread.threadId,
+          windowExpiresInMs: Math.max(0, activeThread.conversationWindowExpiresAtMs - Date.now()),
+        },
+        'ingest_reusing_active_thread'
+      );
+      effectiveThreadId = activeThread.threadId;
+    }
+
+    await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
 
     const toDeterministicHaFailureMessage = (): string => (
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
@@ -468,7 +656,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (parsed.data.domain === 'spotify' && parsed.data.action) {
       const spotifyPayload = ingestSpotifyRequestSchema.safeParse({
         ...parsed.data,
-        threadId,
+        threadId: effectiveThreadId,
       });
 
       if (!spotifyPayload.success) {
@@ -483,7 +671,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
 
       const persistedInput = text || `spotify:${spotifyPayload.data.action} ${JSON.stringify(spotifyPayload.data.slots ?? {})}`;
-      await conversationService.persistMessages(threadId, persistedInput, spotifyResponse.tts);
+      await conversationService.persistMessages(effectiveThreadId, persistedInput, spotifyResponse.tts);
 
       app.log.info(
         {
@@ -543,8 +731,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const pushSseAck      = (text: string): void => { sseStream?.push(`event: ack\ndata: ${JSON.stringify({ text })}\n\n`); };
     const pushSseResponse = (data: unknown): void => { sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`); sseStream?.push(null); };
 
-    const committed = await summarizationService.commitCandidateIfReady(threadId);
-    const threadBefore = await threadRepository.getOrCreate(threadId);
+    // ── Parallel initialization (performance optimization) ────────────────────
+    // These 3 operations have no dependencies and can run concurrently
+    // Estimated gain: 150-250ms per request
+    const [committed, threadBefore, recentMessages_] = await Promise.all([
+      summarizationService.commitCandidateIfReady(effectiveThreadId),
+      threadRepository.getOrCreate(effectiveThreadId),
+      // Pre-compute recentMessages for router use later (unless router is disabled)
+      messageRepository.getRecentMessages(effectiveThreadId, 3),
+    ]);
+
     const usedSummaryVersion =
       committed.usedSummaryVersion ?? (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
 
@@ -562,13 +758,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
     const spotifyEntry = deps.spotifyWebApi.isConfigured()
-      ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale' }
+      ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale', key: 'spotify' as const }
       : null;
-    const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...agentEntries];
+    const weatherEntry = deps.ha
+      ? { agentId: 'weather', hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes', key: 'weather' }
+      : null;
+    const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...(weatherEntry ? [weatherEntry] : []), ...agentEntries];
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
     const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
 
-    const recentMessages = routerEnabled ? await messageRepository.getRecentMessages(threadId, 3) : [];
+    const recentMessages = routerEnabled ? recentMessages_ : [];
 
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
 
@@ -577,7 +776,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const routerPromise = routerEnabled
-      ? routeToHaAgent({
+      ? routeUserRequest({
           text: assistantInputText,
           agents: allAgentEntries,
           summary: threadBefore.summary?.trim() || undefined,
@@ -597,7 +796,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // Early SSE ack: fire as soon as the router decides, without waiting for HA general.
     // This gives the user immediate feedback ("Je cherche...") before Perplexity/todo/mail respond.
     if (sseStream !== null && routerEnabled) {
-      const _earlyAckEntryMap = new Map(agentEntries.map((e) => [e.agentId, e]));
+      const _earlyAckEntryMap = new Map(allAgentEntries.map((e) => [e.agentId, e]));
       routerPromise.then((routerRes) => {
         const validTargets = routerRes.targets.filter((t) => t.confidence >= threshold);
         const specTargets = validTargets.filter((t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId);
@@ -728,11 +927,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         // HA specialized tasks
         const agentEntryByAgentId = new Map(agentEntries.map((e) => [e.agentId, e]));
+        if (weatherEntry) {
+          agentEntryByAgentId.set(weatherEntry.agentId, weatherEntry);
+        }
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
           const isSearchAgent = isSearchAgentKey(agentEntry?.key);
           const isTodoAgent   = isTodoAgentKey(agentEntry?.key);
           const isMailAgent   = isMailAgentKey(agentEntry?.key);
+          const isWeatherAgent = agentEntry?.key === 'weather';
 
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
@@ -771,6 +974,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
                 OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+                OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
               }, app.log)
                 .then((txt): SpecializedResult | null => {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct_done');
@@ -791,6 +995,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
                 OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+                OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
               }, app.log)
                 .then((txt): SpecializedResult | null => {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct_done');
@@ -801,10 +1006,35 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   return null;
                 }),
             );
+          } else if (isWeatherAgent) {
+            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'weather_agent_direct');
+            tasks.push(
+              deps.ha
+                ? deps.ha.getStates()
+                    .then((statesRaw) => {
+                      const haStates = toEntityStates(statesRaw);
+                      const weather = buildWeatherSnapshot(haStates);
+                      if (!weather) return null;
+                      return synthesizeWeatherReplyWithOpenAi({
+                        openAiApiKey: deps.env.OPENAI_API_KEY!,
+                        openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                        model: deps.env.OPENAI_MODEL_SUMMARY,
+                        timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                        userText: assistantInputText,
+                        weather,
+                        log: app.log,
+                      }).then((txt): SpecializedResult => ({ kind: 'ha_text', agentId: haTarget.agentId, text: txt }));
+                    })
+                    .catch((err) => {
+                      app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'weather_agent_direct_failed');
+                      return null;
+                    })
+                : Promise.resolve(null),
+            );
           } else {
             tasks.push(
               conversationService
-                .callHomeAssistantConversation(assistantInputText, threadId, undefined, haTarget.agentId)
+                .callHomeAssistantConversation(assistantInputText, effectiveThreadId, undefined, haTarget.agentId)
                 .then((txt): SpecializedResult | null => {
                   if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
                     app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
@@ -831,13 +1061,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
           if (spotifyRes && goodResults.length === 1) {
-            void conversationService.persistMessages(threadId, text, spotifyRes.tts).then(async () => {
-              if (await summarizationService.shouldPresummarize(threadId)) {
-                summarizationService.startPresummarize(threadId);
+            void conversationService.persistMessages(effectiveThreadId, text, spotifyRes.tts).then(async () => {
+              if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+                summarizationService.startPresummarize(effectiveThreadId);
               }
             });
             const spotifyOnlyPayload = {
-              threadId,
+              threadId: effectiveThreadId,
               responseText: spotifyRes.tts,
               ...spotifyRes.spotifyPayload,
               ...(correlationId ? { correlation_id: correlationId } : {}),
@@ -896,14 +1126,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    void conversationService.persistMessages(threadId, text, assistantText).then(async () => {
-      if (await summarizationService.shouldPresummarize(threadId)) {
-        summarizationService.startPresummarize(threadId);
+    void conversationService.persistMessages(effectiveThreadId, text, assistantText).then(async () => {
+      if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+        summarizationService.startPresummarize(effectiveThreadId);
       }
     });
 
     const payload = {
-      threadId,
+      threadId: effectiveThreadId,
       responseText: toSingleParagraphPlainText(assistantText),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
     };
@@ -914,8 +1144,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(500).send({ error: 'response_validation_failed' });
     }
 
+    // Mettre à jour le temps de réponse pour activer la fenêtre de conversation (10s)
+    await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+
     recordPerf('ingest', Date.now() - t0);
-    app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_complete');
+    app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_complete');
     if (sseStream !== null) { pushSseResponse(payload); return reply; }
     return reply.code(200).send(payload);
   });
@@ -940,6 +1173,50 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const requestedEngineId = params.data.engineId.trim();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
+
+    // Helper: attempt HA local STT and return result or null on failure.
+    const tryHaStt = async (): Promise<{ text: string; engineId: string } | null> => {
+      if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) return null;
+      const normalizedRequestedEngine = requestedEngineId.replace(/^stt\./u, '');
+      const haController = new AbortController();
+      const haTimeoutId = setTimeout(() => haController.abort(), deps.env.HA_TIMEOUT_MS);
+      try {
+        const candidateResponse = await fetch(`${deps.env.HA_BASE_URL.replace(/\/$/, '')}/api/stt/${encodeURIComponent(requestedEngineId)}`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${deps.env.HA_TOKEN}`,
+            'content-type': incomingContentType,
+            'x-speech-content': speechContent,
+          },
+          body,
+          signal: haController.signal,
+        }).finally(() => clearTimeout(haTimeoutId));
+        if (!candidateResponse.ok) return null;
+        const rawHa = await candidateResponse.text();
+        let parsedHa: unknown = rawHa;
+        try { parsedHa = rawHa ? JSON.parse(rawHa) : {}; } catch { parsedHa = { text: rawHa }; }
+        const rootHa = parsedHa && typeof parsedHa === 'object' ? (parsedHa as Record<string, unknown>) : {};
+        const haText = toSingleParagraphPlainText(
+          typeof rootHa.text === 'string' ? rootHa.text : typeof rootHa.result === 'string' ? rootHa.result : ''
+        );
+        if (!haText) return null;
+        return { text: haText, engineId: requestedEngineId };
+      } catch {
+        void normalizedRequestedEngine; // suppress unused warning
+        return null;
+      }
+    };
+
+    if (deps.env.STT_LOCAL_FIRST) {
+      // Local-first mode: try HA STT before OpenAI cloud.
+      const localResult = await tryHaStt();
+      if (localResult) {
+        recordPerf('stt', Date.now() - t0);
+        app.log.info({ engineId: localResult.engineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined, local_first: true }, 'stt_complete');
+        return reply.code(200).send({ text: localResult.text, result: localResult.text, engineId: localResult.engineId });
+      }
+      // Fall through to OpenAI if local failed.
+    }
 
     try {
       const openAiResult = await transcribeWithOpenAi({
@@ -1114,23 +1391,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const haBaseUrl = deps.env.HA_BASE_URL.replace(/\/$/, '');
 
     if (deps.ha) {
-      try {
-        const nowMs = Date.now();
-        if (!ttsProviderCache || nowMs - ttsProviderCache.at > TTS_PROVIDER_CACHE_TTL_MS) {
-          const statesRaw = await deps.ha.getStates();
-          const providers = new Set(
-            toEntityStates(statesRaw)
-              .map((item) => item.entity_id)
-              .filter((entityId) => entityId.startsWith('tts.'))
-          );
-          ttsProviderCache = { providers, at: nowMs };
-        }
+      const nowMs = Date.now();
+      const hasFreshProviderCache = Boolean(ttsProviderCache) && nowMs - ttsProviderCache!.at <= TTS_PROVIDER_CACHE_TTL_MS;
+
+      if (hasFreshProviderCache) {
         const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
         if (availableCandidates.length > 0) {
           candidateEngineIds = availableCandidates;
         }
-      } catch (err) {
-        app.log.warn({ err }, 'tts_provider_discovery_failed');
+      } else {
+        void refreshTtsProviderCache();
       }
     }
 

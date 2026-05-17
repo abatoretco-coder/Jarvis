@@ -11,13 +11,15 @@
  */
 
 import type { MessageRecord } from './repositories/MessageRepository';
+import { buildOrchestratorSystemPrompt } from './prompts/orchestratorSystemPrompt';
+import { buildOrchestratorUserPrompt } from './prompts/orchestratorUserTemplate';
 
 type MinLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
   warn: (obj: Record<string, unknown>, msg: string) => void;
 };
 
-export type HaAgentEntry = {
+export type AgentRouteEntry = {
   /** HA conversation entity_id, e.g. "conversation.jarvis_search", or SPOTIFY_AGENT_ID */
   agentId: string;
   /** One-line hint used in the router prompt */
@@ -56,90 +58,14 @@ export type RouterOptions = {
   log?: MinLogger;
 };
 
-// System prompt — includes Spotify action catalog so the router can produce direct actions.
-const SYSTEM_PROMPT = `You are a routing classifier. The user message may span multiple domains.
-Return ONLY valid JSON — no markdown, no prose:
-{"targets":[{"agentId":"<id>","confidence":<0.0-1.0>},...],"reason":"≤10 words"}
+// System prompt loaded from conversation/prompts/orchestratorSystemPrompt.json
+const SYSTEM_PROMPT = buildOrchestratorSystemPrompt();
 
-Rules:
-- Include one entry per relevant domain when confidence ≥ 0.5.
-- Omit uncertain domains entirely — do not guess.
-- A message can legitimately target 2+ agents simultaneously.
 
-## SPOTIFY
-agentId = "spotify". Also include "action" (required) and "slots" (optional object).
-Actions:
-  pause | play | next | previous | now_playing | like_track | list_devices
-  volume_set       → slots: {volume_percent:N} or {volume_delta:±N}
-  search_and_play  → slots: {query:"<terms>", type?:"track|album|artist|playlist", device?}
-  transfer         → slots: {device:"<name>"}
-  search           → slots: {query:"<terms>"}
-  queue_add        → slots: {query:"<terms>"}
-  shuffle_set      → slots: {state:"on"|"off"}
-  repeat_set       → slots: {mode:"track"|"context"|"off"}
-Routing:
-  device only, no content → transfer
-  content + device → search_and_play + device slot
-  artist/album/title/playlist/genre/mood/style → search_and_play
-  resume/play/launch without device/content → play
-  generic music request → search_and_play{query:"musique"}
-  RULE: search_and_play MUST always have a non-empty query.
-  NEVER route home automation intents (timer/minuteur/rappel/alarme/lumière/prise/scène/script) to spotify.
-Device aliases: pc/ordinateur/jarvis/vm400→"alias:pc" | salon/enceinte→"alias:salon" | tel/mobile→"alias:phone"
 
-## SEARCH AGENTS
-  search.news  → live/recent: scores de sport, résultats de match, classements, météo, actualités du jour, événements récents.
-               Phrases comme "dis-moi", "c'est quoi", "quel est" + sujet temps-réel → search.news.
-  search.web   → lookup factuel: définitions, prix, personnes, conversions, questions encyclopédiques.
-  search.deep  → analyse approfondie: histoire, biographies, comparaisons, sujets complexes.
-  ⚠ Information queries ("dis-moi X", "donne-moi X", "c'est quoi X") are NOT home automation — never route them to executors.
-
-## EXECUTORS (home automation)
-  Action verbs (allume, éteins, mets, crée, programme, règle, active, démarre) + home object (lumière, prise, minuteur, rappel, timer, alarme, script, scène, appareil) → executors.
-  Examples: "mets un minuteur 3 minutes", "démarre un timer", "programme un rappel" → executors only.
-  ⚠ NEVER route executors to search agents.
-
-## TODO (if listed)
-  Microsoft To Do only: créer/lister/modifier/terminer des tâches To Do. NOT executors. NOT search.
-
-## MAIL (if listed)
-  Email: lire/envoyer/répondre/transférer/supprimer des emails Gmail ou Outlook. NOT executors. NOT search.`.trim();
-
-function buildUserPrompt(params: {
+export async function routeUserRequest(params: {
   text: string;
-  agents: HaAgentEntry[];
-  summary?: string;
-  recentMessages: MessageRecord[];
-}): string {
-  const parts: string[] = [];
-
-  parts.push(`Date: ${new Date().toISOString().slice(0, 10)}`);
-
-  if (params.summary?.trim()) {
-    parts.push(`Conversation summary: ${params.summary.trim()}`);
-  }
-
-  if (params.recentMessages.length > 0) {
-    const recent = params.recentMessages
-      .slice(-3)
-      .map((m) => `${m.role === 'user' ? 'U' : 'A'}: ${m.content.slice(0, 120)}`)
-      .join('\n');
-    parts.push(`Recent messages:\n${recent}`);
-  }
-
-  const agentList = params.agents
-    .map((a) => `  ${a.agentId}: ${a.hint}`)
-    .join('\n');
-  parts.push(`Available agents:\n${agentList}`);
-
-  parts.push(`User message: ${params.text}`);
-
-  return parts.join('\n\n');
-}
-
-export async function routeToHaAgent(params: {
-  text: string;
-  agents: HaAgentEntry[];
+  agents: AgentRouteEntry[];
   summary?: string;
   recentMessages: MessageRecord[];
   options: RouterOptions;
@@ -168,11 +94,11 @@ export async function routeToHaAgent(params: {
         body: JSON.stringify({
           model: options.model,
           temperature: 0,
-          max_tokens: 400,
+          max_tokens: 120,
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: buildUserPrompt(params) },
+            { role: 'user', content: buildOrchestratorUserPrompt(params) },
           ],
         }),
         signal: controller.signal,
@@ -239,7 +165,7 @@ export async function routeToHaAgent(params: {
  * Format: "key:entity_id:hint|key2:entity_id2:hint2"
  * Example: "search:conversation.jarvis_search:Recherche internet|assistant:conversation.jarvis_assistant:Domotique et général"
  */
-export function parseAgentMap(raw: string | undefined): HaAgentEntry[] {
+export function parseAgentMap(raw: string | undefined): AgentRouteEntry[] {
   if (!raw?.trim()) return [];
   return raw
     .split('|')
@@ -258,7 +184,7 @@ export function parseAgentMap(raw: string | undefined): HaAgentEntry[] {
       if (!agentId || !hint) return null;
       return { agentId, hint, ...(key ? { key } : {}) };
     })
-    .filter((e): e is HaAgentEntry => e !== null);
+    .filter((e): e is AgentRouteEntry => e !== null);
 }
 
 /**

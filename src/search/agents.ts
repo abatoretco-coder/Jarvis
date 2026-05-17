@@ -1,5 +1,6 @@
-/**
- * Search agent registry.
+import { buildSearchAgentSystemPrompt } from './prompts/searchAgentsPrompts';
+
+
  *
  * Each entry defines a Perplexity/OpenAI search strategy keyed by the
  * HA_AGENT_MAP `key` field. Any key equal to "search" or starting with
@@ -33,20 +34,6 @@ export interface SearchAgentConfig {
   languagePreference?: string;
 }
 
-/**
- * FORMAT_STRICT — one natural sentence, no formatting noise.
- */
-const FORMAT_STRICT =
-  'Reponds en une phrase naturelle et concise (max 25 mots). ' +
-  'Uniquement ce qui est demande, rien d\'autre. ' +
-  'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
-
-/** FORMAT_DETAILED — two sentences max, factual synthesis. */
-const FORMAT_DETAILED =
-  'Reponds en deux phrases maximum, precises et factuelles. ' +
-  'Uniquement ce qui est demande. ' +
-  'Pas de tirets, pas de listes, pas de liens, pas de noms de sites.';
-
 const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   /**
    * search.news — actualités, sport, météo, résultats en direct
@@ -61,10 +48,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     maxTokens: 120,
     // NOTE: system prompt is read by the generation component only — NOT the search
     // component. Search freshness is enforced by searchAfterDays + searchRecencyFilter.
-    buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant sportif et d'actualites informe en temps reel. Nous sommes le ${dateStr}. ` +
-      `Les resultats de recherche contiennent des informations recentes — utilise-les pour repondre directement. ` +
-      FORMAT_STRICT,
+    buildSystemPrompt: (dateStr) => buildSearchAgentSystemPrompt('search.news', dateStr),
     buildUserQuery: (text) => text,
     searchRecencyFilter: 'week',
     searchLanguageFilter: ['fr', 'en'],
@@ -81,10 +65,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     temperature: 0.1,
     topP: 0.9,
     maxTokens: 120,
-    buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant factuel. Nous sommes le ${dateStr}. ` +
-      `Utilise les resultats de recherche pour repondre directement et precisement. ` +
-      FORMAT_STRICT,
+    buildSystemPrompt: (dateStr) => buildSearchAgentSystemPrompt('search.web', dateStr),
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',
@@ -103,11 +84,7 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
     maxTokens: 400,
     // sonar-pro performs multi-source synthesis natively. The system prompt focuses
     // on generation quality: synthesis, factuality, and clear uncertainty disclosure.
-    buildSystemPrompt: (dateStr) =>
-      `Tu es un assistant expert en recherche approfondie. Nous sommes le ${dateStr}. ` +
-      `Synthetise les informations de plusieurs sources en donnant une reponse complete et nuancee. ` +
-      `Mets en avant les elements cles, les dates importantes et les chiffres pertinents si disponibles. ` +
-      FORMAT_DETAILED,
+    buildSystemPrompt: (dateStr) => buildSearchAgentSystemPrompt('search.deep', dateStr),
     buildUserQuery: (text) => text,
     searchLanguageFilter: ['fr', 'en'],
     languagePreference: 'fr',

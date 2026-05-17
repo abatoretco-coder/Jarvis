@@ -1,4 +1,6 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';
+import { buildMailSynthesisUserPrompt } from './prompts/mailSynthesisUserTemplate';
 
 /**
  * Mail agent — Gmail (Google) sub-agent.
@@ -139,6 +141,8 @@ export type MailEnv = MailAccountsEnv & {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
+  // OpenAI synthesis model (defaults to gpt-4o-mini)
+  OPENAI_MODEL_SUMMARY?: string;
 };
 
 type MinLogger = {
@@ -239,6 +243,52 @@ async function refreshGoogleToken(env: {
   }
 
   return data.access_token;
+}
+
+// ─── LLM synthesis ───────────────────────────────────────────────────────────
+
+const MAIL_SYNTHESIS_SYSTEM_PROMPT = buildMailSynthesisSystemPrompt();
+
+/** Returns the first sentence of a TTS-friendly string, capped at maxChars. */
+function firstSentence(text: string, maxChars = 140): string {
+  const m = text.match(/^[^.!?]+[.!?]/);
+  const s = m ? m[0] : text;
+  return s.length > maxChars ? s.slice(0, maxChars).trimEnd() + '…' : s;
+}
+
+async function synthesizeMailReplyWithOpenAi(params: {
+  openAiApiKey: string;
+  openAiBaseUrl: string;
+  model: string;
+  timeoutMs: number;
+  userText: string;
+  executorResult: string;
+}): Promise<string> {
+  const resp = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${params.openAiApiKey}`,
+    },
+    body: JSON.stringify({
+      model: params.model,
+      temperature: 0.2,
+      max_tokens: 180,
+      messages: [
+        { role: 'system', content: MAIL_SYNTHESIS_SYSTEM_PROMPT },
+        { role: 'user',   content: buildMailSynthesisUserPrompt(params.userText, params.executorResult) },
+      ],
+    }),
+    signal: AbortSignal.timeout(params.timeoutMs),
+  });
+
+  if (!resp.ok) {
+    return firstSentence(params.executorResult);
+  }
+
+  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const content = data.choices?.[0]?.message?.content?.trim() ?? '';
+  return content || firstSentence(params.executorResult);
 }
 
 // ─── LLM planner ─────────────────────────────────────────────────────────────
@@ -681,8 +731,16 @@ export async function callMailAgent(
       return 'Impossible de récupérer les emails pour le moment.';
     }
     const combined = successful.join(' | ');
-    log?.info({ action: action.action, result_len: combined.length }, 'mail_agent_done');
-    return combined;
+    const synthesized = await synthesizeMailReplyWithOpenAi({
+      openAiApiKey: env.OPENAI_API_KEY!,
+      openAiBaseUrl: env.OPENAI_BASE_URL,
+      model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      timeoutMs: env.OPENAI_TIMEOUT_MS,
+      userText: text,
+      executorResult: combined,
+    });
+    log?.info({ action: action.action, result_len: synthesized.length }, 'mail_agent_done');
+    return synthesized;
   }
 
   // Single-account action — match by requested label or use first configured account
@@ -691,7 +749,15 @@ export async function callMailAgent(
     : accounts[0];
 
   const token = await getAccountTokenWithStore(target, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
-  const result = await executeGmail(action, token);
-  log?.info({ action: action.action, account: target.label, result_len: result.length }, 'mail_agent_done');
-  return result;
+  const rawResult = await executeGmail(action, token);
+  const synthesized = await synthesizeMailReplyWithOpenAi({
+    openAiApiKey: env.OPENAI_API_KEY!,
+    openAiBaseUrl: env.OPENAI_BASE_URL,
+    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    timeoutMs: env.OPENAI_TIMEOUT_MS,
+    userText: text,
+    executorResult: rawResult,
+  });
+  log?.info({ action: action.action, account: target.label, result_len: synthesized.length }, 'mail_agent_done');
+  return synthesized;
 }

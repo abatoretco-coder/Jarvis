@@ -26,6 +26,8 @@ export class InMemoryThreadRepository implements ThreadRepository {
       summaryCandidateUptoSeq: null,
       summaryStatus: 'idle',
       interactionCount: 0,
+      lastResponseTimeMs: 0,
+      conversationWindowExpiresAtMs: 0,
     };
     this.threads.set(threadId, created);
     return { ...created };
@@ -36,6 +38,29 @@ export class InMemoryThreadRepository implements ThreadRepository {
     row.interactionCount += 1;
     this.threads.set(threadId, row);
     return row.interactionCount;
+  }
+
+  async updateResponseTime(threadId: string, responseTimeMs: number): Promise<void> {
+    const thread = await this.getOrCreate(threadId);
+    thread.lastResponseTimeMs = responseTimeMs;
+    thread.conversationWindowExpiresAtMs = responseTimeMs + 10000;
+    this.threads.set(threadId, thread);
+  }
+
+  async getActiveConversationThread(channel?: string | null): Promise<ThreadRecord | null> {
+    const now = Date.now();
+    const candidates = Array.from(this.threads.values()).filter(
+      (t) =>
+        t.conversationWindowExpiresAtMs > now &&
+        (!channel || t.channel === channel)
+    );
+    if (candidates.length === 0) return null;
+    // Return the thread with the most recent expiry time
+    return candidates.reduce((latest, current) =>
+      current.conversationWindowExpiresAtMs > latest.conversationWindowExpiresAtMs
+        ? current
+        : latest
+    );
   }
 
   async tryStartSummary(threadId: string): Promise<boolean> {

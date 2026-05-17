@@ -10,6 +10,8 @@ export type ThreadRecord = {
   summaryCandidateUptoSeq: number | null;
   summaryStatus: SummaryStatus;
   interactionCount: number;
+  lastResponseTimeMs: number;
+  conversationWindowExpiresAtMs: number;
 };
 
 export type CommitCandidateResult = {
@@ -36,4 +38,6 @@ export interface ThreadRepository {
   listRecent(limit: number, options?: { channel?: string | null }): Promise<ThreadListItem[]>;
   deleteThread(threadId: string): Promise<boolean>;
   purgeThreadsOlderThan(cutoffMs: number): Promise<number>;
+  updateResponseTime(threadId: string, responseTimeMs: number): Promise<void>;
+  getActiveConversationThread(channel?: string | null): Promise<ThreadRecord | null>;
 }

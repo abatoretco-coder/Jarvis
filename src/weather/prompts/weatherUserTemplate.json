@@ -1,0 +1,7 @@
+{
+  "description": "JSON payload sent as user message to the weather synthesis model.",
+  "fields": {
+    "user_text": "The original user request verbatim.",
+    "weather":   "WeatherSnapshot object — current conditions, sensors, short-range forecast."
+  }
+}
