@@ -287,6 +287,174 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(deps.callMailAgent).toHaveBeenCalledWith('Remets le mail de Marie en non lu.');
   });
 
+  it('todo.update_task dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.update_task');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Tache mise a jour.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Decale la tache envoyer le devis a vendredi.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Decale la tache envoyer le devis a vendredi.');
+  });
+
+  it('todo.delete_task dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.delete_task');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Tache supprimee.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Supprime la tache acheter du lait.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Supprime la tache acheter du lait.');
+  });
+
+  it('todo.create_list dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.create_list');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Liste creee.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Cree une liste vacances.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Cree une liste vacances.');
+  });
+
+  it('todo.delete_list dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.delete_list');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Liste supprimee.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Supprime la liste courses.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Supprime la liste courses.');
+  });
+
+  it('todo.add_checklist_item dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.add_checklist_item');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Element ajoute.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Ajoute preparer les documents a la checklist.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Ajoute preparer les documents a la checklist.');
+  });
+
+  it('todo.complete_checklist_item dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.complete_checklist_item');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Element coche.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Coche le point appeler le client.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Coche le point appeler le client.');
+  });
+
+  it('todo.delete_checklist_item dispatches to todo agent', async () => {
+    const route = findRouteByKey('todo.delete_checklist_item');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'Element supprime.'),
+      callMailAgent: jest.fn(async () => 'unused'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Supprime cet item de checklist.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('todo_text');
+    expect(deps.callTodoAgent).toHaveBeenCalledWith('Supprime cet item de checklist.');
+  });
+
+  it('mail.flag_email dispatches to mail agent', async () => {
+    const route = findRouteByKey('mail.flag_email');
+    expect(route).toBeDefined();
+
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async () => 'unused'),
+      callMailAgent: jest.fn(async () => 'Mail marque important.'),
+    };
+
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text: 'Marque le dernier mail de Thomas comme important.',
+      deps,
+    });
+
+    expect(result?.kind).toBe('mail_text');
+    expect(deps.callMailAgent).toHaveBeenCalledWith('Marque le dernier mail de Thomas comme important.');
+  });
+
   it('returns null for todo route when level is not E1', async () => {
     const todoRoute: SemanticRouteDefinition = {
       key: 'todo.list_tasks.today',

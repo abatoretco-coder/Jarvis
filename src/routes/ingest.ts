@@ -177,6 +177,15 @@ const SEMANTIC_E1_LIVE_SAFE_ROUTE_KEYS = new Set([
   'todo.complete_task',
   'mail.mark_read',
   'mail.mark_unread',
+  // Phase 2D
+  'todo.update_task',
+  'todo.delete_task',
+  'todo.create_list',
+  'todo.delete_list',
+  'todo.add_checklist_item',
+  'todo.complete_checklist_item',
+  'todo.delete_checklist_item',
+  'mail.flag_email',
 ]);
 
 async function synthesizeWeatherReplyWithOpenAi(params: {

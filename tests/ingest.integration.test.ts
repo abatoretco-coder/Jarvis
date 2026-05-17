@@ -1769,6 +1769,364 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
+  it('semantic E1 live: todo.update_task bypasses LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'todo.update_task',
+        level: 'E1',
+        targetAgentId: 'todo',
+        plannerRequired: true,
+        directRequest: { domain: 'todo', action: 'update_task' },
+        examples: ['decale la tache'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.72,
+      margin: 0.23,
+      top1Intent: 'todo.update_task',
+      top2Intent: 'todo.list_tasks',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('C est fait, la tache est decalee a vendredi.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.update_task',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-todo-update-live',
+        text: 'Decale la tache envoyer le devis a vendredi.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('decalee');
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 live: todo.delete_task bypasses LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'todo.delete_task',
+        level: 'E1',
+        targetAgentId: 'todo',
+        plannerRequired: true,
+        directRequest: { domain: 'todo', action: 'delete_task' },
+        examples: ['supprime la tache'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.71,
+      margin: 0.23,
+      top1Intent: 'todo.delete_task',
+      top2Intent: 'todo.list_tasks',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('C est fait, la tache est supprimee.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.delete_task',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-todo-delete-live',
+        text: 'Supprime la tache acheter du lait.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('supprimee');
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 live: todo.create_list bypasses LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'todo.create_list',
+        level: 'E1',
+        targetAgentId: 'todo',
+        plannerRequired: true,
+        directRequest: { domain: 'todo', action: 'create_list' },
+        examples: ['cree une liste'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.7,
+      margin: 0.24,
+      top1Intent: 'todo.create_list',
+      top2Intent: 'todo.list_lists',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('C est fait, la liste est creee.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.create_list',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-todo-create-list-live',
+        text: 'Cree une liste vacances.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('liste est creee');
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 live: todo.add_checklist_item bypasses LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'todo.add_checklist_item',
+        level: 'E1',
+        targetAgentId: 'todo',
+        plannerRequired: true,
+        directRequest: { domain: 'todo', action: 'add_checklist_item' },
+        examples: ['ajoute un element checklist'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.7,
+      margin: 0.24,
+      top1Intent: 'todo.add_checklist_item',
+      top2Intent: 'todo.list_tasks',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('C est fait, element de checklist ajoute.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.add_checklist_item',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-todo-add-checklist-live',
+        text: 'Ajoute preparer les documents a la checklist.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('checklist ajoute');
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 live: mail.flag_email bypasses LLM router', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'mail.flag_email',
+        level: 'E1',
+        targetAgentId: 'mail',
+        plannerRequired: true,
+        directRequest: { domain: 'mail', action: 'flag_email' },
+        examples: ['marque ce mail important'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.7,
+      margin: 0.24,
+      top1Intent: 'mail.flag_email',
+      top2Intent: 'mail.search_emails',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallMailAgent.mockResolvedValue('C est fait, le mail est marque comme important.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'mail.flag_email',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-mail-flag-live',
+        text: 'Marque le dernier mail de Thomas comme important.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('marque comme important');
+    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 route mail.flag_email falls back to LLM router when not allowlisted', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'mail.flag_email',
+        level: 'E1',
+        targetAgentId: 'mail',
+        plannerRequired: true,
+        directRequest: { domain: 'mail', action: 'flag_email' },
+        examples: ['marque ce mail important'],
+      },
+      top1Score: 0.94,
+      top2Score: 0.7,
+      margin: 0.24,
+      top1Intent: 'mail.flag_email',
+      top2Intent: 'mail.search_emails',
+      confidence: 0.94,
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.news', confidence: 0.95 }],
+      reason: 'external_weather_forecast',
+    });
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    )) as unknown) as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: '',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-e1-mail-flag-not-allowlisted',
+        text: 'Marque le dernier mail de Thomas comme important.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    expect(mockedCallMailAgent).not.toHaveBeenCalled();
+  });
+
+  it('semantic E1 live mail.flag_email emits SSE ack before response', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'mail.flag_email',
+        level: 'E1',
+        targetAgentId: 'mail',
+        plannerRequired: true,
+        directRequest: { domain: 'mail', action: 'flag_email' },
+        examples: ['marque ce mail important'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.72,
+      margin: 0.23,
+      top1Intent: 'mail.flag_email',
+      top2Intent: 'mail.search_emails',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallMailAgent.mockResolvedValue('C est fait, mail marque important.');
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'mail.flag_email',
+    });
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest?sse=1',
+      headers: {
+        accept: 'text/event-stream',
+      },
+      payload: {
+        threadId: 'thread-semantic-e1-mail-flag-sse',
+        text: 'Marque le dernier mail de Thomas comme important.',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    const body = res.body;
+    const ackPos = body.indexOf('event: ack');
+    const responsePos = body.indexOf('event: response');
+    expect(ackPos).toBeGreaterThanOrEqual(0);
+    expect(responsePos).toBeGreaterThanOrEqual(0);
+    expect(ackPos).toBeLessThan(responsePos);
+    expect(body).toContain('Deux secondes, je consulte tes emails.');
+    expect(body).toContain('marque important');
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
   it('structured spotify uses effective thread id and keeps conversation window active', async () => {
     const calls: Array<{ conversation_id?: string }> = [];
     (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {

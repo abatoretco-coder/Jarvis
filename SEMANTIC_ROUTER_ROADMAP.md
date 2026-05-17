@@ -230,9 +230,9 @@ multiIntent threshold = 0.5
 - Ack SSE avant réponse pour les routes Todo/Mail lentes.
 - Fallback systématique vers routeur LLM sur route non allowlistée/non supportée ou erreur agent.
 
-### Phase 2D : E1 mutations sensibles 🔜 NEXT
+### Phase 2D : E1 mutations complexes mais contenues ✅ COMPLETE
 
-**Scope prévu** :
+**Scope activé** :
 - `todo.update_task`
 - `todo.delete_task`
 - `todo.create_list`
@@ -242,15 +242,36 @@ multiIntent threshold = 0.5
 - `todo.delete_checklist_item`
 - `mail.flag_email`
 
+**Pourquoi ce lot** :
+- actions avec impact réel mais généralement réversibles ou limitées
+- pas d'envoi externe
+
 **Toujours hors scope à ce palier** :
 - `mail.send_email`
 - `mail.reply_email`
 - `mail.forward_email`
 - `mail.trash_email`
 
+**Statut** :
+- Activation live via allowlist E1 (`SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES`)
+- Dispatch direct vers agents Todo/Mail avec fallback LLM inchangé
+- Couverture tests unitaires + intégration étendue
+
+### Phase 2E : E1 actions Mail sensibles 🔜 NEXT
+
+**Scope prévu** :
+- `mail.send_email`
+- `mail.reply_email`
+- `mail.forward_email`
+- `mail.trash_email`
+
+**Pourquoi isoler ce palier** :
+- envoi externe ou suppression de contenu
+- besoin de garde-fous renforcés (logs, seuil de confiance plus exigeant, confirmation conversationnelle selon cas)
+
 ---
 
-### Phase 3 : HA Executors & Tuning (Semaine 7-8, 3 commits)
+### Phase 3 : HA Executors & Tuning (après 2D+2E)
 
 **Commits** :
 18. HA Executor routes (E2 + E1)
