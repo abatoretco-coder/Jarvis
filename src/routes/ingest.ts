@@ -27,6 +27,8 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { trySemanticRouter } from '../routing/semanticRouter';
+import type { EmbeddingClientConfig } from '../routing/semanticRouter.types';
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
@@ -701,6 +703,52 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           },
         })
       : Promise.reject(new Error('router_disabled'));
+
+    // ── Semantic Router — Phase 1A shadow mode ────────────────────────────────
+    // The semantic router observes every request and logs its decision.
+    // In shadow mode it never overrides the LLM router result.
+    if (deps.env.SEMANTIC_ROUTER_ENABLED) {
+      const embeddingCfg: EmbeddingClientConfig = {
+        provider: deps.env.SEMANTIC_ROUTER_PROVIDER,
+        baseUrl: deps.env.SEMANTIC_ROUTER_BASE_URL,
+        model: deps.env.SEMANTIC_ROUTER_MODEL,
+        timeoutMs: deps.env.SEMANTIC_ROUTER_TIMEOUT_MS,
+        apiKey: deps.env.SEMANTIC_ROUTER_PROVIDER === 'openai' ? deps.env.OPENAI_API_KEY : undefined,
+      };
+      app.log.info({ threadId, requestId, text_len: assistantInputText.length }, 'semantic_router_start');
+      trySemanticRouter({
+        userText: assistantInputText,
+        embeddingConfig: embeddingCfg,
+        options: {
+          acceptScore: deps.env.SEMANTIC_ROUTER_ACCEPT_SCORE,
+          minMargin: deps.env.SEMANTIC_ROUTER_MIN_MARGIN,
+          enableE2: true,
+          enableE1: true,
+          enableD0: true,
+        },
+        enabledLevels: ['D0', 'E2'],
+        context: { threadId, requestId },
+      }).then((semResult) => {
+        app.log.info(
+          {
+            threadId,
+            requestId,
+            semanticTop1: semResult.top1Intent,
+            semanticScore: semResult.top1Score,
+            semanticTop2: semResult.top2Intent,
+            margin: semResult.margin,
+            decision: semResult.decision,
+            accepted: semResult.accepted,
+            elapsedMs: semResult.elapsedMs,
+            cachedEmbedding: semResult.debug?.cachedEmbedding,
+            shadow: deps.env.SEMANTIC_ROUTER_SHADOW_MODE,
+          },
+          semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
+        );
+      }).catch((err) => {
+        app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
+      });
+    }
 
     // Early SSE ack: fire as soon as the router decides, without waiting for HA general.
     // This gives the user immediate feedback ("Je cherche...") before Perplexity/todo/mail respond.
