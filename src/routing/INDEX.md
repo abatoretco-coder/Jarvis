@@ -7,7 +7,7 @@
 
 ## 📚 Documentation
 
-### 1. **[SEMANTIC_ROUTER_ROADMAP.md](../SEMANTIC_ROUTER_ROADMAP.md)** ← COMMENCER ICI
+### 1. **[ROADMAP.md](../../docs/semantic-router/ROADMAP.md)** ← COMMENCER ICI
    - Vue d'ensemble complète
    - 4 phases d'implémentation (8-10 semaines)
    - Matrice par domaine (Spotify, Search, Todo, Mail, HA)
@@ -314,7 +314,7 @@ semantic_router_result
 
 ## 🚀 Next Steps
 
-1. **Lire** [SEMANTIC_ROUTER_ROADMAP.md](../SEMANTIC_ROUTER_ROADMAP.md)
+1. **Lire** [ROADMAP.md](../../docs/semantic-router/ROADMAP.md)
 2. **Comprendre** [ARCHITECTURE.md](./ARCHITECTURE.md)
 3. **Implémenter** Phase 0 (6 commits TypeScript)
 4. **Tester** avec fixtures Phase 1

@@ -598,4 +598,4 @@ Dashboard Grafana recommandé avec ces métriques.
 ---
 
 **Status** : En attente Phase 0 implementation  
-**Prochaine étape** : [SEMANTIC_ROUTER_ROADMAP.md](../SEMANTIC_ROUTER_ROADMAP.md)
+**Prochaine étape** : [ROADMAP.md](../../docs/semantic-router/ROADMAP.md)
