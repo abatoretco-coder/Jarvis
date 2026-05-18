@@ -49,12 +49,28 @@ function New-OutputFolder([string]$basePath) {
   return $folder
 }
 
-function Get-GitValue([string]$args, [string]$fallback = 'unknown') {
+function Get-GitCommitShort() {
   try {
-    $value = (& git $args.Split(' ') 2>$null)
-    if ($value) { return ($value -join "`n").Trim() }
+    $value = (git rev-parse --short HEAD 2>$null)
+    if ($value) { return $value.Trim() }
   } catch {}
-  return $fallback
+  return 'unknown'
+}
+
+function Get-GitBranch() {
+  try {
+    $value = (git branch --show-current 2>$null)
+    if ($value) { return $value.Trim() }
+  } catch {}
+  return 'unknown'
+}
+
+function Get-GitDescribe() {
+  try {
+    $value = (git describe --tags --always --dirty 2>$null)
+    if ($value) { return $value.Trim() }
+  } catch {}
+  return 'unknown'
 }
 
 $resolvedApiKey = Resolve-ApiKey $ApiKey
@@ -103,9 +119,10 @@ if ($Text -and $Text.Trim().Length -gt 0) {
 
   $ingestBodyJson = $ingestBodyObj | ConvertTo-Json -Depth 20
   $ingestBodyJson | Set-Content -Path (Join-Path $outFolder 'ingest-request.json') -Encoding UTF8
+  $ingestBodyBytes = [System.Text.Encoding]::UTF8.GetBytes($ingestBodyJson)
 
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $ingestResp = Invoke-RestMethod -Uri "$baseUrl/v1/ingest" -Method Post -Headers $headers -ContentType 'application/json' -Body $ingestBodyJson -TimeoutSec 90
+  $ingestResp = Invoke-RestMethod -Uri "$baseUrl/v1/ingest" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $ingestBodyBytes -TimeoutSec 90
   $sw.Stop()
 
   $ingestResp | ConvertTo-Json -Depth 20 | Set-Content -Path (Join-Path $outFolder 'ingest-response.json') -Encoding UTF8
@@ -145,9 +162,9 @@ $runSummary = [ordered]@{
   base_url = $baseUrl
   selected_thread_id = $selectedThreadId
   jarvis_git = [ordered]@{
-    commit = Get-GitValue 'rev-parse --short HEAD'
-    branch = Get-GitValue 'branch --show-current'
-    describe = Get-GitValue 'describe --tags --always --dirty'
+    commit = Get-GitCommitShort
+    branch = Get-GitBranch
+    describe = Get-GitDescribe
   }
   latest_exchange = [ordered]@{
     user_text = if ($userLatest) { [string]$userLatest.content } else { '' }

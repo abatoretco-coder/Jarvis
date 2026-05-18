@@ -44,7 +44,7 @@ export async function dispatchAcceptedSearchE2Route(
   if (domain !== 'search.news' && domain !== 'search.web') return null;
 
   try {
-    const responseText = await input.callSearchAgent(domain, {
+    const responseText = await input.callSearchAgent(routeKey, {
       ...input.searchCallParams,
       text: input.text,
     });

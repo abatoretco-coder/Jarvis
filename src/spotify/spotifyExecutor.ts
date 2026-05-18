@@ -2,6 +2,7 @@
 import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { getSpotifyCapability, SPOTIFY_CAPABILITY_REGISTRY_VERSION } from './capabilityRegistry';
 import type { IngestSpotifyRequest, JarvisSpotifyResponse } from './contracts';
+import { evaluateGenericResumeGate } from './deterministicSpotifyIntent';
 import { selectBestSpotifyResult } from './musicAgentPlanner';
 
 type LoggerLike = {
@@ -92,61 +93,6 @@ function hasHalfVolumeIntent(text?: string): boolean {
   if (!source) return false;
   return /(moitie|half)/.test(source);
 }
-
-function hasGenericMusicResumeIntent(input: {
-  text?: string;
-  query?: string;
-}): boolean {
-  const text = normalizeForMatch(input.text ?? '');
-  const query = normalizeForMatch(input.query ?? '');
-  if (query) return false;
-  const source = text.trim();
-  if (!source) return false;
-  const deviceSuffix = '( sur( le| la| mon| ma)? (pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom))?';
-
-  const exact = new Set([
-    'reprends',
-    'relance',
-    'demarre',
-    'start',
-    'play',
-    'mets la musique',
-    'met la musique',
-    'joue de la musique',
-    'lance de la musique',
-    'lance spotify',
-    'mets spotify',
-    'met spotify',
-    'reprends spotify',
-    'relance spotify',
-  ]);
-  if (exact.has(source)) return true;
-
-  return new RegExp(`^((re)?lance|reprends|demarre|start|play)( la)?( musique| spotify)?${deviceSuffix}$`).test(source)
-    || new RegExp(`^(mets|met|joue|lance)( de)? la musique( sur spotify)?${deviceSuffix}$`).test(source);
-}
-
-function evaluateGenericResumeGate(input: {
-  text?: string;
-  query?: string;
-}): {
-  enabled: boolean;
-  offReason?: 'query_present' | 'non_generic_command';
-} {
-  const normalizedQuery = normalizeForMatch(input.query ?? '');
-  if (normalizedQuery) {
-    return { enabled: false, offReason: 'query_present' };
-  }
-
-  if (!hasGenericMusicResumeIntent(input)) {
-    return { enabled: false, offReason: 'non_generic_command' };
-  }
-
-  return { enabled: true };
-}
-
-
-
 
 function normalizeCatalogOptions(type: string, items: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   return items

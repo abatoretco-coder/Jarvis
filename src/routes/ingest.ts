@@ -1,23 +1,29 @@
-﻿import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+﻿import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
+import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
-import { enrichWithContextNote } from '../conversation/contextNote';
 import {
-  routeUserRequest,
-  parseAgentMap,
-  SPOTIFY_AGENT_ID,
-  synthesizeAgentResponses,
   type AgentRouteEntry,
+  parseAgentMap,
   type RouterResult,
   type RouterTarget,
+  routeUserRequest,
+  SPOTIFY_AGENT_ID,
+  synthesizeAgentResponses,
 } from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
+import {
+  createConversationDb,
+  SqliteMessageRepository,
+  SqliteThreadRepository,
+} from '../conversation/repositories/SqliteRepositories';
+import { SummarizationService } from '../conversation/SummarizationService';
 import {
   buildLastMailSummaryFromState,
   extractMailStateFromReply,
@@ -28,36 +34,33 @@ import {
   type VoiceResponseDomain,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
-import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
-import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
-import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
-import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
-import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
-import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
-import {
-  createConversationDb,
-  SqliteMessageRepository,
-  SqliteThreadRepository,
-} from '../conversation/repositories/SqliteRepositories';
-import { SummarizationService } from '../conversation/SummarizationService';
-import type { AppDeps } from '../server';
-import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
-import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
-import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
-import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
-import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
-import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
-import { estimateMultiIntentLikelihood } from '../routing/multiIntentLikelihood';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
   LOCAL_WEATHER_ROUTING_CONFIG,
+  ROUTING_CONFIG_HASH,
+  ROUTING_CONFIG_VERSION,
+  SEMANTIC_ROUTER_CONFIG_HASH,
 } from '../routing/deterministic/config/routingDeterministicConfig';
-import { trySemanticRouter } from '../routing/semanticRouter';
-import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
+import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
+import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
+import { analyzeMultiIntentLikelihood } from '../routing/multiIntentLikelihood';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
 import { warmupRouteEmbeddings } from '../routing/routeScoring';
+import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
+import { trySemanticRouter } from '../routing/semanticRouter';
+import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
+import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
+import type { AppDeps } from '../server';
+import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
+import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
+import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
+import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
+import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
+import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
+import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
@@ -463,6 +466,28 @@ function normalizeRoutingText(text: string): string {
     .trim();
 }
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractExternalWeatherLocationToken(text: string): string | null {
+  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
+  const normalized = normalizeRoutingText(text);
+  if (!normalized) return null;
+
+  const prepPattern = cfg.externalLocationPrepositions.map(escapeRegex).join('|');
+  const articlePattern = cfg.locationArticles.map(escapeRegex).join('|');
+  const re = new RegExp(`(?:^|\\s)(?:${prepPattern})\\s+(?:(?:${articlePattern})\\s+)?([a-z][a-z0-9'-]*)`, 'u');
+  const match = normalized.match(re);
+  if (!match?.[1]) return null;
+
+  const token = match[1].trim();
+  if (!token) return null;
+  if (cfg.explicitLocalLocationTerms.includes(token)) return null;
+  if (cfg.weatherLexemes.includes(token)) return null;
+  return token;
+}
+
 function isLikelyLocalWeatherQuery(text: string): boolean {
   const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
   const t = ` ${normalizeRoutingText(text)} `;
@@ -474,15 +499,35 @@ function isLikelyLocalWeatherQuery(text: string): boolean {
   const hasExplicitLocalMarker = cfg.explicitLocalMarkers.some((marker) => t.includes(` ${marker} `));
   if (hasExplicitLocalMarker) return true;
 
+  const hasExternalLocationStructure = extractExternalWeatherLocationToken(text) !== null;
+  if (hasExternalLocationStructure) return false;
+
   // Explicit external city/location queries should stay in external search/weather path.
   const externalLocationsRegex = new RegExp(
-    `\\b(?:${cfg.explicitExternalLocations.map((location) => location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+    `\\b(?:${cfg.explicitExternalLocations.map(escapeRegex).join('|')})\\b`,
     'u',
   );
   const hasExplicitExternalLocation = externalLocationsRegex.test(t);
   if (hasExplicitExternalLocation) return false;
 
   return true;
+}
+
+function isLikelyExternalWeatherQuery(text: string): boolean {
+  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
+  const normalized = ` ${normalizeRoutingText(text)} `;
+  if (!normalized.trim()) return false;
+
+  const hasWeatherLexeme = cfg.weatherLexemes.some((lexeme) => normalized.includes(` ${lexeme} `));
+  if (!hasWeatherLexeme) return false;
+
+  if (extractExternalWeatherLocationToken(text) !== null) return true;
+
+  const externalLocationsRegex = new RegExp(
+    `\\b(?:${cfg.explicitExternalLocations.map(escapeRegex).join('|')})\\b`,
+    'u',
+  );
+  return externalLocationsRegex.test(normalized);
 }
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
@@ -836,6 +881,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         client_channel: clientChannel,
         voice_turn_id: voiceTurnId || undefined,
         correlation_id: correlationId || undefined,
+        routing_config_version: ROUTING_CONFIG_VERSION,
+        routing_config_hash: ROUTING_CONFIG_HASH,
+        semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
       },
       'ingest_start',
     );
@@ -956,7 +1004,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     let semanticE1SpotifyPlan: MusicAgentPlan | undefined;
 
     if (deps.env.SEMANTIC_ROUTER_ENABLED) {
-      const multiIntentLikelihood = estimateMultiIntentLikelihood(text);
+      const multiIntent = analyzeMultiIntentLikelihood(text);
+      const multiIntentLikelihood = multiIntent.score;
       const multiIntentThreshold = deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD;
       const runtimeMultiIntentGuard = multiIntentLikelihood > multiIntentThreshold;
       const semanticInput: SemanticRouterInput = {
@@ -976,12 +1025,35 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       };
 
       app.log.info(
-        { threadId, requestId, text_len: text.length, multiIntentLikelihood, multiIntentThreshold },
+        {
+          threadId,
+          requestId,
+          text_len: text.length,
+          multiIntentLikelihood,
+          multiIntentThreshold,
+          multi_intent_marker_count: multiIntent.markerCount,
+          multi_intent_segment_count: multiIntent.segmentCount,
+          multi_intent_verb_count: multiIntent.verbCount,
+          multi_intent_marker_score: multiIntent.markerScore,
+          multi_intent_segment_score: multiIntent.segmentScore,
+          multi_intent_extra_verb_score: multiIntent.extraVerbScore,
+          routing_config_version: ROUTING_CONFIG_VERSION,
+          routing_config_hash: ROUTING_CONFIG_HASH,
+          semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
+        },
         'semantic_router_start',
       );
       if (runtimeMultiIntentGuard) {
         app.log.info(
-          { threadId, requestId, multiIntentLikelihood, multiIntentThreshold },
+          {
+            threadId,
+            requestId,
+            multiIntentLikelihood,
+            multiIntentThreshold,
+            multi_intent_marker_count: multiIntent.markerCount,
+            multi_intent_segment_count: multiIntent.segmentCount,
+            multi_intent_verb_count: multiIntent.verbCount,
+          },
           'semantic_router_skip_multi_intent_runtime',
         );
       }
@@ -1548,7 +1620,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         } catch (err) {
           app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
         }
-      } else if (!runtimeMultiIntentGuard) {
+      } else {
         // Phase 1A shadow mode (observation only)
         trySemanticRouter(semanticInput).then((semResult) => {
           app.log.info(
@@ -1565,6 +1637,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               cachedEmbedding: semResult.debug?.cachedEmbedding,
               shadow: deps.env.SEMANTIC_ROUTER_SHADOW_MODE,
               activationEnabled: false,
+              runtimeMultiIntentGuard,
+              routing_config_hash: ROUTING_CONFIG_HASH,
+              semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
             },
             semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
           );
@@ -1635,6 +1710,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     );
 
     if (routerResult.status === 'rejected' && routerEnabled) {
+      const multiIntent = analyzeMultiIntentLikelihood(text);
       app.log.info(
         {
           threadId,
@@ -1642,6 +1718,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           router_status: 'rejected',
           router_error: String(routerResult.reason),
           local_weather_candidate: isLikelyLocalWeatherQuery(text),
+          multi_intent_likelihood: multiIntent.score,
+          multi_intent_marker_count: multiIntent.markerCount,
+          multi_intent_segment_count: multiIntent.segmentCount,
+          multi_intent_verb_count: multiIntent.verbCount,
+          routing_config_version: ROUTING_CONFIG_VERSION,
+          routing_config_hash: ROUTING_CONFIG_HASH,
+          semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
         },
         'ingest_routing_trace',
       );
@@ -1655,10 +1738,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const agentEntryById = new Map(allAgentEntries.map((entry) => [entry.agentId, entry]));
       let validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
 
-      const localWeatherCandidate = Boolean(weatherEntry) && isLikelyLocalWeatherQuery(text);
+      const localWeatherCandidateByLexeme = Boolean(weatherEntry) && isLikelyLocalWeatherQuery(text);
+      const externalWeatherCandidate = isLikelyExternalWeatherQuery(text);
+      const rawHasSearchWeatherTarget = routerResult.value.targets.some((target) => {
+        const entry = agentEntryById.get(target.agentId);
+        if (entry?.key === 'search.news') return true;
+        return target.agentId === 'search.news';
+      });
+      const semanticTop1IsExternalWeather = semanticActivatedRouteKey === 'search.news.external_weather';
+      const localWeatherCandidate = localWeatherCandidateByLexeme && !rawHasSearchWeatherTarget && !semanticTop1IsExternalWeather;
       let localWeatherInjected = false;
       let localWeatherSearchRemoved = false;
-      const multiIntentForWeatherLock = estimateMultiIntentLikelihood(text);
+      let externalWeatherInjected = false;
+      let externalWeatherLocalRemoved = false;
+      const multiIntent = analyzeMultiIntentLikelihood(text);
+      const multiIntentForWeatherLock = multiIntent.score;
+      if (externalWeatherCandidate && !rawHasSearchWeatherTarget && !semanticTop1IsExternalWeather) {
+        validTargets = [{ agentId: 'search.news', confidence: 1 }, ...validTargets];
+        externalWeatherInjected = true;
+      }
       if (localWeatherCandidate) {
         const hasWeatherTarget = validTargets.some((t) => t.agentId === 'weather');
         if (!hasWeatherTarget) {
@@ -1678,6 +1776,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           localWeatherSearchRemoved = validTargets.length < beforeCount;
         }
       }
+      if (externalWeatherCandidate && multiIntentForWeatherLock <= deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD) {
+        const beforeCount = validTargets.length;
+        validTargets = validTargets.filter((t) => t.agentId !== 'weather');
+        externalWeatherLocalRemoved = validTargets.length < beforeCount;
+      }
 
       app.log.info(
         {
@@ -1688,9 +1791,21 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           router_targets_raw: routerResult.value.targets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
           router_targets_final: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
           local_weather_candidate: localWeatherCandidate,
+          local_weather_candidate_raw: localWeatherCandidateByLexeme,
           local_weather_injected: localWeatherInjected,
           local_weather_search_removed: localWeatherSearchRemoved,
+          external_weather_candidate: externalWeatherCandidate,
+          external_weather_injected: externalWeatherInjected,
+          external_weather_local_removed: externalWeatherLocalRemoved,
           multi_intent_likelihood: multiIntentForWeatherLock,
+          multi_intent_marker_count: multiIntent.markerCount,
+          multi_intent_segment_count: multiIntent.segmentCount,
+          multi_intent_verb_count: multiIntent.verbCount,
+          semantic_top1_is_external_weather: semanticTop1IsExternalWeather,
+          router_raw_has_search_weather: rawHasSearchWeatherTarget,
+          routing_config_version: ROUTING_CONFIG_VERSION,
+          routing_config_hash: ROUTING_CONFIG_HASH,
+          semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
         },
         'ingest_routing_trace',
       );
@@ -1816,7 +1931,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
-            const searchAgentKey = agentEntry!.key ?? 'search';
+            const searchAgentKey = externalWeatherCandidate && agentEntry?.key === 'search.news'
+              ? 'search.news.external_weather'
+              : agentEntry!.key ?? 'search';
             app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
             tasks.push(
               callSearchAgent(searchAgentKey, {

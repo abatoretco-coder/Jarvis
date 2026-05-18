@@ -461,6 +461,22 @@ async function findTaskAcrossWatchedLists(
   return hits.find((r) => r !== null) ?? null;
 }
 
+async function findTaskMatchesAcrossWatchedLists(
+  token: string,
+  title: string,
+  includeCompleted = false,
+): Promise<Array<{ list: MsTaskList; task: MsTask }>> {
+  const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
+  const watched = (allData.value ?? []).filter(isWatchedList);
+  const hits = await Promise.all(
+    watched.map(async (l) => {
+      const task = await findTask(token, l.id, title, includeCompleted);
+      return task ? { list: l, task } : null;
+    }),
+  );
+  return hits.filter((item): item is { list: MsTaskList; task: MsTask } => item !== null);
+}
+
 /** Normalize a reminder dateTime string (from LLM) to 'HH:MM:SS.0000000'.
  * Handles: '09:00', '09:00:00', '09:00:00.000', etc.
  */
@@ -815,8 +831,13 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         task = await findTask(token, list.id, action.title, true);
         if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
       } else {
-        const found = await findTaskAcrossWatchedLists(token, action.title, true);
-        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTaskMatchesAcrossWatchedLists(token, action.title, true);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) {
+          const options = matches.slice(0, 3).map((match) => `${match.task.title} dans ${match.list.displayName}`);
+          return `J'ai trouvé plusieurs tâches possibles. Dis-moi laquelle supprimer : ${joinFr(options)}.`;
+        }
+        const found = matches[0]!;
         list = found.list; task = found.task;
       }
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}`, token);
@@ -832,8 +853,13 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         task = await findTask(token, list.id, action.title, true);
         if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
       } else {
-        const found = await findTaskAcrossWatchedLists(token, action.title, true);
-        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTaskMatchesAcrossWatchedLists(token, action.title, true);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) {
+          const options = matches.slice(0, 3).map((match) => `${match.task.title} dans ${match.list.displayName}`);
+          return `J'ai trouvé plusieurs tâches possibles. Dis-moi laquelle modifier : ${joinFr(options)}.`;
+        }
+        const found = matches[0]!;
         list = found.list; task = found.task;
       }
 
@@ -900,8 +926,10 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
       const lists = data.value ?? [];
       const needle = normalizeForMatch(action.name);
-      const found = lists.find((l) => normalizeForMatch(l.displayName) === needle);
-      if (!found) return `Je n'ai pas trouvé de liste correspondant à ${action.name}.`;
+      const matches = lists.filter((l) => normalizeForMatch(l.displayName) === needle);
+      if (matches.length === 0) return `Je n'ai pas trouvé de liste correspondant à ${action.name}.`;
+      if (matches.length > 1) return `J'ai trouvé plusieurs listes nommées ${action.name}. Précise laquelle supprimer.`;
+      const found = matches[0]!;
       // Built-in lists (defaultList, flaggedEmails) cannot be deleted.
       if (found.wellknownListName && found.wellknownListName !== 'none') {
         return `La liste ${found.displayName} est une liste système, je ne peux pas la supprimer.`;
@@ -953,8 +981,10 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         token,
       );
       const needle = normalizeForMatch(action.item_title);
-      const item = checkData.value?.find((c) => normalizeForMatch(c.displayName) === needle);
-      if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
+      const matches = (checkData.value ?? []).filter((c) => normalizeForMatch(c.displayName) === needle);
+      if (matches.length === 0) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
+      if (matches.length > 1) return `J'ai trouvé plusieurs éléments ${action.item_title} dans ${task.title}. Précise lequel supprimer.`;
+      const item = matches[0]!;
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token);
       return `${item.displayName} a bien été supprimée de ${task.title}.`;
     }

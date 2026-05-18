@@ -6,6 +6,9 @@ import { SPOTIFY_CAPABILITIES } from './capabilityRegistry';
 import { buildMusicAgentSystemPrompt } from './prompts/musicAgentSystemPrompt';
 import { buildMusicAgentUserTemplate } from './prompts/musicAgentUserTemplate';
 import { spotifyActionSchema } from './contracts';
+import {
+  evaluateSearchAndPlayDeterministicGate,
+} from './deterministicSpotifyIntent';
 
 type LoggerLike = {
   info?: (obj: Record<string, unknown>, msg?: string) => void;
@@ -76,81 +79,10 @@ function parseJsonObject(raw: string): unknown {
   }
 }
 
-function normalizeForMatch(input: string): string {
-  return String(input ?? '')
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
 function nonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
-}
-
-function hasGenericMusicResumeIntent(text: string): boolean {
-  const source = normalizeForMatch(text);
-  if (!source) return false;
-  const deviceSuffix = '( sur( le| la| mon| ma)? (pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom))?';
-
-  // Deterministic-only: fallback to plain "play" is allowed ONLY for explicit
-  // generic commands. Any richer utterance must stay in semantic/planner layers.
-  const exact = new Set([
-    'reprends',
-    'relance',
-    'demarre',
-    'start',
-    'play',
-    'mets la musique',
-    'met la musique',
-    'joue de la musique',
-    'lance de la musique',
-    'lance spotify',
-    'mets spotify',
-    'met spotify',
-    'reprends spotify',
-    'relance spotify',
-  ]);
-  if (exact.has(source)) return true;
-
-  return new RegExp(`^((re)?lance|reprends|demarre|start|play)( la)?( musique| spotify)?${deviceSuffix}$`).test(source)
-    || new RegExp(`^(mets|met|joue|lance)( de)? la musique( sur spotify)?${deviceSuffix}$`).test(source);
-}
-
-function evaluateSearchAndPlayDeterministicGate(input: {
-  action: z.infer<typeof spotifyActionSchema>;
-  slots: Record<string, unknown>;
-  userText: string;
-  requestText?: string;
-}): {
-  enabled: boolean;
-  offReason?: 'action_not_search_and_play' | 'target_present' | 'non_generic_command';
-  hasTarget: boolean;
-} {
-  if (input.action !== 'search_and_play') {
-    return { enabled: false, offReason: 'action_not_search_and_play', hasTarget: false };
-  }
-
-  const hasTarget = Boolean(
-    nonEmptyString(input.slots.query)
-    || nonEmptyString(input.slots.text)
-    || nonEmptyString(input.slots.uri)
-    || nonEmptyString(input.slots.track_uri)
-    || nonEmptyString(input.slots.context_uri),
-  );
-  if (hasTarget) {
-    return { enabled: false, offReason: 'target_present', hasTarget: true };
-  }
-
-  const combinedText = `${input.userText} ${input.requestText ?? ''}`.trim();
-  const generic = hasGenericMusicResumeIntent(combinedText);
-  if (!generic) {
-    return { enabled: false, offReason: 'non_generic_command', hasTarget: false };
-  }
-
-  return { enabled: true, hasTarget: false };
 }
 
 function buildActionCatalog(): string {

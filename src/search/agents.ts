@@ -92,6 +92,34 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
 
 // Legacy backward-compat: bare 'search' key behaves like search.web.
 SEARCH_AGENTS_MAP['search'] = { ...SEARCH_AGENTS_MAP['search.web']!, key: 'search' };
+SEARCH_AGENTS_MAP['search.news.external_weather'] = {
+  ...SEARCH_AGENTS_MAP['search.news']!,
+  key: 'search.news.external_weather',
+  maxTokens: 180,
+  buildSystemPrompt: (dateStr) => [
+    buildSearchAgentSystemPrompt('search.news', dateStr),
+    'Tu reponds a une demande de meteo externe.',
+    'Donne un resume concret et court: lieu, periode demandee, temperature ou fourchette, precipitation, condition dominante.',
+    'Si les informations sont partielles, dis ce qui est certain au lieu de repondre que tu ne sais pas.',
+  ].join('\n'),
+  buildUserQuery: (text, dayStr) => `${text}. Date de reference: ${dayStr}. Si necessaire, recherche les previsions meteorologiques precises pour le lieu et la periode demandes.`,
+};
+SEARCH_AGENTS_MAP['search.news.live_sport'] = {
+  ...SEARCH_AGENTS_MAP['search.news']!,
+  key: 'search.news.live_sport',
+};
+SEARCH_AGENTS_MAP['search.news.current_news'] = {
+  ...SEARCH_AGENTS_MAP['search.news']!,
+  key: 'search.news.current_news',
+};
+SEARCH_AGENTS_MAP['search.web.definition'] = {
+  ...SEARCH_AGENTS_MAP['search.web']!,
+  key: 'search.web.definition',
+};
+SEARCH_AGENTS_MAP['search.web.quick_lookup'] = {
+  ...SEARCH_AGENTS_MAP['search.web']!,
+  key: 'search.web.quick_lookup',
+};
 
 const SEARCH_AGENTS: Readonly<Record<string, SearchAgentConfig>> = SEARCH_AGENTS_MAP;
 

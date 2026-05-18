@@ -13,7 +13,35 @@
     "chez moi",
     "ici",
     "maison",
-    "home"
+    "home",
+    "salon"
+  ],
+  "explicitLocalLocationTerms": [
+    "moi",
+    "maison",
+    "home",
+    "salon",
+    "bureau"
+  ],
+  "externalLocationPrepositions": [
+    "a",
+    "pour",
+    "sur",
+    "dans"
+  ],
+  "locationArticles": [
+    "le",
+    "la",
+    "l",
+    "les",
+    "au",
+    "aux",
+    "du",
+    "de",
+    "des",
+    "mon",
+    "ma",
+    "mes"
   ],
   "explicitExternalLocations": [
     "paris",

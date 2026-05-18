@@ -438,7 +438,18 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 
-  it('semantic activation: runtime multi-intent guard skips semantic router', async () => {
+  it('semantic activation: runtime multi-intent guard keeps semantic router in shadow', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: false,
+      decision: 'fallback_llm',
+      top1Score: 0.72,
+      top2Score: 0.68,
+      margin: 0.04,
+      top1Intent: 'weather.current_temperature',
+      top2Intent: 'weather.current_conditions',
+      confidence: 0.72,
+      fallbackReason: 'multi_intent_runtime',
+    });
     mockedRouteUserRequest.mockResolvedValue({
       targets: [{ agentId: 'weather', confidence: 0.99 }],
       reason: 'llm_weather_route',
@@ -481,7 +492,57 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+    expect(mockedTrySemanticRouter).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('weather routing: external location phrase keeps request on search weather path', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'ensoleille',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 24,
+          humidity: 42,
+          precipitation_probability: 0,
+        },
+      },
+    ];
+
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.news', confidence: 0.95 }],
+      reason: 'external_weather_forecast',
+    });
+    const fetchMock = jest.fn(async () => (
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: 'Demain a Florence, attends-toi a 27 degres et du soleil.' } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    ));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-weather-florence',
+        text: 'Meteo a Florence demain',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Florence');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 

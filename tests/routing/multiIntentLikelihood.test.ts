@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { estimateMultiIntentLikelihood } from '../../src/routing/multiIntentLikelihood';
+import { analyzeMultiIntentLikelihood, estimateMultiIntentLikelihood } from '../../src/routing/multiIntentLikelihood';
 
 describe('estimateMultiIntentLikelihood', () => {
   it('returns low likelihood for a simple single intent', () => {
@@ -19,5 +19,14 @@ describe('estimateMultiIntentLikelihood', () => {
     );
     expect(score).toBeGreaterThanOrEqual(0);
     expect(score).toBeLessThanOrEqual(1);
+  });
+
+  it('returns a breakdown usable for routing logs', () => {
+    const analysis = analyzeMultiIntentLikelihood('cherche les mails de Pierre et Paul puis ajoute une tache');
+
+    expect(analysis.markerCount).toBeGreaterThan(0);
+    expect(analysis.verbCount).toBeGreaterThan(1);
+    expect(analysis.segmentCount).toBeGreaterThanOrEqual(1);
+    expect(analysis.score).toBe(estimateMultiIntentLikelihood('cherche les mails de Pierre et Paul puis ajoute une tache'));
   });
 });

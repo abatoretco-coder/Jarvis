@@ -1,4 +1,5 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { cleanMailDetailText } from './mailContentCleaner';
 import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';
 import { buildMailSynthesisUserPrompt } from './prompts/mailSynthesisUserTemplate';
 
@@ -537,6 +538,22 @@ async function findGmailMessages(token: string, q: string, max = 5): Promise<Gma
   return list.messages ?? [];
 }
 
+async function summarizeGmailMatches(token: string, refs: GmailMessageRef[]): Promise<string[]> {
+  const detailed = await Promise.all(
+    refs.slice(0, 3).map((m) =>
+      gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
+        .catch(() => null),
+    ),
+  );
+  return detailed
+    .filter((m): m is GmailMessage => m !== null)
+    .map((m) => {
+      const from = gmailHeader(m, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
+      const subject = gmailHeader(m, 'Subject') || '(sans objet)';
+      return `${from} : ${subject}`;
+    });
+}
+
 function decodeGmailBody(msg: GmailMessage): string {
   const data =
     msg.payload?.body?.data ??
@@ -629,8 +646,12 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       const parts: string[] = [];
       if (action.sender)  parts.push(`from:${action.sender}`);
       if (action.subject) parts.push(`subject:${action.subject}`);
-      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 1);
+      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 5);
       if (msgs.length === 0) return 'Aucun email trouvé pour répondre.';
+      if (msgs.length > 1 && action.sender && !action.subject) {
+        const options = await summarizeGmailMatches(token, msgs);
+        return `J'ai trouvé plusieurs emails possibles de ${action.sender}. Dis-moi lequel tu veux traiter : ${options.join(' ; ')}.`;
+      }
 
       const msg = await gmailGet<GmailMessage>(
         `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=References`,
@@ -652,8 +673,12 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       const parts: string[] = [];
       if (action.sender)  parts.push(`from:${action.sender}`);
       if (action.subject) parts.push(`subject:${action.subject}`);
-      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 1);
+      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 5);
       if (msgs.length === 0) return 'Aucun email trouvé pour transférer.';
+      if (msgs.length > 1 && action.sender && !action.subject) {
+        const options = await summarizeGmailMatches(token, msgs);
+        return `J'ai trouvé plusieurs emails possibles de ${action.sender}. Dis-moi lequel tu veux transférer : ${options.join(' ; ')}.`;
+      }
 
       const msg = await gmailGet<GmailMessage>(
         `/messages/${msgs[0].id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
@@ -686,7 +711,11 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       if (action.subject) parts.push(`subject:${action.subject}`);
       const msgs = await findGmailMessages(token, parts.join(' '), 5);
       if (msgs.length === 0) return 'Aucun email trouvé.';
-      const toTrash = msgs.slice(0, 3);
+      if (msgs.length > 1) {
+        const options = await summarizeGmailMatches(token, msgs);
+        return `J'ai trouvé plusieurs emails possibles. Dis-moi lequel tu veux supprimer : ${options.join(' ; ')}.`;
+      }
+      const toTrash = msgs.slice(0, 1);
       const details = await Promise.all(
         toTrash.map((m) =>
           gmailGet<GmailMessage>(
@@ -705,13 +734,17 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       const parts: string[] = [];
       if (action.sender)  parts.push(`from:${action.sender}`);
       if (action.subject) parts.push(`subject:${action.subject}`);
-      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 1);
+      const msgs = await findGmailMessages(token, parts.length > 0 ? parts.join(' ') : 'in:inbox', 5);
       if (msgs.length === 0) return 'Aucun email trouvé.';
+      if (msgs.length > 1 && action.sender && !action.subject) {
+        const options = await summarizeGmailMatches(token, msgs);
+        return `J'ai trouvé plusieurs emails possibles de ${action.sender}. Dis-moi lequel tu veux lire : ${options.join(' ; ')}.`;
+      }
 
       const msg = await gmailGet<GmailMessage>(`/messages/${msgs[0].id}?format=full`, token);
       const subject = gmailHeader(msg, 'Subject') || '(sans objet)';
       const from    = gmailHeader(msg, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
-      const body    = decodeGmailBody(msg).replace(/\s+/g, ' ').trim().slice(0, 400);
+      const body    = cleanMailDetailText(decodeGmailBody(msg)).replace(/\s+/g, ' ').trim().slice(0, 400);
       return `Email de ${from}, objet "${subject}" : ${body}`;
     }
 

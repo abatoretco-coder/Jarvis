@@ -132,7 +132,7 @@ function formatExecutorOral(text: string, mode: VoiceResponseMode): string {
 
 function formatSearchOral(text: string, mode: VoiceResponseMode): string {
   if (mode === 'short') return firstSentence(text);
-  if (mode === 'detailed') return `${capSentences(text, 4)} Source: synthese web. Niveau de confiance: moyen a eleve.`;
+  if (mode === 'detailed') return `${capSentences(text, 4)} Source: synthese web.`;
   return `${capSentences(text, 2)} Source: synthese web. Je peux detailler si tu veux.`;
 }
 
