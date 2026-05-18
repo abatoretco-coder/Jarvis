@@ -27,8 +27,54 @@ const TODO_SYNTHESIS_SYSTEM_PROMPT = buildTodoSynthesisSystemPrompt();
 /** Returns the first sentence of a TTS-friendly string, capped at maxChars. */
 function firstSentence(text: string, maxChars = 140): string {
   const m = text.match(/^[^.!?]+[.!?]/);
-  const s = m ? m ? m[0] : text : text;
+  const s = m ? m[0] : text;
   return s.length > maxChars ? s.slice(0, maxChars).trimEnd() + '…' : s;
+}
+
+function compactTodoListForFallback(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return clean;
+
+  // Extract a concise intro + at most 5 listed tasks when the payload is very long.
+  const match = clean.match(/^(Tu as\s+\d+\s+tâche[s]?.*?:)\s*(.+)\.$/i);
+  if (match) {
+    const intro = match[1] ?? 'Voici tes tâches :';
+    const body = match[2] ?? '';
+    const parts = body
+      .split(/,\s+(?=[^,]+(?:échéance|urgente|en cours|différée|en attente|récurrente)|[^,]+$)/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    if (parts.length > 5) {
+      const shown = parts.slice(0, 5);
+      const remaining = parts.length - shown.length;
+      return `${intro} ${shown.join(', ')} et ${remaining} autre${remaining > 1 ? 's' : ''}.`;
+    }
+  }
+
+  return firstSentence(clean, 220);
+}
+
+function normalizeForMatch(value: string): string {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function inferListTasksPeriodFromText(text: string): ListTasksAction['period'] | undefined {
+  const t = text.toLowerCase();
+
+  // Keep precedence explicit and deterministic.
+  if (/(aujourd'hui|ce jour)/.test(t)) return 'today';
+  if (/(demain|tomorrow)/.test(t)) return 'tomorrow';
+  if (/(semaine prochaine|next week)/.test(t)) return 'next_week';
+  if (/(cette semaine|semaine en cours|this week)/.test(t)) return 'this_week';
+  if (/(ce mois|ce mois-ci|this month)/.test(t)) return 'this_month';
+  if (/(en retard|retard|overdue)/.test(t)) return 'overdue';
+
+  return undefined;
 }
 
 // ─── Action types ─────────────────────────────────────────────────────────────
@@ -104,11 +150,11 @@ async function synthesizeTodoReplyWithOpenAi(params: {
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!res.ok) return firstSentence(params.executorResult);
+    if (!res.ok) return compactTodoListForFallback(params.executorResult);
     const data = await res.json() as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content?.trim() || firstSentence(params.executorResult);
+    return data.choices?.[0]?.message?.content?.trim() || compactTodoListForFallback(params.executorResult);
   } catch {
-    return firstSentence(params.executorResult);
+    return compactTodoListForFallback(params.executorResult);
   }
 }
 
@@ -377,8 +423,9 @@ async function findList(token: string, listName?: string): Promise<MsTaskList | 
       null
     );
   }
-  const needle = listName.toLowerCase();
-  return lists.find((l) => l.displayName.toLowerCase().includes(needle)) ?? null;
+  const needle = normalizeForMatch(listName);
+  if (!needle) return null;
+  return lists.find((l) => normalizeForMatch(l.displayName) === needle) ?? null;
 }
 
 async function findTask(token: string, listId: string, title: string, includeCompleted = false): Promise<MsTask | null> {
@@ -390,13 +437,9 @@ async function findTask(token: string, listId: string, title: string, includeCom
     token,
   );
   const tasks = data.value ?? [];
-  const needle = title.toLowerCase();
-  // Exact match first, then partial
-  return (
-    tasks.find((t) => t.title.toLowerCase() === needle) ??
-    tasks.find((t) => t.title.toLowerCase().includes(needle)) ??
-    null
-  );
+  const needle = normalizeForMatch(title);
+  if (!needle) return null;
+  return tasks.find((t) => normalizeForMatch(t.title) === needle) ?? null;
 }
 
 /** Search for a task across all watched lists when no list_name is given.
@@ -856,8 +899,8 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
     case 'delete_list': {
       const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
       const lists = data.value ?? [];
-      const needle = action.name.toLowerCase();
-      const found = lists.find((l) => l.displayName.toLowerCase().includes(needle));
+      const needle = normalizeForMatch(action.name);
+      const found = lists.find((l) => normalizeForMatch(l.displayName) === needle);
       if (!found) return `Je n'ai pas trouvé de liste correspondant à ${action.name}.`;
       // Built-in lists (defaultList, flaggedEmails) cannot be deleted.
       if (found.wellknownListName && found.wellknownListName !== 'none') {
@@ -892,8 +935,8 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
       );
-      const needle = action.item_title.toLowerCase();
-      const item = checkData.value?.find((c) => c.displayName.toLowerCase().includes(needle));
+      const needle = normalizeForMatch(action.item_title);
+      const item = checkData.value?.find((c) => normalizeForMatch(c.displayName) === needle);
       if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token, { isChecked: true });
       return `Parfait, ${item.displayName} est cochée dans ${task.title}.`;
@@ -909,8 +952,8 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
       );
-      const needle = action.item_title.toLowerCase();
-      const item = checkData.value?.find((c) => c.displayName.toLowerCase().includes(needle));
+      const needle = normalizeForMatch(action.item_title);
+      const item = checkData.value?.find((c) => normalizeForMatch(c.displayName) === needle);
       if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
       await graphDelete(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token);
       return `${item.displayName} a bien été supprimée de ${task.title}.`;
@@ -958,6 +1001,16 @@ export async function callTodoAgent(
     log?.warn({ err: String(err) }, 'todo_agent_planner_error');
     return 'Désolé, je n\'ai pas compris cette demande de tâche. Tu peux réessayer différemment.';
   }
+
+  // Guardrail: if planner omits period on a temporal list request, infer it deterministically.
+  if (action.action === 'list_tasks' && !action.period) {
+    const inferred = inferListTasksPeriodFromText(text);
+    if (inferred) {
+      action = { ...action, period: inferred };
+      log?.info({ inferred_period: inferred }, 'todo_agent_period_inferred');
+    }
+  }
+
 log?.info({ action: action.action, due_date: (action as Record<string,unknown>).due_date, reminder_date: (action as Record<string,unknown>).reminder_date }, 'todo_agent_planned');
 
   let token: string;
@@ -979,6 +1032,13 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
   try {
     const rawResult = await executeTodo(action, token);
     log?.info({ action: action.action, result_len: rawResult.length }, 'todo_agent_done');
+
+    // For list reads, keep deterministic executor output to avoid synthesis drift/hallucinations
+    // (e.g. inventing timelines that are not in the filtered result set).
+    if (action.action === 'list_tasks') {
+      return compactTodoListForFallback(rawResult);
+    }
+
     const synthesized = await synthesizeTodoReplyWithOpenAi({
       openAiApiKey:  env.OPENAI_API_KEY!,
       openAiBaseUrl: env.OPENAI_BASE_URL,

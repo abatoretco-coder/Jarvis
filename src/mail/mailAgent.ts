@@ -256,6 +256,52 @@ function firstSentence(text: string, maxChars = 140): string {
   return s.length > maxChars ? s.slice(0, maxChars).trimEnd() + '…' : s;
 }
 
+function compactMailListForFallback(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+
+  // Pattern emitted by executeGmail list_inbox.
+  const listMatch = clean.match(/^Tu as\s+(\d+)\s+emails?\s+non\s+lu[s]?\s*:\s*(.+)\.?$/i);
+  if (listMatch) {
+    const total = Number.parseInt(listMatch[1] ?? '0', 10);
+    const itemsRaw = listMatch[2] ?? '';
+    const items = itemsRaw
+      .split(';')
+      .map((x) => x.trim().replace(/\.+$/, ''))
+      .filter(Boolean);
+    const shown = items.slice(0, 3);
+    const remaining = Math.max(0, total - shown.length);
+    const suffix = remaining > 0 ? ` + ${remaining} autre${remaining > 1 ? 's' : ''}.` : '.';
+    return `Tu as ${total} non lus. Top: ${shown.join(' ; ')}${suffix}`;
+  }
+
+  // Pattern emitted by executeGmail search_emails.
+  const searchMatch = clean.match(/^(\d+)\s+résultat[s]?\s+pour\s+"([^"]+)"\s*:\s*(.+)\.?$/i);
+  if (searchMatch) {
+    const total = Number.parseInt(searchMatch[1] ?? '0', 10);
+    const query = searchMatch[2] ?? '';
+    const items = (searchMatch[3] ?? '')
+      .split(';')
+      .map((x) => x.trim().replace(/\.+$/, ''))
+      .filter(Boolean);
+    const shown = items.slice(0, 3);
+    const remaining = Math.max(0, total - shown.length);
+    const suffix = remaining > 0 ? ` + ${remaining} autre${remaining > 1 ? 's' : ''}.` : '.';
+    return `${total} résultat${total > 1 ? 's' : ''} pour "${query}". Top: ${shown.join(' ; ')}${suffix}`;
+  }
+
+  // Last-resort compacting for very long one-line payloads.
+  if (clean.length > 220 && clean.includes(';')) {
+    const chunks = clean
+      .split(';')
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    return `${chunks.join(' ; ')}.`;
+  }
+
+  return firstSentence(clean, 180);
+}
+
 async function synthesizeMailReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
@@ -283,12 +329,12 @@ async function synthesizeMailReplyWithOpenAi(params: {
   });
 
   if (!resp.ok) {
-    return firstSentence(params.executorResult);
+    return compactMailListForFallback(params.executorResult);
   }
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-  return content || firstSentence(params.executorResult);
+  return content || compactMailListForFallback(params.executorResult);
 }
 
 // ─── LLM planner ─────────────────────────────────────────────────────────────
@@ -523,8 +569,11 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
           return `${from} : ${subject}`;
         });
       const count = msgs.length;
-      const label = action.unread_only !== false ? 'non lu' : '';
-      return `Tu as ${count} email${count > 1 ? 's' : ''} ${label} : ${summaries.join(' ; ')}.`;
+      const label = action.unread_only !== false ? 'non lus' : '';
+      const top = summaries.slice(0, 3);
+      const remaining = Math.max(0, count - top.length);
+      const tail = remaining > 0 ? ` ; +${remaining} autre${remaining > 1 ? 's' : ''}` : '';
+      return `Tu as ${count} email${count > 1 ? 's' : ''} ${label} : ${top.join(' ; ')}${tail}.`;
     }
 
     case 'search_emails': {
@@ -551,7 +600,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
     case 'send_email': {
       const raw = buildRawMime({ to: action.to, subject: action.subject, body: action.body, cc: action.cc });
       await gmailPost('/messages/send', token, { raw });
-      return `Email envoyé à ${action.to} avec l'objet "${action.subject}".`;
+      return `Confirmation: email envoyé à ${action.to} avec l'objet "${action.subject}".`;
     }
 
     case 'mark_read': {
@@ -596,7 +645,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const raw = buildRawMime({ to: toAddr, subject: replySubject, body: action.body, inReplyTo: origMessageId, references });
       await gmailPost('/messages/send', token, { raw, threadId: msgs[0].threadId });
-      return `Réponse envoyée à ${toAddr}.`;
+      return `Confirmation: réponse envoyée à ${toAddr} concernant "${origSubject || '(sans objet)'}".`;
     }
 
     case 'forward_email': {
@@ -627,7 +676,7 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const raw = buildRawMime({ to: action.to, subject: fwdSubject, body: fwdBody });
       await gmailPost('/messages/send', token, { raw });
-      return `Email transféré à ${action.to}.`;
+      return `Confirmation: email "${origSubject || '(sans objet)'}" transféré à ${action.to}.`;
     }
 
     case 'trash_email': {
@@ -638,8 +687,18 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
       const msgs = await findGmailMessages(token, parts.join(' '), 5);
       if (msgs.length === 0) return 'Aucun email trouvé.';
       const toTrash = msgs.slice(0, 3);
+      const details = await Promise.all(
+        toTrash.map((m) =>
+          gmailGet<GmailMessage>(
+            `/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
+            token,
+          ).catch(() => null),
+        ),
+      );
       await Promise.all(toTrash.map((m) => gmailPost(`/messages/${m.id}/trash`, token, {})));
-      return `${toTrash.length} email${toTrash.length > 1 ? 's' : ''} déplacé${toTrash.length > 1 ? 's' : ''} à la corbeille.`;
+      const first = details.find((d): d is GmailMessage => d !== null);
+      const firstSubject = first ? (gmailHeader(first, 'Subject') || '(sans objet)') : '(sans objet)';
+      return `Confirmation: ${toTrash.length} email${toTrash.length > 1 ? 's' : ''} déplacé${toTrash.length > 1 ? 's' : ''} à la corbeille (ex: "${firstSubject}").`;
     }
 
     case 'get_email': {

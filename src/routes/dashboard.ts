@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
+import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import type { AppDeps } from '../server';
 
 type HaState = {
@@ -106,6 +107,18 @@ type GmailDashboardMessage = {
   payload?: {
     headers?: Array<{ name: string; value: string }>;
   };
+};
+
+type GmailMessageBodyPart = {
+  mimeType?: string;
+  body?: { data?: string };
+  parts?: GmailMessageBodyPart[];
+};
+
+type GmailFullMessage = {
+  id: string;
+  snippet?: string;
+  payload?: GmailMessageBodyPart;
 };
 
 const MS_GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
@@ -805,6 +818,103 @@ function gmailHeader(message: GmailDashboardMessage, headerName: string): string
   return decodeMimeHeader(raw);
 }
 
+function decodeBase64UrlUtf8(value: string): string {
+  if (!value) return '';
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+function htmlToText(html: string): string {
+  if (!html) return '';
+  return html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*\/p\s*>/gi, '\n\n')
+    .replace(/<\s*p[^>]*>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function collectMessageBodies(part: GmailMessageBodyPart | undefined): { plain: string[]; html: string[] } {
+  if (!part) return { plain: [], html: [] };
+  const plain: string[] = [];
+  const html: string[] = [];
+
+  const walk = (node: GmailMessageBodyPart): void => {
+    const mime = String(node.mimeType ?? '').toLowerCase();
+    const data = node.body?.data;
+    if (typeof data === 'string' && data.trim()) {
+      if (mime === 'text/plain') {
+        const decoded = decodeBase64UrlUtf8(data).trim();
+        if (decoded) plain.push(decoded);
+      } else if (mime === 'text/html') {
+        const decoded = decodeBase64UrlUtf8(data).trim();
+        if (decoded) html.push(decoded);
+      }
+    }
+
+    if (Array.isArray(node.parts)) {
+      node.parts.forEach((child) => walk(child));
+    }
+  };
+
+  walk(part);
+  return { plain, html };
+}
+
+async function fetchMailMessageText(account: MailAccount, messageId: string): Promise<{ text: string; snippet?: string }> {
+  const token = await refreshGoogleAccessToken(account);
+  const full = await gmailGet<GmailFullMessage>(`/messages/${encodeURIComponent(messageId)}?format=full`, token);
+  const bodies = collectMessageBodies(full.payload);
+  const plainText = cleanMailDetailText(bodies.plain.join('\n\n').trim());
+  if (plainText) {
+    return { text: plainText, snippet: full.snippet?.trim() || undefined };
+  }
+
+  const htmlText = cleanMailDetailText(htmlToText(bodies.html.join('\n\n')));
+  if (htmlText) {
+    return { text: htmlText, snippet: full.snippet?.trim() || undefined };
+  }
+
+  return { text: full.snippet?.trim() || '', snippet: full.snippet?.trim() || undefined };
+}
+
+async function fetchMailMessageTextFromAnyAccount(
+  accounts: MailAccount[],
+  preferredAccount: MailAccount | null,
+  messageId: string,
+): Promise<{ account: MailAccount; payload: { text: string; snippet?: string } }> {
+  if (accounts.length === 0) {
+    throw new Error('mail_not_configured');
+  }
+
+  const orderedAccounts = preferredAccount
+    ? [preferredAccount, ...accounts.filter((account) => account !== preferredAccount)]
+    : [...accounts];
+
+  let lastError: unknown = null;
+  for (const account of orderedAccounts) {
+    try {
+      const payload = await fetchMailMessageText(account, messageId);
+      return { account, payload };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('mail_message_failed');
+}
+
 async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
   const payload = await fetchMailItemsPageForAccount(account, 0, 40);
   return payload.items;
@@ -994,6 +1104,41 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     } catch (error) {
       app.log.warn({ error }, 'dashboard_mail_messages_failed');
       return reply.code(500).send({ error: 'mail_messages_failed' });
+    }
+  });
+
+  app.get('/v1/mail/message', async (req, reply) => {
+    try {
+      const query = (req.query ?? {}) as { messageId?: unknown; accountLabel?: unknown };
+      const messageId = typeof query.messageId === 'string' ? query.messageId.trim() : '';
+      const accountLabel = typeof query.accountLabel === 'string' ? query.accountLabel.trim().toLowerCase() : '';
+
+      if (!messageId) {
+        return reply.code(400).send({ error: 'message_id_required' });
+      }
+
+      const accounts = buildMailAccounts(deps.env);
+      if (accounts.length === 0) {
+        return reply.code(400).send({ error: 'mail_not_configured' });
+      }
+
+      const preferredAccount = accountLabel
+        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
+        : accounts[0];
+
+      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, messageId);
+      return reply.code(200).send({
+        messageId,
+        accountLabel: account.label,
+        text: payload.text,
+        snippet: payload.snippet,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'mail_message_failed';
+      const statusMatch = message.match(/^gmail_get_failed:(\d+):/);
+      const status = statusMatch ? Number(statusMatch[1]) : 500;
+      app.log.warn({ error }, 'dashboard_mail_message_failed');
+      return reply.code(Number.isFinite(status) ? status : 500).send({ error: 'mail_message_failed', details: message });
     }
   });
 

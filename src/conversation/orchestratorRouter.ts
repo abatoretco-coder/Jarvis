@@ -266,8 +266,18 @@ export async function synthesizeAgentResponses(params: {
 }
 
 function fallbackJoin(parts: { text: string }[]): string {
-  return parts
-    .map((p) => p.text.trim().replace(/\.?\s*$/, ''))
-    .join('. ')
-    .concat('.');
+  const snippets = parts
+    .map((p) => p.text.trim())
+    .filter(Boolean)
+    .map((text) => {
+      const m = text.match(/^(.+?[.!?])(?:\s|$)/);
+      const first = (m ? m[1] : text).trim();
+      return first.replace(/\.?\s*$/, '');
+    })
+    .slice(0, 4);
+
+  if (snippets.length === 0) return '';
+  if (snippets.length === 1) return `${snippets[0]}.`;
+  if (snippets.length === 2) return `${snippets[0]}. ${snippets[1]}.`;
+  return `${snippets.slice(0, -1).join('. ')}. Et aussi: ${snippets[snippets.length - 1]}.`;
 }

@@ -140,6 +140,41 @@ describe('music agent planner', () => {
     expect(result.route).toBe('none');
     expect(result.reason).toBe('not a music command');
   });
+
+  test('normalizes generic resume intent to play when model emits search_and_play without target', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () => jsonResponse({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              route: 'spotify',
+              reason: 'music request detected',
+              request: {
+                domain: 'spotify',
+                action: 'search_and_play',
+                slots: { device: 'alias:pc' },
+                text: 'lance la musique sur le pc',
+              },
+            }),
+          },
+        },
+      ],
+    })) as unknown as typeof fetch;
+
+    const result = await planSpotifyActionFromTextWithOpenAi({
+      env: makeEnv(),
+      spotifyWebApi: makeSpotifyApi() as unknown as Parameters<typeof planSpotifyActionFromTextWithOpenAi>[0]['spotifyWebApi'],
+      text: 'lance la musique sur le pc',
+      correlationId: 'corr-2',
+      userId: 'u-2',
+    });
+
+    expect(result.route).toBe('spotify');
+    if (result.route === 'spotify') {
+      expect(result.request?.action).toBe('play');
+      expect(result.request?.slots.device).toBe('alias:pc');
+    }
+  });
 });
 
 describe('music agent prompt templates', () => {

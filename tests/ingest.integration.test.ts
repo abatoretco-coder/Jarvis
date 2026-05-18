@@ -438,6 +438,53 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 
+  it('semantic activation: runtime multi-intent guard skips semantic router', async () => {
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'weather', confidence: 0.99 }],
+      reason: 'llm_weather_route',
+    });
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'partiel-nuageux',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 20,
+          humidity: 55,
+          precipitation_probability: 10,
+        },
+      },
+    ];
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD: 0.4,
+      SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'weather.current_temperature',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-semantic-multi-intent-skip',
+        text: 'Lis mes mails puis ajoute une tache et donne la meteo',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+  });
+
   it('semantic activation: external weather E2 live bypasses LLM router', async () => {
     const searchReply = 'Demain à Paris: 22°C, ciel variable et pluie faible en soirée.';
     mockedTrySemanticRouter.mockResolvedValue({
@@ -2632,6 +2679,105 @@ describe('/v1/ingest integration', () => {
       expect(payload.responseText.length).toBeGreaterThan(0);
       expect(payload.responseText).not.toContain('Action Spotify non supportée');
     }
+  });
+
+  it('structured spotify search_and_play generic device command resumes playback instead of asking clarification', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const deps = makeDeps(env);
+
+    const playMock = jest.fn(async () => ({ ok: true }));
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      getNowPlaying: async () => ({
+        ok: true,
+        data: {
+          is_playing: false,
+          device: { id: 'dev-pc', name: 'Jarvis-VM400', volume_percent: 48, is_active: false },
+          item: { id: 'trk-1', name: 'Around the World', artists: [{ name: 'Daft Punk' }] },
+        },
+      }),
+      listDevicesPublic: async () => ({
+        ok: true,
+        devices: [
+          { id: 'dev-pc', name: 'Jarvis-VM400', type: 'Computer', isActive: false },
+        ],
+      }),
+      play: playMock,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-generic-pc',
+        domain: 'spotify',
+        action: 'search_and_play',
+        text: 'lance la musique sur le pc',
+        slots: {},
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Lecture lancée');
+    expect(payload.responseText).not.toContain('Précisez ce que vous souhaitez écouter');
+    expect(playMock).toHaveBeenCalledTimes(1);
+    expect(playMock).toHaveBeenCalledWith('alias:pc');
+  });
+
+  it('structured spotify volume_set halves current volume when utterance says "de moitie"', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const deps = makeDeps(env);
+
+    const setVolumeMock = jest.fn(async () => ({ ok: true }));
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      getNowPlaying: async () => ({
+        ok: true,
+        data: {
+          is_playing: true,
+          device: { id: 'dev-salon', name: 'Salon', volume_percent: 60, is_active: true },
+          item: { id: 'trk-1', name: 'Around the World', artists: [{ name: 'Daft Punk' }] },
+        },
+      }),
+      setVolume: setVolumeMock,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-volume-half',
+        domain: 'spotify',
+        action: 'volume_set',
+        text: 'tu peux baisser le volume de moitie',
+        slots: {
+          volume_percent: 0,
+        },
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Volume : 30%');
+    expect(setVolumeMock).toHaveBeenCalledTimes(1);
+    expect(setVolumeMock).toHaveBeenCalledWith(30, undefined);
   });
 
   it('semantic live remains robust with noisy STT-like text across all non-spotify agents', async () => {

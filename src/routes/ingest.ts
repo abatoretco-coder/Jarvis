@@ -18,6 +18,16 @@ import {
   type RouterTarget,
 } from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
+import {
+  buildLastMailSummaryFromState,
+  extractMailStateFromReply,
+  formatVoiceResponse,
+  isLastMailSummaryRequest,
+  isVoiceRequest,
+  resolveVoiceResponseMode,
+  type VoiceResponseDomain,
+  type VoiceThreadState,
+} from '../conversation/voiceUx';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
 import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
@@ -38,9 +48,16 @@ import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 import { dispatchAcceptedE1Route } from '../routing/e1RouteDispatcher';
 import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
 import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
+import { estimateMultiIntentLikelihood } from '../routing/multiIntentLikelihood';
+import {
+  INGEST_ACK_CONFIG,
+  INGEST_RUNTIME_TUNING_CONFIG,
+  LOCAL_WEATHER_ROUTING_CONFIG,
+} from '../routing/deterministic/config/routingDeterministicConfig';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
+import { warmupRouteEmbeddings } from '../routing/routeScoring';
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
@@ -424,19 +441,53 @@ function toEntityStates(input: unknown): EntityStateLike[] {
  */
 function getIngestAckText(keys: (string | undefined)[]): string | null {
   if (keys.length === 0) return null;
+  const cfg = INGEST_ACK_CONFIG;
   const ks = keys.map((k) => k ?? '');
-  const hasMail   = ks.some((k) => k === 'mail'  || k.startsWith('mail.'));
-  const hasTodo   = ks.some((k) => k === 'todo'  || k.startsWith('todo.'));
-  const hasSearch = ks.some((k) => k.startsWith('search'));
-  const hasWeather = ks.some((k) => k === 'weather' || k.startsWith('weather.'));
-  if (hasMail  && !hasTodo && !hasSearch) return 'Deux secondes, je consulte tes emails.';
-  if (hasTodo  && !hasMail && !hasSearch) return 'Deux secondes, je regarde tes taches.';
-  if (hasWeather && !hasMail && !hasTodo && !hasSearch) return 'Je regarde la meteo, une seconde.';
-  if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return 'Je cherche ca, une seconde.';
-  return 'Deux secondes, je traite ta demande.';
+  const hasMail = ks.some((k) => k === 'mail' || cfg.mailPrefixes.some((prefix) => k.startsWith(prefix)));
+  const hasTodo = ks.some((k) => k === 'todo' || cfg.todoPrefixes.some((prefix) => k.startsWith(prefix)));
+  const hasSearch = ks.some((k) => k.startsWith(cfg.searchPrefix));
+  const hasWeather = ks.some((k) => k === 'weather' || cfg.weatherPrefixes.some((prefix) => k.startsWith(prefix)));
+  if (hasMail && !hasTodo && !hasSearch) return cfg.responses.mailOnly;
+  if (hasTodo && !hasMail && !hasSearch) return cfg.responses.todoOnly;
+  if (hasWeather && !hasMail && !hasTodo && !hasSearch) return cfg.responses.weatherOnly;
+  if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return cfg.responses.searchOnly;
+  return cfg.responses.default;
+}
+
+function normalizeRoutingText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLikelyLocalWeatherQuery(text: string): boolean {
+  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
+  const t = ` ${normalizeRoutingText(text)} `;
+  if (!t.trim()) return false;
+
+  const hasWeatherLexeme = cfg.weatherLexemes.some((lexeme) => t.includes(` ${lexeme} `));
+  if (!hasWeatherLexeme) return false;
+
+  const hasExplicitLocalMarker = cfg.explicitLocalMarkers.some((marker) => t.includes(` ${marker} `));
+  if (hasExplicitLocalMarker) return true;
+
+  // Explicit external city/location queries should stay in external search/weather path.
+  const externalLocationsRegex = new RegExp(
+    `\\b(?:${cfg.explicitExternalLocations.map((location) => location.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+    'u',
+  );
+  const hasExplicitExternalLocation = externalLocationsRegex.test(t);
+  if (hasExplicitExternalLocation) return false;
+
+  return true;
 }
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
+  const runtimeCfg = INGEST_RUNTIME_TUNING_CONFIG;
+
   app.addContentTypeParser(/^audio\/.+$/u, { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
   });
@@ -450,8 +501,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const messageRepository = new SqliteMessageRepository(db);
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
-  const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-  const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // run once per day
+  const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
+  const CLEANUP_INTERVAL_MS = runtimeCfg.retentionCleanupIntervalMs; // default: once per day
   const runRetentionCleanup = async () => {
     try {
       const cutoff = Date.now() - RETENTION_MS;
@@ -486,9 +537,44 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     retryDelayMs: deps.env.HA_CONVERSATION_RETRY_DELAY_MS,
   });
 
+  const semanticEmbeddingCfg: EmbeddingClientConfig = {
+    baseUrl: deps.env.OPENAI_BASE_URL,
+    model: deps.env.SEMANTIC_ROUTER_EMBEDDING_MODEL,
+    timeoutMs: deps.env.SEMANTIC_ROUTER_TIMEOUT_MS,
+    apiKey: deps.env.OPENAI_API_KEY,
+  };
+
+  if (
+    process.env.NODE_ENV !== 'test'
+    && deps.env.SEMANTIC_ROUTER_ENABLED
+    && deps.env.SEMANTIC_ROUTER_WARMUP_ON_STARTUP
+    && Boolean(deps.env.OPENAI_API_KEY?.trim())
+  ) {
+    void warmupRouteEmbeddings({
+      routes: SEMANTIC_ROUTES,
+      config: semanticEmbeddingCfg,
+      batchSize: deps.env.SEMANTIC_ROUTER_WARMUP_BATCH_SIZE,
+    })
+      .then((summary) => {
+        app.log.info(
+          {
+            model: semanticEmbeddingCfg.model,
+            warmed: summary.warmed,
+            skipped: summary.skipped,
+            failed: summary.failed,
+            batchSize: deps.env.SEMANTIC_ROUTER_WARMUP_BATCH_SIZE,
+          },
+          'semantic_router_embedding_warmup_done',
+        );
+      })
+      .catch((err) => {
+        app.log.warn({ err }, 'semantic_router_embedding_warmup_failed');
+      });
+  }
+
   let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
   let ttsProviderRefreshPromise: Promise<void> | null = null;
-  const TTS_PROVIDER_CACHE_TTL_MS = 15 * 60_000;
+  const TTS_PROVIDER_CACHE_TTL_MS = runtimeCfg.ttsProviderCacheTtlMs;
 
   const refreshTtsProviderCache = (): Promise<void> => {
     if (!deps.ha) return Promise.resolve();
@@ -513,8 +599,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
   // ─── TTS circuit breaker ─────────────────────────────────────────────────
   const ttsCb = new Map<string, { failures: number; openUntil: number }>();
-  const CB_THRESHOLD = 3;
-  const CB_OPEN_MS = 45_000;
+  const CB_THRESHOLD = runtimeCfg.ttsCircuitBreakerThreshold;
+  const CB_OPEN_MS = runtimeCfg.ttsCircuitBreakerOpenMs;
 
   function isTtsCbOpen(engineId: string): boolean {
     const state = ttsCb.get(engineId);
@@ -535,8 +621,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   }
 
   // ─── Per-endpoint perf samples (rolling window 200) ──────────────────────
-  const PERF_MAX = 200;
+  const PERF_MAX = runtimeCfg.perfMaxSamples;
   const perfSamples = new Map<string, number[]>();
+  const voiceThreadState = new Map<string, VoiceThreadState>();
 
   function recordPerf(key: string, elapsedMs: number): void {
     let arr = perfSamples.get(key);
@@ -575,6 +662,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const requestId = randomUUID();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
+    const voiceEnabled = isVoiceRequest({ voiceTurnId, clientChannel });
+    const voiceMode = resolveVoiceResponseMode({
+      text,
+      clientContext: (parsed.data.clientContext as Record<string, unknown> | undefined),
+    });
     const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
 
     // Vérifier si une fenêtre de conversation active existe (10s post-réponse)
@@ -593,6 +685,86 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+
+    if (voiceEnabled && isLastMailSummaryRequest(text)) {
+      const mailState = voiceThreadState.get(effectiveThreadId);
+      const hasStructuredMailState = Array.isArray(mailState?.lastMailTop) && mailState!.lastMailTop!.length > 0;
+      const followup = hasStructuredMailState ? buildLastMailSummaryFromState(mailState) : null;
+      if (followup) {
+        await conversationService.persistMessages(effectiveThreadId, text, followup);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        const followupPayload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(followup),
+        };
+        const followupValidated = responseSchema.safeParse(followupPayload);
+        if (!followupValidated.success) {
+          return reply.code(500).send({ error: 'response_validation_failed' });
+        }
+        app.log.info(
+          { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined },
+          'ingest_complete',
+        );
+        return reply.code(200).send(followupPayload);
+      }
+
+      app.log.info(
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          has_state: Boolean(mailState),
+          has_top: Boolean(mailState?.lastMailTop && mailState.lastMailTop.length > 0),
+        },
+        'mail_followup_requires_refresh',
+      );
+
+      try {
+        const refreshedMailText = await callMailAgent(
+          'Détaille mes emails non lus: donne le top 5 avec expéditeur et objet, de façon concise.',
+          {
+            mailAccounts: buildMailAccounts(deps.env),
+            OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+            OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+            OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+            OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+            OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+          },
+          app.log,
+        );
+
+        const parsedMail = extractMailStateFromReply(refreshedMailText);
+        if (parsedMail) {
+          const existing = voiceThreadState.get(effectiveThreadId) ?? {};
+          voiceThreadState.set(effectiveThreadId, { ...existing, ...parsedMail });
+        }
+
+        const refreshedVoice = formatVoiceResponse({
+          text: refreshedMailText,
+          domain: 'mail',
+          mode: voiceMode,
+          gracefulFallback: false,
+        });
+
+        await conversationService.persistMessages(effectiveThreadId, text, refreshedVoice);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+
+        const followupPayload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(refreshedVoice),
+        };
+        const followupValidated = responseSchema.safeParse(followupPayload);
+        if (!followupValidated.success) {
+          return reply.code(500).send({ error: 'response_validation_failed' });
+        }
+        app.log.info(
+          { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined },
+          'ingest_complete',
+        );
+        return reply.code(200).send(followupPayload);
+      } catch (err) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'mail_followup_refresh_failed');
+      }
+    }
 
     const toDeterministicHaFailureMessage = (): string => (
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
@@ -617,7 +789,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
 
       const persistedInput = text || `spotify:${spotifyPayload.data.action} ${JSON.stringify(spotifyPayload.data.slots ?? {})}`;
-      await conversationService.persistMessages(effectiveThreadId, persistedInput, spotifyResponse.tts);
+      const spotifyVoiceText = voiceEnabled
+        ? formatVoiceResponse({
+            text: spotifyResponse.tts,
+            domain: 'spotify',
+            mode: voiceMode,
+            gracefulFallback: false,
+          })
+        : spotifyResponse.tts;
+      await conversationService.persistMessages(effectiveThreadId, persistedInput, spotifyVoiceText);
 
       app.log.info(
         {
@@ -635,7 +815,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       return reply.code(200).send({
         threadId: effectiveThreadId,
-        responseText: spotifyResponse.tts,
+        responseText: spotifyVoiceText,
         status: spotifyResponse.status,
         ...(spotifyResponse.data ? { data: spotifyResponse.data } : {}),
         ...(spotifyResponse.options ? { options: spotifyResponse.options } : {}),
@@ -719,6 +899,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const recentMessages = routerEnabled ? recentMessages_ : [];
     let assistantText: string | undefined;
+    let responseDomain: VoiceResponseDomain = 'general';
+    let gracefulFallback = false;
 
     if (!routerEnabled) {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
@@ -774,28 +956,36 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     let semanticE1SpotifyPlan: MusicAgentPlan | undefined;
 
     if (deps.env.SEMANTIC_ROUTER_ENABLED) {
-      const embeddingCfg: EmbeddingClientConfig = {
-        baseUrl: deps.env.OPENAI_BASE_URL,
-        model: deps.env.SEMANTIC_ROUTER_EMBEDDING_MODEL,
-        timeoutMs: deps.env.SEMANTIC_ROUTER_TIMEOUT_MS,
-        apiKey: deps.env.OPENAI_API_KEY,
-      };
+      const multiIntentLikelihood = estimateMultiIntentLikelihood(text);
+      const multiIntentThreshold = deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD;
+      const runtimeMultiIntentGuard = multiIntentLikelihood > multiIntentThreshold;
       const semanticInput: SemanticRouterInput = {
         userText: text,
-        embeddingConfig: embeddingCfg,
+        embeddingConfig: semanticEmbeddingCfg,
         options: {
           acceptScore: deps.env.SEMANTIC_ROUTER_ACCEPT_SCORE,
           minMargin: deps.env.SEMANTIC_ROUTER_MIN_MARGIN,
+          multiIntentThreshold,
           enableE2: true,
           enableE1: true,
           enableD0: true,
         },
         enabledLevels: ['D0', 'E2', 'E1'],
+        multiIntentLikelihood,
         context: { threadId, requestId },
       };
 
-      app.log.info({ threadId, requestId, text_len: text.length }, 'semantic_router_start');
-      if (semanticLiveModeEnabled) {
+      app.log.info(
+        { threadId, requestId, text_len: text.length, multiIntentLikelihood, multiIntentThreshold },
+        'semantic_router_start',
+      );
+      if (runtimeMultiIntentGuard) {
+        app.log.info(
+          { threadId, requestId, multiIntentLikelihood, multiIntentThreshold },
+          'semantic_router_skip_multi_intent_runtime',
+        );
+      }
+      if (!runtimeMultiIntentGuard && semanticLiveModeEnabled) {
         try {
           const semResult = await trySemanticRouter(semanticInput);
           app.log.info(
@@ -857,6 +1047,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   });
                   if (handledSearchResult) {
                     assistantText = handledSearchResult.responseText;
+                    responseDomain = 'search';
                     app.log.info(
                       {
                         threadId,
@@ -1173,6 +1364,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           userId: typeof parsed.data.user_id === 'string'
                             ? parsed.data.user_id.trim() || undefined
                             : undefined,
+                          log: app.log,
                         })
                       ),
                       callSearchAgent: async (agentKey, params) => (
@@ -1234,6 +1426,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     );
                   } else if (e1Result.kind === 'search_text' || e1Result.kind === 'todo_text' || e1Result.kind === 'mail_text') {
                     assistantText = e1Result.data;
+                    responseDomain = e1Result.kind === 'search_text'
+                      ? 'search'
+                      : e1Result.kind === 'todo_text'
+                        ? 'todo'
+                        : 'mail';
                     semanticActivatedRouteKey = e1Result.routeKey;
                     app.log.info(
                       {
@@ -1351,7 +1548,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         } catch (err) {
           app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
         }
-      } else {
+      } else if (!runtimeMultiIntentGuard) {
         // Phase 1A shadow mode (observation only)
         trySemanticRouter(semanticInput).then((semResult) => {
           app.log.info(
@@ -1438,13 +1635,66 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     );
 
     if (routerResult.status === 'rejected' && routerEnabled) {
+      app.log.info(
+        {
+          threadId,
+          requestId,
+          router_status: 'rejected',
+          router_error: String(routerResult.reason),
+          local_weather_candidate: isLikelyLocalWeatherQuery(text),
+        },
+        'ingest_routing_trace',
+      );
       app.log.warn({ threadId, requestId, err: routerResult.reason }, 'ha_agent_router_failed_fallback_general');
+      gracefulFallback = true;
     }
 
     // ── Resolve targets ───────────────────────────────────────────────────────
 
     if (routerResult.status === 'fulfilled') {
-      const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
+      const agentEntryById = new Map(allAgentEntries.map((entry) => [entry.agentId, entry]));
+      let validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
+
+      const localWeatherCandidate = Boolean(weatherEntry) && isLikelyLocalWeatherQuery(text);
+      let localWeatherInjected = false;
+      let localWeatherSearchRemoved = false;
+      const multiIntentForWeatherLock = estimateMultiIntentLikelihood(text);
+      if (localWeatherCandidate) {
+        const hasWeatherTarget = validTargets.some((t) => t.agentId === 'weather');
+        if (!hasWeatherTarget) {
+          validTargets = [{ agentId: 'weather', confidence: 1 }, ...validTargets];
+          localWeatherInjected = true;
+        }
+
+        // For likely single-intent local weather requests, avoid routing to external web search.
+        if (multiIntentForWeatherLock <= deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD) {
+          const beforeCount = validTargets.length;
+          validTargets = validTargets.filter((t) => {
+            const entry = agentEntryById.get(t.agentId);
+            const isSearchByKey = Boolean(entry?.key && isSearchAgentKey(entry.key));
+            const isSearchByAgentId = t.agentId.startsWith('search.');
+            return !(isSearchByKey || isSearchByAgentId);
+          });
+          localWeatherSearchRemoved = validTargets.length < beforeCount;
+        }
+      }
+
+      app.log.info(
+        {
+          threadId,
+          requestId,
+          router_status: 'fulfilled',
+          router_reason: routerResult.value.reason,
+          router_targets_raw: routerResult.value.targets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
+          router_targets_final: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
+          local_weather_candidate: localWeatherCandidate,
+          local_weather_injected: localWeatherInjected,
+          local_weather_search_removed: localWeatherSearchRemoved,
+          multi_intent_likelihood: multiIntentForWeatherLock,
+        },
+        'ingest_routing_trace',
+      );
+
       const spotifyTarget = validTargets.find((t) => t.agentId === SPOTIFY_AGENT_ID);
       const haSpecTargets = validTargets.filter(
         (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId,
@@ -1501,6 +1751,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   text: assistantInputText,
                   correlationId: correlationId || undefined,
                   userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+                  log: app.log,
                 });
 
           tasks.push(
@@ -1704,14 +1955,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
           if (spotifyRes && goodResults.length === 1) {
-            void conversationService.persistMessages(effectiveThreadId, text, spotifyRes.tts).then(async () => {
+            const spotifyVoiceText = voiceEnabled
+              ? formatVoiceResponse({
+                  text: spotifyRes.tts,
+                  domain: 'spotify',
+                  mode: voiceMode,
+                  gracefulFallback,
+                })
+              : spotifyRes.tts;
+            void conversationService.persistMessages(effectiveThreadId, text, spotifyVoiceText).then(async () => {
               if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
                 summarizationService.startPresummarize(effectiveThreadId);
               }
             });
             const spotifyOnlyPayload = {
               threadId: effectiveThreadId,
-              responseText: spotifyRes.tts,
+              responseText: spotifyVoiceText,
               ...spotifyRes.spotifyPayload,
               ...(correlationId ? { correlation_id: correlationId } : {}),
               planner: { source: 'openai_music_agent', route: spotifyRes.musicPlanRoute, reason: spotifyRes.musicPlanReason },
@@ -1728,6 +1987,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           if (parts.length === 1) {
             // Single non-Spotify result — no synthesis needed
             assistantText = parts[0].text;
+            if (parts[0].agentId === 'gmail' || parts[0].agentId === 'mail') responseDomain = 'mail';
+            else if (parts[0].agentId === 'todo') responseDomain = 'todo';
+            else if (parts[0].agentId.startsWith('search')) responseDomain = 'search';
+            else if (parts[0].agentId === 'weather') responseDomain = 'weather';
+            else responseDomain = 'executor';
           } else {
             app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesizing');
             assistantText = await synthesizeAgentResponses({
@@ -1742,9 +2006,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               },
             });
             app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesized');
+            responseDomain = 'general';
           }
         }
         // All tasks failed/OUT_OF_SCOPE → assistantText stays undefined → HA general fallback
+      } else if (routerEnabled) {
+        gracefulFallback = true;
       }
       // No valid targets above threshold → HA general fallback
     }
@@ -1757,19 +2024,40 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
           app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
           assistantText = toDeterministicHaFailureMessage();
+          gracefulFallback = true;
         } else {
           assistantText = haText;
         }
+        responseDomain = 'general';
       } catch (err) {
         app.log.warn(
           { threadId, requestId, correlation_id: correlationId || undefined, err },
           'ingest_home_assistant_call_failed'
         );
         assistantText = toDeterministicHaFailureMessage();
+        responseDomain = 'general';
+        gracefulFallback = true;
       }
     }
 
-    void conversationService.persistMessages(effectiveThreadId, text, assistantText).then(async () => {
+    const assistantTextVoice = voiceEnabled
+      ? formatVoiceResponse({
+          text: assistantText,
+          domain: responseDomain,
+          mode: voiceMode,
+          gracefulFallback,
+        })
+      : assistantText;
+
+    if (responseDomain === 'mail') {
+      const parsedMail = extractMailStateFromReply(assistantText);
+      if (parsedMail) {
+        const existing = voiceThreadState.get(effectiveThreadId) ?? {};
+        voiceThreadState.set(effectiveThreadId, { ...existing, ...parsedMail });
+      }
+    }
+
+    void conversationService.persistMessages(effectiveThreadId, text, assistantTextVoice).then(async () => {
       if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
         summarizationService.startPresummarize(effectiveThreadId);
       }
@@ -1777,7 +2065,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const payload = {
       threadId: effectiveThreadId,
-      responseText: toSingleParagraphPlainText(assistantText),
+      responseText: toSingleParagraphPlainText(assistantTextVoice),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
     };
 

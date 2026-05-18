@@ -1,0 +1,21 @@
+{
+  "profile_id": "routing-core",
+  "profile_version": "routing-probes-v1",
+  "tests": [
+    {
+      "id": "probe-weather-rain",
+      "text": "c est vrai qu il n y a pas de pluie aujourd hui",
+      "critical": true
+    },
+    {
+      "id": "probe-weather-max-day-week",
+      "text": "c est quoi la temperature max aujourd hui et la temperature maximum de la semaine",
+      "critical": true
+    },
+    {
+      "id": "probe-multi-intent-mail-todo-weather",
+      "text": "lis mes mails puis ajoute une tache et donne la meteo",
+      "critical": true
+    }
+  ]
+}

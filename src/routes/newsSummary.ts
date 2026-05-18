@@ -21,6 +21,40 @@ const newsSummaryBodySchema = z.object({
 
 type NewsSummaryRequest = z.infer<typeof newsSummaryBodySchema>;
 
+function firstSentence(text: string): string {
+  const clean = toSingleParagraphPlainText(text);
+  if (!clean) return '';
+  const m = clean.match(/^(.+?[.!?])(?:\s|$)/);
+  return m ? m[1] : clean;
+}
+
+function buildDeterministicNewsSummary(body: NewsSummaryRequest): string {
+  const sectorLabel = body.sectorLabel?.trim();
+  const facts = (body.contextFacts ?? [])
+    .map((fact) => toSingleParagraphPlainText(fact))
+    .filter(Boolean)
+    .slice(0, 2);
+
+  const lines: string[] = [];
+  lines.push(`• Vue: ${body.scopeLabel}${sectorLabel ? ` (${sectorLabel})` : ''}.`);
+
+  if (facts.length > 0) {
+    lines.push(`• Repères: ${facts.join(' ; ')}.`);
+  }
+
+  const articleLines = body.items.slice(0, 6).map((item) => {
+    const title = toSingleParagraphPlainText(item.title);
+    const source = item.source?.trim() ? ` [${item.source.trim()}]` : '';
+    const snippet = item.snippet ? firstSentence(item.snippet) : '';
+    return `• ${title}${source}${snippet ? ` — ${snippet}` : ''}`;
+  });
+
+  lines.push(...articleLines);
+  lines.push(`• Total analyse: ${body.items.length} article${body.items.length > 1 ? 's' : ''} recent${body.items.length > 1 ? 's' : ''}.`);
+
+  return toSingleParagraphPlainText(lines.slice(0, 8).join(' '));
+}
+
 function buildPrompt(body: NewsSummaryRequest): string {
   const sectorLabel = body.sectorLabel?.trim();
   const facts = (body.contextFacts ?? []).map((fact) => toSingleParagraphPlainText(fact)).filter(Boolean);
@@ -133,11 +167,14 @@ export function registerNewsSummaryRoute(app: FastifyInstance, deps: AppDeps): v
       });
     } catch (error) {
       app.log.warn({ err: error, scopeKey: parsed.data.scopeKey, scopeLabel: parsed.data.scopeLabel }, 'news_summary_failed');
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === 'openai_api_key_missing') {
-        return reply.code(503).send({ error: 'summary_provider_not_configured' });
-      }
-      return reply.code(502).send({ error: 'news_summary_failed' });
+      const fallbackText = buildDeterministicNewsSummary(parsed.data);
+      return reply.code(200).send({
+        status: 'fallback',
+        scopeKey: parsed.data.scopeKey,
+        text: fallbackText,
+        contextNote: buildContextNote(parsed.data, fallbackText),
+        generatedAt: new Date().toISOString(),
+      });
     }
   });
 }

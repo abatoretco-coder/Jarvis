@@ -65,11 +65,38 @@ type RefreshBlackoutWindow = {
 };
 
 function normalizeForMatch(input: string): string {
-  return String(input ?? '')
+  const base = String(input ?? '')
+    // Collapse dotted acronyms: "r.a.p" -> "rap"
+    .replace(/([a-zA-Z])\.(?=[a-zA-Z])/g, '$1')
     .normalize('NFKD')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+
+  if (!base) return base;
+
+  // Collapse isolated letter runs: "r a p" -> "rap"
+  const parts = base.split(/\s+/).filter(Boolean);
+  const collapsed: string[] = [];
+  let letterRun = '';
+
+  for (const token of parts) {
+    if (/^[a-z]$/.test(token)) {
+      letterRun += token;
+      continue;
+    }
+    if (letterRun.length > 0) {
+      collapsed.push(letterRun);
+      letterRun = '';
+    }
+    collapsed.push(token);
+  }
+
+  if (letterRun.length > 0) {
+    collapsed.push(letterRun);
+  }
+
+  return collapsed.join(' ').trim();
 }
 
 function tokenize(input: string): string[] {
@@ -83,12 +110,15 @@ function playlistMatchScore(candidateName: string, requestedName: string): numbe
   const requested = normalizeForMatch(requestedName);
   if (!candidate || !requested) return 0;
   if (candidate === requested) return 1000;
-  if (candidate.startsWith(requested)) return 900;
-  if (candidate.includes(requested)) return 800;
 
-  const reqTokens = tokenize(requested);
+  const playlistStopWords = new Set([
+    'ma', 'mon', 'mes', 'la', 'le', 'les', 'de', 'du', 'des', 'd',
+    'playlist', 'play', 'list', 'liste', 'spotify',
+  ]);
+
+  const reqTokens = tokenize(requested).filter((token) => !playlistStopWords.has(token));
   if (!reqTokens.length) return 0;
-  const candSet = new Set(tokenize(candidate));
+  const candSet = new Set(tokenize(candidate).filter((token) => !playlistStopWords.has(token)));
   let overlap = 0;
   for (const t of reqTokens) {
     if (candSet.has(t)) overlap += 1;
@@ -119,7 +149,6 @@ function trackMatchScore(
     .reduce((best, normalizedArtist) => {
       if (!normalizedArtist) return best;
       if (normalizedArtist === artistNeedle) return Math.max(best, 250);
-      if (normalizedArtist.includes(artistNeedle) || artistNeedle.includes(normalizedArtist)) return Math.max(best, 180);
 
       const overlap = tokenize(artistNeedle).filter((token) => tokenize(normalizedArtist).includes(token)).length;
       return Math.max(best, overlap > 0 ? 120 : 0);
@@ -133,9 +162,6 @@ function deviceNameMatchScore(candidateName: string, requestedName: string): num
   const requested = normalizeForMatch(requestedName);
   if (!candidate || !requested) return 0;
   if (candidate === requested) return 1000;
-  if (candidate.startsWith(requested)) return 900;
-  if (requested.startsWith(candidate)) return 850;
-  if (candidate.includes(requested) || requested.includes(candidate)) return 780;
 
   const reqTokens = tokenize(requested);
   const candTokens = tokenize(candidate);
@@ -190,7 +216,9 @@ export class SpotifyWebApiClient {
   private readonly refreshSkewMs = 120_000;
   private cachedDeviceList?: { result: Awaited<ReturnType<SpotifyWebApiClient['listDevices']>>; fetchedAtMs: number };
   private cachedNowPlaying?: { result: Awaited<ReturnType<SpotifyWebApiClient['getNowPlaying']>>; fetchedAtMs: number };
+  private cachedUserPlaylists?: { playlists: SpotifyPlaylist[]; fetchedAtMs: number };
   private readonly shortCacheTtlMs = 65_000;
+  private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
 
   constructor(env: Env, logger?: SpotifyLogger) {
@@ -1400,7 +1428,7 @@ export class SpotifyWebApiClient {
     return { ok: true, uri: best.uri, name: best.name };
   }
 
-  private async listCurrentUserPlaylists(limit = 50): Promise<
+  private async fetchCurrentUserPlaylists(limit = 50): Promise<
     | { ok: true; playlists: SpotifyPlaylist[] }
     | { ok: false; error: string; status?: number; details?: unknown }
   > {
@@ -1440,6 +1468,45 @@ export class SpotifyWebApiClient {
     return { ok: true, playlists };
   }
 
+  private async listCurrentUserPlaylists(
+    limit = 50,
+    options?: { forceRefresh?: boolean; allowStaleOnError?: boolean },
+  ): Promise<
+    | { ok: true; playlists: SpotifyPlaylist[] }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    const forceRefresh = options?.forceRefresh === true;
+    const allowStaleOnError = options?.allowStaleOnError !== false;
+    const now = Date.now();
+
+    if (!forceRefresh && this.cachedUserPlaylists && now - this.cachedUserPlaylists.fetchedAtMs < this.playlistCacheTtlMs) {
+      return { ok: true, playlists: this.cachedUserPlaylists.playlists };
+    }
+
+    const fetched = await this.fetchCurrentUserPlaylists(limit);
+    if (fetched.ok) {
+      this.cachedUserPlaylists = { playlists: fetched.playlists, fetchedAtMs: now };
+      return fetched;
+    }
+
+    if (allowStaleOnError && this.cachedUserPlaylists?.playlists.length) {
+      this.log('warn', 'playlist_cache_using_stale', {
+        reason: fetched.error,
+        status: fetched.status,
+        staleCount: this.cachedUserPlaylists.playlists.length,
+        staleAgeMs: now - this.cachedUserPlaylists.fetchedAtMs,
+      });
+      return { ok: true, playlists: this.cachedUserPlaylists.playlists };
+    }
+
+    return fetched;
+  }
+
+  private refreshUserPlaylistCache(): void {
+    if (!this.isConfigured()) return;
+    void this.listCurrentUserPlaylists(50, { forceRefresh: true, allowStaleOnError: true });
+  }
+
   async searchUserPlaylistContextUri(query: string): Promise<
     | { ok: true; uri: string; name: string }
     | { ok: false; error: string; status?: number; details?: unknown }
@@ -1447,7 +1514,7 @@ export class SpotifyWebApiClient {
     const q = String(query ?? '').trim();
     if (!q) return { ok: false, error: 'spotify_playlist_search_empty_query' };
 
-    const listed = await this.listCurrentUserPlaylists(50);
+    const listed = await this.listCurrentUserPlaylists(50, { allowStaleOnError: true });
     if (!listed.ok) return listed;
     if (!listed.playlists.length) {
       return { ok: false, error: 'spotify_user_playlists_empty' };
@@ -1550,6 +1617,7 @@ export class SpotifyWebApiClient {
   startSituationPrefetch(): void {
     if (!this.isConfigured() || this.prefetchTimer) return;
     void this.fetchAndCacheSituation();
+    this.refreshUserPlaylistCache();
     this.prefetchTimer = setInterval(() => {
       void this.fetchAndCacheSituation();
     }, 30_000);

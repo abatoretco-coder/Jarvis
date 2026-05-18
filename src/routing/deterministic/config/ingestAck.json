@@ -1,0 +1,13 @@
+{
+  "mailPrefixes": ["mail."],
+  "todoPrefixes": ["todo."],
+  "weatherPrefixes": ["weather."],
+  "searchPrefix": "search",
+  "responses": {
+    "mailOnly": "Deux secondes, je consulte tes emails.",
+    "todoOnly": "Deux secondes, je regarde tes taches.",
+    "weatherOnly": "Je regarde la meteo, une seconde.",
+    "searchOnly": "Je cherche ca, une seconde.",
+    "default": "Deux secondes, je traite ta demande."
+  }
+}

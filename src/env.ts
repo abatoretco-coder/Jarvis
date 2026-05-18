@@ -136,7 +136,11 @@ const envSchema = z
   SEMANTIC_ROUTER_EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
   SEMANTIC_ROUTER_ACCEPT_SCORE: z.coerce.number().min(0.5).max(0.99).default(0.84),
   SEMANTIC_ROUTER_MIN_MARGIN: z.coerce.number().min(0.01).max(0.30).default(0.08),
+  SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD: z.coerce.number().min(0).max(1).default(0.5),
   SEMANTIC_ROUTER_TIMEOUT_MS: numberFromEnv.default('5000'),
+  // Pre-compute route embeddings at startup to reduce first-request latency.
+  SEMANTIC_ROUTER_WARMUP_ON_STARTUP: booleanFromEnv.default('true'),
+  SEMANTIC_ROUTER_WARMUP_BATCH_SIZE: z.coerce.number().int().min(1).max(200).default(12),
   // Phase 1B: when true (and shadow mode=false), semantic accepted E2 routes can
   // execute directly, but only if explicitly allowlisted.
   SEMANTIC_ROUTER_ACTIVATION_ENABLED: booleanFromEnv.default('false'),

@@ -87,6 +87,64 @@ function normalizeForMatch(input: string): string {
     .trim();
 }
 
+function hasHalfVolumeIntent(text?: string): boolean {
+  const source = normalizeForMatch(text ?? '');
+  if (!source) return false;
+  return /(moitie|half)/.test(source);
+}
+
+function hasGenericMusicResumeIntent(input: {
+  text?: string;
+  query?: string;
+}): boolean {
+  const text = normalizeForMatch(input.text ?? '');
+  const query = normalizeForMatch(input.query ?? '');
+  if (query) return false;
+  const source = text.trim();
+  if (!source) return false;
+  const deviceSuffix = '( sur( le| la| mon| ma)? (pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom))?';
+
+  const exact = new Set([
+    'reprends',
+    'relance',
+    'demarre',
+    'start',
+    'play',
+    'mets la musique',
+    'met la musique',
+    'joue de la musique',
+    'lance de la musique',
+    'lance spotify',
+    'mets spotify',
+    'met spotify',
+    'reprends spotify',
+    'relance spotify',
+  ]);
+  if (exact.has(source)) return true;
+
+  return new RegExp(`^((re)?lance|reprends|demarre|start|play)( la)?( musique| spotify)?${deviceSuffix}$`).test(source)
+    || new RegExp(`^(mets|met|joue|lance)( de)? la musique( sur spotify)?${deviceSuffix}$`).test(source);
+}
+
+function evaluateGenericResumeGate(input: {
+  text?: string;
+  query?: string;
+}): {
+  enabled: boolean;
+  offReason?: 'query_present' | 'non_generic_command';
+} {
+  const normalizedQuery = normalizeForMatch(input.query ?? '');
+  if (normalizedQuery) {
+    return { enabled: false, offReason: 'query_present' };
+  }
+
+  if (!hasGenericMusicResumeIntent(input)) {
+    return { enabled: false, offReason: 'non_generic_command' };
+  }
+
+  return { enabled: true };
+}
+
 
 
 
@@ -243,7 +301,7 @@ function matchesDeviceNeedle(device: { id?: string; name?: string }, needle?: st
   if (idNorm && idNorm === n) return true;
   const nameNorm = normalizeForMatch(device.name ?? '');
   if (!nameNorm) return false;
-  return nameNorm === n || nameNorm.includes(n) || n.includes(nameNorm);
+  return nameNorm === n;
 }
 
 const READONLY_SPOTIFY_ACTIONS = new Set(['list_devices', 'now_playing', 'search']);
@@ -417,16 +475,35 @@ async function _executeSpotifyCapability(input: {
     const volumeDelta = slotNumber(slots, 'volume_delta') ?? slotNumber(slots, 'delta');
     const hasAbsolute = typeof volumePercent === 'number' && Number.isFinite(volumePercent);
     const hasDelta = typeof volumeDelta === 'number' && Number.isFinite(volumeDelta);
-
-    if (!hasAbsolute && !hasDelta) {
-      return toErrorResponse('missing_volume', 'Précisez le niveau souhaité, ou indiquez dans quel sens changer le volume.');
-    }
+    const halfIntent = hasHalfVolumeIntent(request.text);
 
     let targetVolume: number;
-
     let deltaSnapshot: ReturnType<typeof toPlaybackSnapshot> | undefined;
-    if (hasAbsolute && !hasDelta) {
+
+    if (!hasAbsolute && !hasDelta) {
+      if (!halfIntent) {
+        return toErrorResponse('missing_volume', 'Précisez le niveau souhaité, ou indiquez dans quel sens changer le volume.');
+      }
+      const now = await spotifyWebApi.getNowPlaying();
+      if (!now.ok) {
+        return toErrorResponse('spotify_no_active_playback', 'Rien ne joue en ce moment — impossible d\'ajuster le volume.');
+      }
+      deltaSnapshot = toPlaybackSnapshot(now.data);
+      const currentVolume = typeof deltaSnapshot.volumePercent === 'number' ? deltaSnapshot.volumePercent : 50;
+      targetVolume = Math.max(0, Math.min(100, Math.round(currentVolume / 2)));
+    } else if (hasAbsolute && !hasDelta) {
       targetVolume = Math.max(0, Math.min(100, Math.round(volumePercent!)));
+
+      // STT/planner can sometimes encode "baisse de moitié" as volume_percent=0.
+      // When the utterance clearly means "half", prefer relative halving.
+      if (targetVolume === 0 && halfIntent) {
+        const now = await spotifyWebApi.getNowPlaying();
+        if (now.ok) {
+          deltaSnapshot = toPlaybackSnapshot(now.data);
+          const currentVolume = typeof deltaSnapshot.volumePercent === 'number' ? deltaSnapshot.volumePercent : 50;
+          targetVolume = Math.max(0, Math.min(100, Math.round(currentVolume / 2)));
+        }
+      }
     } else {
       // Delta relatif : on a besoin du volume actuel
       const now = await spotifyWebApi.getNowPlaying();
@@ -835,7 +912,6 @@ async function _executeSpotifyCapability(input: {
       text: request.text,
       entities,
     });
-    const hintedArtist = slotString(entities, 'artist') ?? slotString(entities, 'artist_name');
 
     if (trackUri && trackUri.startsWith('spotify:track:')) {
       const played = await spotifyWebApi.playUris([trackUri], deviceId);
@@ -859,6 +935,33 @@ async function _executeSpotifyCapability(input: {
 
     const query = buildSearchQuery({ slots, type, entities });
     if (!query) {
+      const gateDecision = evaluateGenericResumeGate({ text: request.text, query: slotString(slots, 'query') });
+      log?.info?.(
+        {
+          correlation_id: request.correlation_id,
+          threadId: request.threadId,
+          deterministic_gate: 'search_and_play_missing_query_resume',
+          enabled: gateDecision.enabled,
+          action: request.action,
+          ...(gateDecision.offReason ? { off_reason: gateDecision.offReason } : {}),
+        },
+        'spotify_deterministic_gate_executor'
+      );
+
+      if (gateDecision.enabled) {
+        const played = await spotifyWebApi.play(deviceId);
+        if (played.ok) {
+          return {
+            status: 'success',
+            tts: deviceId ? 'Lecture lancée sur cet appareil.' : 'Lecture reprise.',
+            data: {
+              mode: 'generic_resume',
+              registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION,
+            },
+          };
+        }
+      }
+
       return {
         status: 'need_clarification',
         tts: 'Précisez ce que vous souhaitez écouter.',

@@ -1,0 +1,9 @@
+{
+  "acceptScore": 0.84,
+  "minMargin": 0.08,
+  "multiIntentThreshold": 0.5,
+  "enableD0": true,
+  "enableE2": true,
+  "enableE1": true,
+  "logLevel": "info"
+}

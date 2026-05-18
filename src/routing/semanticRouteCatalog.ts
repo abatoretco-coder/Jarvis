@@ -310,7 +310,7 @@ export const SEARCH_DEEP_E1_ROUTES: SemanticRouteDefinition[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TODO — E2 Routes (6)
+// TODO — E1 Routes
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const TODO_E1_ROUTES: SemanticRouteDefinition[] = [
@@ -461,7 +461,7 @@ export const TODO_E1_ROUTES: SemanticRouteDefinition[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIL — E2 Routes (2)
+// MAIL — E1 Routes
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
@@ -698,6 +698,7 @@ export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
     key: 'executor.lock',
     level: 'E1',
     targetAgentId: 'executors',
+    highRisk: true,
     directRequest: { domain: 'executors', action: 'lock' },
     plannerRequired: true,
     examples: ['verrouille la porte entree', 'active la serrure', 'ferme la porte connectee'],
@@ -707,6 +708,7 @@ export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
     key: 'executor.unlock',
     level: 'E1',
     targetAgentId: 'executors',
+    highRisk: true,
     directRequest: { domain: 'executors', action: 'unlock' },
     plannerRequired: true,
     examples: ['deverrouille la porte entree', 'ouvre la serrure connectee', 'retire le verrou'],

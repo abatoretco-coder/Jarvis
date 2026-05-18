@@ -1,0 +1,32 @@
+{
+  "weatherLexemes": [
+    "meteo",
+    "temperature",
+    "pluie",
+    "precipitation",
+    "humidite",
+    "vent",
+    "prevision",
+    "previsions"
+  ],
+  "explicitLocalMarkers": [
+    "chez moi",
+    "ici",
+    "maison",
+    "home"
+  ],
+  "explicitExternalLocations": [
+    "paris",
+    "londres",
+    "tokyo",
+    "new york",
+    "montreal",
+    "quebec",
+    "lyon",
+    "marseille",
+    "lille",
+    "nantes",
+    "bordeaux",
+    "toulouse"
+  ]
+}

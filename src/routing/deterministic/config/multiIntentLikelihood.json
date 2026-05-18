@@ -1,0 +1,45 @@
+{
+  "coordinationMarkers": [
+    " puis ",
+    " et ensuite ",
+    " ensuite ",
+    " apres ",
+    " après ",
+    " aussi ",
+    " en meme temps ",
+    " en même temps ",
+    " et "
+  ],
+  "actionVerbs": [
+    "mets",
+    "met",
+    "lance",
+    "ouvre",
+    "ferme",
+    "active",
+    "desactive",
+    "désactive",
+    "baisse",
+    "monte",
+    "augmente",
+    "diminue",
+    "lis",
+    "cherche",
+    "envoie",
+    "reponds",
+    "réponds",
+    "ajoute",
+    "supprime",
+    "verrouille",
+    "deverrouille",
+    "déverrouille"
+  ],
+  "weights": {
+    "segmentStep": 0.18,
+    "segmentMax": 0.35,
+    "extraVerbStep": 0.16,
+    "extraVerbMax": 0.35,
+    "markerStep": 0.16,
+    "markerMax": 0.45
+  }
+}

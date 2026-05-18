@@ -5,6 +5,8 @@
  * Phase 0 : Définitions communes à tous les modules.
  */
 
+import semanticRouterDefaultsRaw from './deterministic/config/semanticRouterDefaults.json';
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Route Levels & Decisions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -366,14 +368,31 @@ export type MinimalLogger = {
 // Metadata & Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const SEMANTIC_ROUTER_VERSION = '0.1.0-phase0';
+export const SEMANTIC_ROUTER_VERSION = '0.1.0-phase3';
+
+function asFiniteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function asLogLevel(value: unknown, fallback: 'debug' | 'info' | 'warn' | 'error'): 'debug' | 'info' | 'warn' | 'error' {
+  if (value === 'debug' || value === 'info' || value === 'warn' || value === 'error') return value;
+  return fallback;
+}
+
+const semanticRouterDefaults = (semanticRouterDefaultsRaw && typeof semanticRouterDefaultsRaw === 'object')
+  ? semanticRouterDefaultsRaw as Record<string, unknown>
+  : {};
 
 export const DEFAULT_SEMANTIC_ROUTER_OPTIONS: Required<SemanticRouterOptions> = {
-  acceptScore: 0.84,
-  minMargin: 0.08,
-  multiIntentThreshold: 0.5,
-  enableD0: true,
-  enableE2: true,
-  enableE1: true,
-  logLevel: 'info',
+  acceptScore: asFiniteNumber(semanticRouterDefaults.acceptScore, 0.84),
+  minMargin: asFiniteNumber(semanticRouterDefaults.minMargin, 0.08),
+  multiIntentThreshold: asFiniteNumber(semanticRouterDefaults.multiIntentThreshold, 0.5),
+  enableD0: asBoolean(semanticRouterDefaults.enableD0, true),
+  enableE2: asBoolean(semanticRouterDefaults.enableE2, true),
+  enableE1: asBoolean(semanticRouterDefaults.enableE1, true),
+  logLevel: asLogLevel(semanticRouterDefaults.logLevel, 'info'),
 };

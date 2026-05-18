@@ -8,7 +8,7 @@
  */
 
 import type { SemanticRouteDefinition, ScoredRoute } from './semanticRouter.types';
-import { getEmbedding } from './embeddingClient';
+import { getEmbeddings } from './embeddingClient';
 import type { EmbeddingClientConfig } from './semanticRouter.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,9 +35,11 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const routeEmbeddingCache = new Map<string, number[]>();
+const routeEmbeddingInFlight = new Map<string, Promise<number[]>>();
 
 export function clearRouteEmbeddingCache(): void {
   routeEmbeddingCache.clear();
+  routeEmbeddingInFlight.clear();
 }
 
 /**
@@ -52,22 +54,73 @@ async function getRouteEmbedding(
   const cached = routeEmbeddingCache.get(cacheKey);
   if (cached) return cached;
 
-  // Embed all examples and average them
-  const vectors = await Promise.all(
-    route.examples.map((ex) => getEmbedding(ex, config).then((r) => r.vector)),
-  );
+  const inFlight = routeEmbeddingInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
 
-  const dims = vectors[0]?.length ?? 0;
-  if (dims === 0) throw new Error(`route_embedding_empty:${route.key}`);
+  const promise = (async (): Promise<number[]> => {
+    // Embed route examples in a single batch request when possible, then average.
+    const vectors = (await getEmbeddings(route.examples, config)).vectors;
 
-  const centroid = new Array<number>(dims).fill(0);
-  for (const v of vectors) {
-    for (let i = 0; i < dims; i++) centroid[i]! += v[i]!;
+    const dims = vectors[0]?.length ?? 0;
+    if (dims === 0) throw new Error(`route_embedding_empty:${route.key}`);
+
+    const centroid = new Array<number>(dims).fill(0);
+    for (const v of vectors) {
+      for (let i = 0; i < dims; i++) centroid[i]! += v[i]!;
+    }
+    for (let i = 0; i < dims; i++) centroid[i]! /= vectors.length;
+
+    routeEmbeddingCache.set(cacheKey, centroid);
+    return centroid;
+  })();
+
+  routeEmbeddingInFlight.set(cacheKey, promise);
+  try {
+    return await promise;
+  } finally {
+    routeEmbeddingInFlight.delete(cacheKey);
   }
-  for (let i = 0; i < dims; i++) centroid[i]! /= vectors.length;
+}
 
-  routeEmbeddingCache.set(cacheKey, centroid);
-  return centroid;
+export type RouteEmbeddingWarmupSummary = {
+  warmed: number;
+  skipped: number;
+  failed: number;
+};
+
+/**
+ * Pre-compute route centroid embeddings to reduce first-request cold start.
+ * Warmup is processed in bounded batches to avoid overwhelming the embedding backend.
+ */
+export async function warmupRouteEmbeddings(input: {
+  routes: SemanticRouteDefinition[];
+  config: EmbeddingClientConfig;
+  batchSize?: number;
+}): Promise<RouteEmbeddingWarmupSummary> {
+  const { routes, config } = input;
+  const batchSize = Math.max(1, input.batchSize ?? 12);
+
+  let warmed = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (let i = 0; i < routes.length; i += batchSize) {
+    const batch = routes.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map(async (route) => {
+        const cacheKey = `${config.model}:${route.key}`;
+        if (routeEmbeddingCache.has(cacheKey)) {
+          skipped += 1;
+          return;
+        }
+        await getRouteEmbedding(route, config);
+        warmed += 1;
+      }),
+    );
+    failed += results.filter((r) => r.status === 'rejected').length;
+  }
+
+  return { warmed, skipped, failed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

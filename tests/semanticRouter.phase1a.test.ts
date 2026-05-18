@@ -191,13 +191,15 @@ describe('makeRouteDecision — reject', () => {
 // Mock the embedding client to avoid real HTTP calls
 jest.mock('../src/routing/embeddingClient', () => ({
   getEmbedding: jest.fn(),
+  getEmbeddings: jest.fn(),
   clearEmbeddingCache: jest.fn(),
 }));
 
-import { getEmbedding } from '../src/routing/embeddingClient';
+import { getEmbedding, getEmbeddings } from '../src/routing/embeddingClient';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
 
 const mockedGetEmbedding = getEmbedding as jest.MockedFunction<typeof getEmbedding>;
+const mockedGetEmbeddings = getEmbeddings as jest.MockedFunction<typeof getEmbeddings>;
 
 const MOCK_EMBEDDING_CONFIG = {
   baseUrl: 'https://api.openai.com/v1',
@@ -209,6 +211,17 @@ describe('trySemanticRouter', () => {
     clearRouteEmbeddingCache();
     clearEmbeddingCache();
     mockedGetEmbedding.mockReset();
+    mockedGetEmbeddings.mockReset();
+    mockedGetEmbeddings.mockImplementation(async (texts: string[], config) => {
+      const rows = await Promise.all(texts.map((text) => mockedGetEmbedding(text, config)));
+      return {
+        vectors: rows.map((row) => row.vector),
+        model: config.model,
+        elapsedMs: 0,
+        cachedCount: rows.filter((row) => row.cached).length,
+        fetchedCount: rows.filter((row) => !row.cached).length,
+      };
+    });
   });
 
   it('returns fallback_llm when embedding fails', async () => {
@@ -306,6 +319,17 @@ describe('Phase 1A fixtures — acceptance criteria', () => {
   beforeEach(() => {
     clearRouteEmbeddingCache();
     mockedGetEmbedding.mockReset();
+    mockedGetEmbeddings.mockReset();
+    mockedGetEmbeddings.mockImplementation(async (texts: string[], config) => {
+      const rows = await Promise.all(texts.map((text) => mockedGetEmbedding(text, config)));
+      return {
+        vectors: rows.map((row) => row.vector),
+        model: config.model,
+        elapsedMs: 0,
+        cachedCount: rows.filter((row) => row.cached).length,
+        fetchedCount: rows.filter((row) => !row.cached).length,
+      };
+    });
   });
 
   const FIXTURES = [
