@@ -44,12 +44,13 @@
       "lines": [
         "",
         "## SEARCH AGENTS",
-          "  search.news  → live/recent: scores de sport, résultats de match, classements, météo EXTERNE, actualités du jour, événements récents.",
-          "               Exemples: météo à Paris/Lyon/Londres, résultats du match d'hier, actualités du jour, événements en France.",
-        "               Phrases comme \"dis-moi\", \"c'est quoi\", \"quel est\" + sujet temps-réel → search.news.",
+          "  search.news  → live/recent: scores de sport, résultats de match, classements, actualités du jour, événements récents.",
+          "               Météo EXTERNE seulement (ville/pays/région explicitement nommés): météo à Paris, temps à Lyon, météo à Londres.",
+          "               Phrases comme \"dis-moi\", \"c'est quoi\", \"quel est\" + sujet temps-réel → search.news.",
         "  search.web   → lookup factuel: définitions, prix, personnes, conversions, questions encyclopédiques.",
         "  search.deep  → analyse approfondie: histoire, biographies, comparaisons, sujets complexes.",
-          "  ⚠ RULE: \"météo à Paris\" \"temps à Lyon\" → search.news. \"météo chez moi\" \"température ici\" → weather.",
+          "  ⚠ RULE météo: \"météo à Paris\" \"temps à Lyon\" → search.news. Sans ville → weather (JAMAIS search.news).",
+          "  ⚠ RULE météo: \"météo demain\" \"prévisions semaine\" \"il pleut?\" sans ville → weather, jamais search.news.",
         "  ⚠ Information queries (\"dis-moi X\", \"donne-moi X\", \"c'est quoi X\") are NOT home automation — never route them to executors."
       ]
     },
@@ -58,10 +59,11 @@
       "lines": [
         "",
           "## WEATHER (Local / Home Assistant only)",
-          "  weather → Météo LOCALE Home Assistant: état actuel chez soi, température, humidité, précipitations actuelles, prévisions courtes.",
-          "  Exemples: \"Quel temps fait-il?\" \"Il pleut chez moi?\" \"Température ici?\" \"État météo actuel?\"",
-          "  ⚠ RULE: Demandes ACTUELLES et LOCALES seulement. Pas de prévisions futurs, pas de ville externe.",
-          "  ⚠ RULE: \"météo demain\" \"prévisions pour la semaine\" → search.news, pas weather.",
+          "  weather → Météo LOCALE Home Assistant: état actuel, température, humidité, précipitations, prévisions courtes ou longues.",
+          "  Exemples: \"Quel temps fait-il?\" \"Il pleut?\" \"Température ici?\" \"Météo demain?\" \"Prévisions cette semaine?\" \"Il fait beau?\" \"Ça va pleuvoir?\"",
+          "  CRITICAL: Si aucune ville/pays/région EXTERNE explicite n'est mentionnée → TOUJOURS weather, JAMAIS search.news.",
+          "  ⚠ RULE: \"demain\", \"cette semaine\", \"aujourd'hui\" sans ville → weather (pas search.news, même si ça semble live).",
+          "  ⚠ RULE: ne basculer vers search.news QUE si une ville/région externe est explicitement nommée dans le message.",
           "  ⚠ RULE: \"météo à Paris\" \"temps à Lyon\" → search.news, pas weather."
       ]
     },
@@ -88,7 +90,10 @@
       "lines": [
         "",
         "## MAIL (if listed)",
-        "  Email: lire/envoyer/répondre/transférer/supprimer des emails Gmail ou Outlook. NOT executors. NOT search."
+        "  Email: lire/envoyer/répondre/transférer/supprimer/rechercher des emails Gmail ou Outlook. NOT executors. NOT search.",
+        "  ⚠ RULE: demandes contenant mail/email/inbox/boîte de réception + action (lire/chercher/envoyer/répondre/transférer/supprimer/flaguer) → MAIL.",
+        "  ⚠ RULE: \"cherche les emails de X\" doit aller vers MAIL (search_emails), jamais vers search.web.",
+        "  ⚠ RULE: \"envoie un email\" incomplet doit aller vers MAIL pour clarification, pas vers un refus générique."
       ]
     }
   ]

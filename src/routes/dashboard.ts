@@ -1,5 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 
+import {
+  fetchUpcomingEventsMultiCalendar,
+  hasCalendarConfig,
+  parseCalendarIds,
+  resolveEventEnd,
+  resolveEventStart,
+} from '../calendar/googleCalendarClient';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import type { AppDeps } from '../server';
@@ -17,13 +24,6 @@ type DashboardSection = {
   source: string;
   status: 'ok' | 'empty' | 'error';
   items?: TodoTaskItem[] | DashboardMailItem[] | AgendaEventItem[];
-};
-
-type CalendarPreview = {
-  title: string;
-  message: string;
-  start: Date;
-  end: Date;
 };
 
 type AgendaEventItem = {
@@ -284,62 +284,56 @@ function startOfToday(base: Date): Date {
   return date;
 }
 
-function extractCalendarPreview(state: HaState): CalendarPreview | null {
-  const attributes = state.attributes ?? {};
-  const start = parseDate(attributes.start_time);
-  const end = parseDate(attributes.end_time);
-  if (!start || !end) return null;
+/**
+ * Build the agenda section by reading events directly from Google Calendar API.
+ * Returns null when Google Calendar is not configured (caller falls back to HA states).
+ */
+async function buildAgendaFromGoogle(
+  env: AppDeps['env'],
+  now = new Date(),
+): Promise<DashboardSection | null> {
+  if (!hasCalendarConfig(env)) return null;
 
-  const title = String(attributes.friendly_name ?? state.entity_id.replace(/^calendar\./, '')).trim();
-  const message = String(attributes.message ?? '').trim();
-  return {
-    title,
-    message,
-    start,
-    end,
-  };
-}
-
-function buildAgendaSection(states: HaState[], now = new Date()): DashboardSection {
   const windowStart = startOfToday(now);
   const windowEnd = addDays(windowStart, 7);
-  const calendars = states
-    .filter((state) => state.entity_id.startsWith('calendar.'))
-    .map(extractCalendarPreview)
-    .filter((item): item is CalendarPreview => item !== null)
-    // Include events that overlap with the 7-day window (not just those starting in it)
-    .filter((item) => item.start < windowEnd && item.end > windowStart)
-    .sort((left, right) => left.start.getTime() - right.start.getTime())
-    .slice(0, 6);
+  const calendarIds = parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
 
-  if (calendars.length === 0) {
-    return makeSection('Agenda', 'home-assistant', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
+  const events = await fetchUpcomingEventsMultiCalendar(
+    env,
+    calendarIds,
+    windowStart.toISOString(),
+    windowEnd.toISOString(),
+    50,
+  );
+
+  const active = events.filter((ev) => ev.status !== 'cancelled');
+
+  if (active.length === 0) {
+    return makeSection('Agenda', 'google-calendar', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
   }
 
-  const lines = calendars.map((item) => {
-    const headline = item.message && item.message.toLowerCase() !== item.title.toLowerCase()
-      ? `${item.title} | ${item.message}`
-      : item.title;
-    return `${formatDateForLine(item.start)} | ${headline}`;
+  const limited = active.slice(0, 6);
+
+  const lines = limited.map((ev) => {
+    const isAllDay = !ev.start?.dateTime;
+    const start = resolveEventStart(ev);
+    const title = ev.summary?.trim() || '(sans titre)';
+    return `${formatDateForLine(start)} | ${title}`;
   });
 
-  // Build structured event items
-  const items: AgendaEventItem[] = calendars.map((item, idx) => {
-    // Calculate duration in days (number of calendar days spanned)
-    const startDate = startOfToday(item.start);
-    const endDate = startOfToday(item.end);
-    const durationDays = Math.ceil((endDate.getTime() - startDate.getTime()) / 86_400_000) || 1;
-    
-    // Determine if it's an all-day event (no time component, full days)
-    const isAllDay = item.start.getHours() === 0 && item.start.getMinutes() === 0 &&
-                     item.end.getHours() === 0 && item.end.getMinutes() === 0;
-    
+  const items: AgendaEventItem[] = limited.map((ev, idx) => {
+    const isAllDay = !ev.start?.dateTime;
+    const start = resolveEventStart(ev);
+    const end = resolveEventEnd(ev);
+    const startDay = startOfToday(start);
+    const endDay = startOfToday(end);
+    const durationDays = Math.ceil((endDay.getTime() - startDay.getTime()) / 86_400_000) || 1;
     return {
-      id: `ha-event-${idx}`,
-      title: item.title,
-      details: item.message || undefined,
-      start: item.start.toISOString(),
-      end: item.end.toISOString(),
+      id: ev.id || `gcal-event-${idx}`,
+      title: ev.summary?.trim() || '(sans titre)',
+      details: ev.description?.trim() || undefined,
+      start: start.toISOString(),
+      end: end.toISOString(),
       isAllDay,
       durationDays,
     };
@@ -347,8 +341,8 @@ function buildAgendaSection(states: HaState[], now = new Date()): DashboardSecti
 
   return {
     title: 'Agenda',
-    source: 'home-assistant',
-    summary: `${calendars.length} evenement${calendars.length > 1 ? 's' : ''} prevu${calendars.length > 1 ? 's' : ''} cette semaine.`,
+    source: 'google-calendar',
+    summary: `${limited.length} evenement${limited.length > 1 ? 's' : ''} prevu${limited.length > 1 ? 's' : ''} cette semaine.`,
     lines,
     status: 'ok',
     items,
@@ -1353,9 +1347,18 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       return makeSection('Taches', 'jarvis-todo', 'Impossible de recuperer les taches pour le moment.');
     });
 
-    const [haStates, mailSection, tasksSection] = await Promise.all([haStatesPromise, mailPromise, todoPromise]);
+    // Agenda: read directly from Google Calendar when credentials are configured,
+    // fall back to HA states (single next-event per entity) otherwise.
+    const agendaPromise = buildAgendaFromGoogle(deps.env).catch((error) => {
+      app.log.warn({ error }, 'dashboard_agenda_google_failed');
+      return null;
+    });
+
+    const [haStates, mailSection, tasksSection, googleAgenda] = await Promise.all([
+      haStatesPromise, mailPromise, todoPromise, agendaPromise,
+    ]);
     const weather = buildWeatherPayload(haStates);
-    const agenda = buildAgendaSection(haStates);
+    const agenda = googleAgenda ?? makeSection('Agenda', 'google-calendar', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
 
     return reply.code(200).send({
       status: 'ok',

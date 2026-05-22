@@ -28,6 +28,7 @@ type LocalWeatherRoutingConfig = {
   externalLocationPrepositions: string[];
   locationArticles: string[];
   explicitExternalLocations: string[];
+  nonLocationWeatherTerms: string[];
 };
 
 type IngestAckConfig = {
@@ -133,6 +134,7 @@ function parseLocalWeatherRoutingConfig(raw: unknown): LocalWeatherRoutingConfig
     externalLocationPrepositions: toStringArray(obj.externalLocationPrepositions),
     locationArticles: toStringArray(obj.locationArticles),
     explicitExternalLocations: toStringArray(obj.explicitExternalLocations),
+    nonLocationWeatherTerms: toStringArray(obj.nonLocationWeatherTerms),
   };
 }
 

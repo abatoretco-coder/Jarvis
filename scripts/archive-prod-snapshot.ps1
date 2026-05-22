@@ -99,7 +99,11 @@ $threadsRaw | ConvertTo-Json -Depth 20 | Set-Content -Path (Join-Path $outFolder
 
 $selectedThreadId = $ThreadId
 if (-not $selectedThreadId) {
-  $selectedThreadId = [string]$threadsRaw.items[0].threadId
+  if ($Text -and $Text.Trim().Length -gt 0) {
+    $selectedThreadId = "archive-probe-$runId"
+  } else {
+    $selectedThreadId = [string]$threadsRaw.items[0].threadId
+  }
 }
 
 if (-not $selectedThreadId) {

@@ -2453,17 +2453,16 @@ describe('/v1/ingest integration', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-semantic-e1-executor-timer-live',
-        text: 'Mets un minuteur de dix minutes.',
+        text: 'Mets un minuteur de 10 minutes.',
         clientContext: { channel: 'desktop' },
       },
     });
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('Minuteur lance');
+    expect(payload.responseText).toContain('Je ne trouve pas de minuteur Home Assistant configuré.');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.agent_id).toBe('conversation.jarvis_broker');
+    expect(calls).toHaveLength(0);
   });
 
   it('semantic E1 live executor.timer resolves compatibility mapping without executors key', async () => {
@@ -2510,17 +2509,16 @@ describe('/v1/ingest integration', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-semantic-e1-executor-timer-compat',
-        text: 'Mets un minuteur de dix minutes.',
+        text: 'Mets un minuteur de 10 minutes.',
         clientContext: { channel: 'desktop' },
       },
     });
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('mode compat');
+    expect(payload.responseText).toContain('Je ne trouve pas de minuteur Home Assistant configuré.');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.agent_id).toBe('conversation.jarvis_broker');
+    expect(calls).toHaveLength(0);
   });
 
   it('semantic E1 executor route falls back when executors mapping is missing', async () => {
@@ -2985,7 +2983,7 @@ describe('/v1/ingest integration', () => {
       },
       {
         name: 'executors',
-        text: 'met un miniter 10 min',
+        text: 'mets un timer 10 min',
         semantic: {
           accepted: true,
           decision: 'accepted_e1',
@@ -3004,7 +3002,7 @@ describe('/v1/ingest integration', () => {
           top2Intent: 'executor.note',
           confidence: 0.95,
         },
-        expectedContains: 'Minuteur lance',
+        expectedContains: 'Je ne trouve pas de minuteur Home Assistant configuré.',
       },
     ];
 

@@ -7,6 +7,8 @@
 {"text":"quelles sont les actus","expectedTop1":"search.news.current_news","expectedAccepted":true,"note":"news route"}
 {"text":"mets du jazz","expectedTop1":"spotify.search_and_play","expectedAccepted":true,"note":"spotify e1 planner route"}
 {"text":"ajoute du lait à ma liste de courses","expectedTop1":"todo.add_task","expectedAccepted":true,"note":"todo creation"}
-{"text":"quelles tâches me restent aujourd'hui","expectedTop1":"todo.list_tasks_today","expectedAccepted":true,"note":"todo read route"}
-{"text":"lis mes mails non lus","expectedTop1":"mail.list_inbox_unread","expectedAccepted":true,"note":"mail unread route"}
+{"text":"quelles tâches me restent aujourd'hui","expectedTop1":"todo.list_tasks.today","expectedAccepted":true,"note":"todo read route"}
+{"text":"lis mes mails non lus","expectedTop1":"mail.list_inbox.unread","expectedAccepted":true,"note":"mail unread route"}
+{"text":"météo pour demain","expectedTop1":"weather.current_conditions","expectedAccepted":true,"note":"local weather should not be treated as external location"}
+{"text":"est-ce qu'il pleut dans la semaine chez moi","expectedTop1":"weather.current_precipitation","expectedAccepted":true,"note":"local weather with time range should stay local"}
 {"text":"compare React et Vue","expectedTop1":"search.deep.comparison","expectedAccepted":true,"note":"deep search comparison"}

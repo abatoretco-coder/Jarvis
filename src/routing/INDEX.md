@@ -28,6 +28,12 @@
    - Intégration dans routes
    - Checklist de qualité
 
+### 4. **[deterministic/RENDER_POLICY.md](./deterministic/RENDER_POLICY.md)** ← Render Policy v1
+   - Contrat execution -> restitution
+   - Modes de rendu (deterministe, passthrough, rephrase IA, synthesis)
+   - Matrice action -> policy
+   - Checklist de déploiement ultra détaillée
+
 ---
 
 ## 🏗️ Structure des fichiers
@@ -50,7 +56,8 @@ src/routing/
 │   ├── todoResponses.ts               ← Todo (STUBS — synthèse LLM)
 │   ├── mailResponses.ts               ← Mail (STUBS — synthèse LLM)
 │   ├── haResponses.ts                 ← HA E2 (Phase 3)
-│   └── DETERMINISTIC_PROMPTS.md       ← Doc réponses
+│   ├── DETERMINISTIC_PROMPTS.md       ← Doc réponses
+│   └── RENDER_POLICY.md               ← Doc render policy
 
 src/conversation/
 └── haAgentRouter.ts                   ← Compat shim + parseAgentMap (Phase 1A) ✅

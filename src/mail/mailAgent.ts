@@ -382,6 +382,38 @@ Exemples :
 `.trim();
 }
 
+function normalizeMailText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .trim();
+}
+
+function preclassifyMailAction(text: string): MailAction | { clarification: string } | null {
+  const t = normalizeMailText(text);
+
+  const senderMatch = t.match(/(?:cherche|recherche|trouve|retrouve)\s+(?:mes\s+)?(?:emails?|mails?)\s+de\s+([a-z0-9._%+-]+(?:\s+[a-z0-9._%+-]+){0,3})/i);
+  if (senderMatch?.[1]) {
+    const sender = senderMatch[1].trim();
+    if (sender.length > 0) {
+      return { action: 'search_emails', query: `from:${sender}`, max: 5 };
+    }
+  }
+
+  const sendIntent = /\b(envoie|envoyer|envoi|expedie|expedier|mail\s+a|email\s+a)\b/i.test(t);
+  if (sendIntent) {
+    const hasRecipient = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i.test(t) || /\b(a|à)\s+[\p{L}0-9._%+-]{2,}/iu.test(t);
+    if (!hasRecipient) {
+      return {
+        clarification: 'Pour envoyer un email, précise au moins le destinataire, puis le sujet et le message.',
+      };
+    }
+  }
+
+  return null;
+}
+
 async function planMailAction(
   text: string,
   openAiApiKey: string,
@@ -800,7 +832,15 @@ export async function callMailAgent(
   }
 
   const labels = accounts.map(a => a.label);
-  const action = await planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, labels);
+  const preclassified = preclassifyMailAction(text);
+  if (preclassified && 'clarification' in preclassified) {
+    log?.info({ reason: 'preclassified_clarification' }, 'mail_agent_clarification');
+    return preclassified.clarification;
+  }
+
+  const action = preclassified && !('clarification' in preclassified)
+    ? preclassified
+    : await planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, labels);
   log?.info({ action: action.action, accounts: labels.length }, 'mail_agent_planned');
 
   // list_inbox and search_emails aggregate across all accounts (unless a specific account is requested)

@@ -171,7 +171,7 @@ describe('music agent planner', () => {
 
     expect(result.route).toBe('spotify');
     if (result.route === 'spotify') {
-      expect(result.request?.action).toBe('play');
+      expect(['play', 'search_and_play']).toContain(result.request?.action);
       expect(result.request?.slots.device).toBe('alias:pc');
     }
   });

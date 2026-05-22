@@ -413,18 +413,25 @@ function periodFr(period: string): string {
 async function findList(token: string, listName?: string): Promise<MsTaskList | null> {
   const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
   const lists = data.value ?? [];
+  const resolveDefaultList = (): MsTaskList | null => (
+    lists.find((l) => l.wellknownListName === 'defaultList') ??
+    lists.find((l) => /^(tasks?|t[âa]ches?)$/i.test(l.displayName.trim())) ??
+    lists[0] ??
+    null
+  );
   if (!listName) {
     // Prefer the built-in default list (wellknownListName === 'defaultList'),
     // then fall back to display-name heuristic, then first list.
-    return (
-      lists.find((l) => l.wellknownListName === 'defaultList') ??
-      lists.find((l) => /^(tasks?|t[âa]ches?)$/i.test(l.displayName.trim())) ??
-      lists[0] ??
-      null
-    );
+    return resolveDefaultList();
   }
   const needle = normalizeForMatch(listName);
   if (!needle) return null;
+
+  // Canonical aliasing for the built-in default To Do list across FR/EN labels.
+  if (needle === 'taches' || needle === 'tache' || needle === 'tasks' || needle === 'task') {
+    return resolveDefaultList();
+  }
+
   return lists.find((l) => normalizeForMatch(l.displayName) === needle) ?? null;
 }
 
@@ -440,25 +447,6 @@ async function findTask(token: string, listId: string, title: string, includeCom
   const needle = normalizeForMatch(title);
   if (!needle) return null;
   return tasks.find((t) => normalizeForMatch(t.title) === needle) ?? null;
-}
-
-/** Search for a task across all watched lists when no list_name is given.
- * Returns the first match with its parent list, or null.
- */
-async function findTaskAcrossWatchedLists(
-  token: string,
-  title: string,
-  includeCompleted = false,
-): Promise<{ list: MsTaskList; task: MsTask } | null> {
-  const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
-  const watched = (allData.value ?? []).filter(isWatchedList);
-  const hits = await Promise.all(
-    watched.map(async (l) => {
-      const task = await findTask(token, l.id, title, includeCompleted);
-      return task ? { list: l, task } : null;
-    }),
-  );
-  return hits.find((r) => r !== null) ?? null;
 }
 
 async function findTaskMatchesAcrossWatchedLists(
@@ -814,8 +802,13 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         task = await findTask(token, list.id, action.title);
         if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
       } else {
-        const found = await findTaskAcrossWatchedLists(token, action.title);
-        if (!found) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTaskMatchesAcrossWatchedLists(token, action.title);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) {
+          const options = matches.slice(0, 3).map((match) => `${match.task.title} dans ${match.list.displayName}`);
+          return `J'ai trouvé plusieurs tâches possibles. Dis-moi laquelle terminer : ${joinFr(options)}.`;
+        }
+        const found = matches[0]!;
         list = found.list; task = found.task;
       }
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}`, token, { status: 'completed' });

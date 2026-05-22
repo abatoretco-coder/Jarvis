@@ -19,6 +19,7 @@
     "tokens:generate": "tsx scripts/generate-api-keys.ts",
     "preview:replies": "tsx scripts/preview-replies.ts",
     "eval:routing": "tsx scripts/evaluate-semantic-router.ts",
+    "verify:music-routing": "tsx scripts/verify-music-routing.ts",
     "archive:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/archive-prod-snapshot.ps1",
     "verify": "npm run lint && npm run build && npm run check:capabilities",
     "format": "prettier . --check",

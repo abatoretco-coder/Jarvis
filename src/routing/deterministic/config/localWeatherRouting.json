@@ -56,5 +56,16 @@
     "nantes",
     "bordeaux",
     "toulouse"
+  ],
+  "nonLocationWeatherTerms": [
+    "demain",
+    "aujourd'hui",
+    "auj",
+    "semaine",
+    "weekend",
+    "soir",
+    "matin",
+    "journee",
+    "heure"
   ]
 }

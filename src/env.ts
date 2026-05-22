@@ -192,15 +192,24 @@ const envSchema = z
   MICROSOFT_CLIENT_SECRET: optionalNonEmptyString,
   MICROSOFT_REFRESH_TOKEN: optionalNonEmptyString,
 
-  // ── Google — Gmail mail agent ────────────────────────────────────────────────
-  // Required for mail.* (gmail) sub-agent.
+  // ── Google — Gmail mail agent + Calendar agent ───────────────────────────────
+  // Required for mail.* (gmail) sub-agent and calendar.* sub-agent.
   // Create OAuth2 credentials at https://console.cloud.google.com → APIs & Services → Credentials.
-  // Scopes needed: https://mail.google.com/ (full access) or granular send/read scopes.
+  // Scopes needed: https://mail.google.com/ + https://www.googleapis.com/auth/calendar
   GOOGLE_CLIENT_ID:     optionalNonEmptyString,
   GOOGLE_CLIENT_SECRET: optionalNonEmptyString,
   GOOGLE_REFRESH_TOKEN: optionalNonEmptyString,
   // OAuth redirect URI used for the oneshot setup flow.
   OAUTH_REDIRECT_URI: optionalNonEmptyString,
+
+  // ── Google Calendar — dashboard agenda + calendar agent ──────────────────────
+  // Comma-separated list of Google Calendar IDs to include in the dashboard agenda
+  // section and calendar conversational queries.
+  // Examples: "primary", "primary,famille@group.calendar.google.com,anniversaires@group.calendar.google.com"
+  // Defaults to "primary" when not set.
+  // Required scopes: https://www.googleapis.com/auth/calendar.readonly (read) or
+  //                  https://www.googleapis.com/auth/calendar (read + write for create_event)
+  GOOGLE_CALENDAR_CALENDAR_IDS: optionalNonEmptyString,
 
   // ── Mail provider override ────────────────────────────────────────────────────
   // Mail is Gmail-only. Keep empty or set "gmail".

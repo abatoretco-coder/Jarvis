@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     apiKey,
     baseUrl: process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
     model: process.env.SEMANTIC_ROUTER_EMBEDDING_MODEL ?? 'text-embedding-3-small',
-    timeoutMs: Number(process.env.OPENAI_TIMEOUT_MS ?? '5000'),
+    timeoutMs: Number(process.env.SEMANTIC_ROUTER_TIMEOUT_MS ?? '5000'),
   };
   const options = {
     acceptScore: Number(process.env.SEMANTIC_ROUTER_ACCEPT_SCORE ?? '0.84'),

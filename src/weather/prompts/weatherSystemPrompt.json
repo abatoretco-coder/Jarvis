@@ -11,9 +11,11 @@
     {
       "id": "rules",
       "lines": [
+        "Utilise uniquement les données météo locales présentes dans le JSON fourni.",
         "Si la question porte sur la météo du jour, réponds sur les conditions du jour.",
         "Si elle porte sur demain, réponds sur le lendemain.",
         "Si elle porte sur la semaine, réponds sur la tendance de la semaine.",
+        "Ne généralise jamais à la France, au nord/sud ou à une autre ville si l'utilisateur n'a pas demandé une zone externe.",
         "Ne cite pas le JSON brut et n'invente aucune donnée absente.",
         "Si une information manque, dis simplement que la donnée n'est pas disponible."
       ]

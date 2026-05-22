@@ -491,7 +491,7 @@ export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
     targetAgentId: 'mail',
     directRequest: { domain: 'mail', action: 'search_emails' },
     plannerRequired: true,
-    examples: ['cherche mes mails de thomas', 'retrouve le mail du devis', 'recherche les emails sur le contrat'],
+    examples: ['cherche mes mails de thomas', 'cherche les emails de amazon', 'retrouve le mail du devis', 'recherche les emails sur le contrat'],
     metadata: { category: 'communication', latencyTarget: 120 },
   },
   {
@@ -501,7 +501,7 @@ export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
     highRisk: true,
     directRequest: { domain: 'mail', action: 'send_email' },
     plannerRequired: true,
-    examples: ['envoie un mail à marie', 'rédige et envoie ce message', 'envoie un email avec ce sujet'],
+    examples: ['envoie un mail à marie', 'envoie un email', 'rédige et envoie ce message', 'envoie un email avec ce sujet'],
     metadata: { category: 'communication', latencyTarget: 140 },
   },
   {

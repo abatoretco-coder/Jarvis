@@ -35,10 +35,10 @@ import {
   type VoiceThreadState,
 } from '../conversation/voiceUx';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
+import { callCalendarAgent, isCalendarAgentKey } from '../calendar/calendarAgent';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
-  LOCAL_WEATHER_ROUTING_CONFIG,
   ROUTING_CONFIG_HASH,
   ROUTING_CONFIG_VERSION,
   SEMANTIC_ROUTER_CONFIG_HASH,
@@ -48,7 +48,7 @@ import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
 import { analyzeMultiIntentLikelihood } from '../routing/multiIntentLikelihood';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
 import { warmupRouteEmbeddings } from '../routing/routeScoring';
-import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
+import { SEMANTIC_ROUTES, findRouteByKey, getRouteDeterministicResponse } from '../routing/semanticRouteCatalog';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
@@ -64,15 +64,9 @@ import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather
 
 const ingestSchema = z.object({
   threadId: z.string().min(1),
-  text: z.string().optional(),
+  text: z.string().min(1),
   contextNote: z.string().optional(),
   clientContext: z.record(z.unknown()).optional(),
-  domain: z.string().optional(),
-  action: z.string().optional(),
-  slots: z.record(z.unknown()).optional(),
-  context: z.record(z.unknown()).optional(),
-  understanding: z.record(z.unknown()).optional(),
-  response_contract: z.record(z.unknown()).optional(),
   correlation_id: z.string().optional(),
   user_id: z.string().optional(),
 });
@@ -81,6 +75,13 @@ const responseSchema = z.object({
   threadId: z.string().min(1),
   responseText: z.string().min(1),
   usedSummaryVersion: z.string().min(1).optional(),
+  replyMeta: z.object({
+    kind: z.string().min(1),
+    source: z.string().min(1),
+    routeKey: z.string().min(1).optional(),
+    semanticDecision: z.string().min(1).optional(),
+    fallbackReason: z.string().min(1).optional(),
+  }).optional(),
 });
 
 const historyQuerySchema = z.object({
@@ -181,6 +182,62 @@ const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
   SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key),
 );
 
+type SpotifyResponseShape = {
+  status: 'success' | 'need_clarification' | 'error';
+  tts?: string;
+  data?: Record<string, unknown>;
+  options?: Array<Record<string, unknown>>;
+  error_code?: string;
+};
+
+type SpotifyRoutingPath = 'router_direct' | 'music_planner';
+
+function inferSpotifyRoutingPath(musicPlanReason?: string): SpotifyRoutingPath {
+  if (typeof musicPlanReason === 'string' && musicPlanReason.startsWith('router_direct:')) {
+    return 'router_direct';
+  }
+  return 'music_planner';
+}
+
+function buildSpotifyIngestPayload(input: {
+  threadId: string;
+  responseText: string;
+  spotify: SpotifyResponseShape;
+  action: string;
+  routingPath: SpotifyRoutingPath;
+  correlationId?: string;
+  planner?: { source: 'openai_music_agent'; route: string; reason?: string };
+}) {
+  const replyMeta = {
+    kind: 'spotify',
+    source: 'spotify_executor',
+    routeKey: `spotify.${input.action}`,
+    ...(input.spotify.status === 'error' ? { fallbackReason: 'execution_error' } : {}),
+  };
+
+  return {
+    threadId: input.threadId,
+    responseText: input.responseText,
+    status: input.spotify.status,
+    ...(input.spotify.data ? { data: input.spotify.data } : {}),
+    ...(input.spotify.options ? { options: input.spotify.options } : {}),
+    ...(input.spotify.error_code ? { error_code: input.spotify.error_code } : {}),
+    ...(input.correlationId ? { correlation_id: input.correlationId } : {}),
+    ...(input.planner ? { planner: input.planner } : {}),
+    replyMeta,
+    music: {
+      routing: {
+        domain: 'spotify',
+        path: input.routingPath,
+        action: input.action,
+      },
+      execution: {
+        status: input.spotify.status,
+      },
+    },
+  };
+}
+
 function resolveExecutorsEntry(agentEntries: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry | null {
   // Preferred explicit mapping: key=executors or direct pseudo-agent id.
   const explicit = agentEntries.find((entry) => entry.key === 'executors' || entry.agentId === 'executors');
@@ -194,6 +251,7 @@ function resolveExecutorsEntry(agentEntries: AgentRouteEntry[], generalAgentId: 
     if (isSearchAgentKey(entry.key)) return false;
     if (isTodoAgentKey(entry.key)) return false;
     if (isMailAgentKey(entry.key)) return false;
+    if (isCalendarAgentKey(entry.key)) return false;
     if (entry.agentId === SPOTIFY_AGENT_ID) return false;
     return true;
   });
@@ -466,70 +524,6 @@ function normalizeRoutingText(text: string): string {
     .trim();
 }
 
-function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function extractExternalWeatherLocationToken(text: string): string | null {
-  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
-  const normalized = normalizeRoutingText(text);
-  if (!normalized) return null;
-
-  const prepPattern = cfg.externalLocationPrepositions.map(escapeRegex).join('|');
-  const articlePattern = cfg.locationArticles.map(escapeRegex).join('|');
-  const re = new RegExp(`(?:^|\\s)(?:${prepPattern})\\s+(?:(?:${articlePattern})\\s+)?([a-z][a-z0-9'-]*)`, 'u');
-  const match = normalized.match(re);
-  if (!match?.[1]) return null;
-
-  const token = match[1].trim();
-  if (!token) return null;
-  if (cfg.explicitLocalLocationTerms.includes(token)) return null;
-  if (cfg.weatherLexemes.includes(token)) return null;
-  return token;
-}
-
-function isLikelyLocalWeatherQuery(text: string): boolean {
-  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
-  const t = ` ${normalizeRoutingText(text)} `;
-  if (!t.trim()) return false;
-
-  const hasWeatherLexeme = cfg.weatherLexemes.some((lexeme) => t.includes(` ${lexeme} `));
-  if (!hasWeatherLexeme) return false;
-
-  const hasExplicitLocalMarker = cfg.explicitLocalMarkers.some((marker) => t.includes(` ${marker} `));
-  if (hasExplicitLocalMarker) return true;
-
-  const hasExternalLocationStructure = extractExternalWeatherLocationToken(text) !== null;
-  if (hasExternalLocationStructure) return false;
-
-  // Explicit external city/location queries should stay in external search/weather path.
-  const externalLocationsRegex = new RegExp(
-    `\\b(?:${cfg.explicitExternalLocations.map(escapeRegex).join('|')})\\b`,
-    'u',
-  );
-  const hasExplicitExternalLocation = externalLocationsRegex.test(t);
-  if (hasExplicitExternalLocation) return false;
-
-  return true;
-}
-
-function isLikelyExternalWeatherQuery(text: string): boolean {
-  const cfg = LOCAL_WEATHER_ROUTING_CONFIG;
-  const normalized = ` ${normalizeRoutingText(text)} `;
-  if (!normalized.trim()) return false;
-
-  const hasWeatherLexeme = cfg.weatherLexemes.some((lexeme) => normalized.includes(` ${lexeme} `));
-  if (!hasWeatherLexeme) return false;
-
-  if (extractExternalWeatherLocationToken(text) !== null) return true;
-
-  const externalLocationsRegex = new RegExp(
-    `\\b(?:${cfg.explicitExternalLocations.map(escapeRegex).join('|')})\\b`,
-    'u',
-  );
-  return externalLocationsRegex.test(normalized);
-}
-
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const runtimeCfg = INGEST_RUNTIME_TUNING_CONFIG;
 
@@ -665,6 +659,81 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     ttsCb.delete(engineId);
   }
 
+  // ─── TTS pre-warm cache (populated by ingest, consumed by /v1/tts) ────────
+  const TTS_WARM_TTL_MS = 30_000;
+  type TtsWarmEntry = { bytes: Buffer; contentType: string; at: number };
+  const ttsWarmCache = new Map<string, TtsWarmEntry>();
+  const ttsWarmInFlight = new Map<string, Promise<TtsWarmEntry | null>>();
+
+  /** Fire-and-forget: generates TTS audio for `text` using the primary engine
+   *  and stores it in `ttsWarmCache` so the Desktop's subsequent /v1/tts call
+   *  returns immediately without waiting for HA/OpenAI. */
+  function warmTtsInBackground(text: string): void {
+    const key = text.trim().slice(0, 512);
+    const existing = ttsWarmCache.get(key);
+    if (existing && Date.now() - existing.at < TTS_WARM_TTL_MS) return;
+    if (ttsWarmInFlight.has(key)) return;
+    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) return;
+
+    const work = (async (): Promise<TtsWarmEntry | null> => {
+      try {
+        const haBase = deps.env.HA_BASE_URL!.replace(/\/$/, '');
+        const engineId = deps.env.HA_TTS_ENTITY_ID?.trim() || 'tts.elevenlabs_text_to_speech';
+        if (isTtsCbOpen(engineId)) return null;
+
+        // Step 1: get TTS URL (HA caches by text, so this is cheap on repeat)
+        const urlRes = await Promise.race([
+          fetch(`${haBase}/api/tts_get_url`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ engine_id: engineId, message: text, cache: true }),
+          }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_url_timeout')), deps.env.HA_TIMEOUT_MS)),
+        ]);
+        if (!urlRes.ok) { recordTtsFailure(engineId); return null; }
+
+        const urlPayload = (await urlRes.json()) as { path?: string; url?: string };
+        const audioUrl = typeof urlPayload.path === 'string' ? `${haBase}${urlPayload.path}` : urlPayload.url;
+        if (!audioUrl) return null;
+
+        // Step 2: fetch audio bytes
+        const audioRes = await Promise.race([
+          fetch(audioUrl, { headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` } }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_audio_timeout')), deps.env.HA_TIMEOUT_MS)),
+        ]);
+        if (!audioRes.ok) { recordTtsFailure(engineId); return null; }
+
+        const contentType = audioRes.headers.get('content-type') ?? 'audio/mpeg';
+        const haFilters = buildFfmpegFilters({
+          speed: deps.env.TTS_SPEED,
+          pitchSemitones: deps.env.TTS_PITCH_SEMITONES,
+          clarity: deps.env.TTS_CLARITY,
+        });
+        const body = audioRes.body;
+        const bytes = haFilters.length > 0 && body
+          ? await pipeStreamThroughFfmpeg(body, haFilters)
+          : Buffer.from(await audioRes.arrayBuffer());
+
+        recordTtsSuccess(engineId);
+        const entry: TtsWarmEntry = { bytes, contentType, at: Date.now() };
+        ttsWarmCache.set(key, entry);
+        // Simple GC: prune stale entries when cache grows
+        if (ttsWarmCache.size > 40) {
+          const now = Date.now();
+          for (const [k, v] of ttsWarmCache) { if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k); }
+        }
+        app.log.info({ text_chars: text.length }, 'tts_warm_cached');
+        return entry;
+      } catch {
+        return null;
+      } finally {
+        ttsWarmInFlight.delete(key);
+      }
+    })();
+
+    ttsWarmInFlight.set(key, work);
+  }
+
   // ─── Per-endpoint perf samples (rolling window 200) ──────────────────────
   const PERF_MAX = runtimeCfg.perfMaxSamples;
   const perfSamples = new Map<string, number[]>();
@@ -698,12 +767,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const threadId = parsed.data.threadId.trim();
-    const text = toSingleParagraphPlainText(parsed.data.text ?? '');
+    let text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
-    const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
+    let assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
@@ -815,62 +884,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
     );
 
-    // Guardrail: explicit spotify contract always has priority.
-    if (parsed.data.domain === 'spotify' && parsed.data.action) {
-      const spotifyPayload = ingestSpotifyRequestSchema.safeParse({
-        ...parsed.data,
-        threadId: effectiveThreadId,
-      });
-
-      if (!spotifyPayload.success) {
-        return reply.code(400).send({ error: 'invalid_spotify_payload', issues: spotifyPayload.error.issues });
-      }
-
-      const spotifyResponse = await executeSpotifyCapability({
-        request: spotifyPayload.data,
-        spotifyWebApi: deps.spotifyWebApi,
-        env: deps.env,
-        log: app.log,
-      });
-
-      const persistedInput = text || `spotify:${spotifyPayload.data.action} ${JSON.stringify(spotifyPayload.data.slots ?? {})}`;
-      const spotifyVoiceText = voiceEnabled
-        ? formatVoiceResponse({
-            text: spotifyResponse.tts,
-            domain: 'spotify',
-            mode: voiceMode,
-            gracefulFallback: false,
-          })
-        : spotifyResponse.tts;
-      await conversationService.persistMessages(effectiveThreadId, persistedInput, spotifyVoiceText);
-
-      app.log.info(
-        {
-          threadId,
-          domain: 'spotify',
-          action: spotifyPayload.data.action,
-          status: spotifyResponse.status,
-          correlation_id: correlationId || undefined,
-          user_id: spotifyPayload.data.user_id,
-        },
-        'ingest_spotify_capability_done'
-      );
-
-      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
-
-      return reply.code(200).send({
-        threadId: effectiveThreadId,
-        responseText: spotifyVoiceText,
-        status: spotifyResponse.status,
-        ...(spotifyResponse.data ? { data: spotifyResponse.data } : {}),
-        ...(spotifyResponse.options ? { options: spotifyResponse.options } : {}),
-        ...(spotifyResponse.error_code ? { error_code: spotifyResponse.error_code } : {}),
-        ...(correlationId ? { correlation_id: correlationId } : {}),
-      });
-    }
-
     if (!text) {
-      return reply.code(400).send({ error: 'invalid_body', message: 'text is required when domain/action is not provided' });
+      return reply.code(400).send({ error: 'invalid_body', message: 'text is required' });
     }
 
     app.log.info(
@@ -881,6 +896,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         client_channel: clientChannel,
         voice_turn_id: voiceTurnId || undefined,
         correlation_id: correlationId || undefined,
+        routing_mode: 'router_only',
         routing_config_version: ROUTING_CONFIG_VERSION,
         routing_config_hash: ROUTING_CONFIG_HASH,
         semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
@@ -1717,7 +1733,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           requestId,
           router_status: 'rejected',
           router_error: String(routerResult.reason),
-          local_weather_candidate: isLikelyLocalWeatherQuery(text),
           multi_intent_likelihood: multiIntent.score,
           multi_intent_marker_count: multiIntent.markerCount,
           multi_intent_segment_count: multiIntent.segmentCount,
@@ -1738,50 +1753,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const agentEntryById = new Map(allAgentEntries.map((entry) => [entry.agentId, entry]));
       let validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
 
-      const localWeatherCandidateByLexeme = Boolean(weatherEntry) && isLikelyLocalWeatherQuery(text);
-      const externalWeatherCandidate = isLikelyExternalWeatherQuery(text);
-      const rawHasSearchWeatherTarget = routerResult.value.targets.some((target) => {
-        const entry = agentEntryById.get(target.agentId);
-        if (entry?.key === 'search.news') return true;
-        return target.agentId === 'search.news';
-      });
-      const semanticTop1IsExternalWeather = semanticActivatedRouteKey === 'search.news.external_weather';
-      const localWeatherCandidate = localWeatherCandidateByLexeme && !rawHasSearchWeatherTarget && !semanticTop1IsExternalWeather;
-      let localWeatherInjected = false;
-      let localWeatherSearchRemoved = false;
-      let externalWeatherInjected = false;
-      let externalWeatherLocalRemoved = false;
-      const multiIntent = analyzeMultiIntentLikelihood(text);
-      const multiIntentForWeatherLock = multiIntent.score;
-      if (externalWeatherCandidate && !rawHasSearchWeatherTarget && !semanticTop1IsExternalWeather) {
-        validTargets = [{ agentId: 'search.news', confidence: 1 }, ...validTargets];
-        externalWeatherInjected = true;
-      }
-      if (localWeatherCandidate) {
-        const hasWeatherTarget = validTargets.some((t) => t.agentId === 'weather');
-        if (!hasWeatherTarget) {
-          validTargets = [{ agentId: 'weather', confidence: 1 }, ...validTargets];
-          localWeatherInjected = true;
-        }
-
-        // For likely single-intent local weather requests, avoid routing to external web search.
-        if (multiIntentForWeatherLock <= deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD) {
-          const beforeCount = validTargets.length;
-          validTargets = validTargets.filter((t) => {
-            const entry = agentEntryById.get(t.agentId);
-            const isSearchByKey = Boolean(entry?.key && isSearchAgentKey(entry.key));
-            const isSearchByAgentId = t.agentId.startsWith('search.');
-            return !(isSearchByKey || isSearchByAgentId);
-          });
-          localWeatherSearchRemoved = validTargets.length < beforeCount;
-        }
-      }
-      if (externalWeatherCandidate && multiIntentForWeatherLock <= deps.env.SEMANTIC_ROUTER_MULTI_INTENT_THRESHOLD) {
-        const beforeCount = validTargets.length;
-        validTargets = validTargets.filter((t) => t.agentId !== 'weather');
-        externalWeatherLocalRemoved = validTargets.length < beforeCount;
-      }
-
       app.log.info(
         {
           threadId,
@@ -1790,19 +1761,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           router_reason: routerResult.value.reason,
           router_targets_raw: routerResult.value.targets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
           router_targets_final: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
-          local_weather_candidate: localWeatherCandidate,
-          local_weather_candidate_raw: localWeatherCandidateByLexeme,
-          local_weather_injected: localWeatherInjected,
-          local_weather_search_removed: localWeatherSearchRemoved,
-          external_weather_candidate: externalWeatherCandidate,
-          external_weather_injected: externalWeatherInjected,
-          external_weather_local_removed: externalWeatherLocalRemoved,
-          multi_intent_likelihood: multiIntentForWeatherLock,
-          multi_intent_marker_count: multiIntent.markerCount,
-          multi_intent_segment_count: multiIntent.segmentCount,
-          multi_intent_verb_count: multiIntent.verbCount,
-          semantic_top1_is_external_weather: semanticTop1IsExternalWeather,
-          router_raw_has_search_weather: rawHasSearchWeatherTarget,
           routing_config_version: ROUTING_CONFIG_VERSION,
           routing_config_hash: ROUTING_CONFIG_HASH,
           semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
@@ -1827,7 +1785,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       if (validTargets.length > 0) {
         type SpecializedResult =
-          | { kind: 'spotify_tts'; tts: string; musicPlanRoute: string; musicPlanReason?: string; spotifyPayload: object }
+          | {
+              kind: 'spotify_tts';
+              tts: string;
+              action: z.infer<typeof spotifyActionSchema>;
+              musicPlanRoute: string;
+              musicPlanReason?: string;
+              spotifyPayload: SpotifyResponseShape;
+            }
           | { kind: 'ha_text'; agentId: string; text: string };
 
         const tasks: Promise<SpecializedResult | null>[] = [];
@@ -1900,6 +1865,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 return {
                   kind: 'spotify_tts',
                   tts: spotifyResp.tts,
+                  action: spotifyPayload.data.action,
                   musicPlanRoute: musicPlan.route,
                   musicPlanReason: musicPlan.reason,
                   spotifyPayload: {
@@ -1924,16 +1890,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
-          const isSearchAgent = isSearchAgentKey(agentEntry?.key);
-          const isTodoAgent   = isTodoAgentKey(agentEntry?.key);
-          const isMailAgent   = isMailAgentKey(agentEntry?.key);
+          const isSearchAgent   = isSearchAgentKey(agentEntry?.key);
+          const isTodoAgent     = isTodoAgentKey(agentEntry?.key);
+          const isMailAgent     = isMailAgentKey(agentEntry?.key);
+          const isCalendarAgent = isCalendarAgentKey(agentEntry?.key);
           const isWeatherAgent = agentEntry?.key === 'weather';
+          const isExecutorsAgent = agentEntry?.key === 'executors' || haTarget.agentId === executorsEntry?.agentId;
 
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
-            const searchAgentKey = externalWeatherCandidate && agentEntry?.key === 'search.news'
-              ? 'search.news.external_weather'
-              : agentEntry!.key ?? 'search';
+            const searchAgentKey = agentEntry!.key ?? 'search';
             app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
             tasks.push(
               callSearchAgent(searchAgentKey, {
@@ -1997,6 +1963,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 })
                 .catch((err) => {
                   app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'mail_agent_direct_failed');
+                  return null;
+                }),
+            );
+          } else if (isCalendarAgent) {
+            // Calendar agent: LLM planner → Google Calendar API — bypass HA entirely.
+            app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct');
+            tasks.push(
+              callCalendarAgent(assistantInputText, {
+                GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
+                GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
+                GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+                GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+                OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
+                OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
+                OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
+              }, app.log)
+                .then((txt): SpecializedResult | null => {
+                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct_done');
+                  return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'calendar_agent_direct_failed');
                   return null;
                 }),
             );
@@ -2072,26 +2060,37 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
           if (spotifyRes && goodResults.length === 1) {
+            const semanticRoute = semanticActivatedRouteKey ? findRouteByKey(semanticActivatedRouteKey) : undefined;
+            // Actions aveugles (pas de données dynamiques) : on peut remplacer par une réponse déterministe.
+            // now_playing / list_devices retournent des données live → l'executor est source de vérité.
+            const BLIND_SPOTIFY_ACTIONS = new Set(['pause', 'play', 'next', 'previous', 'clear_queue']);
+            const deterministicTts =
+              semanticRoute?.deterministicResponses && BLIND_SPOTIFY_ACTIONS.has(spotifyRes.action)
+                ? getRouteDeterministicResponse(semanticRoute)
+                : undefined;
+            const resolvedTts = deterministicTts ?? spotifyRes.tts;
             const spotifyVoiceText = voiceEnabled
               ? formatVoiceResponse({
-                  text: spotifyRes.tts,
+                  text: resolvedTts,
                   domain: 'spotify',
                   mode: voiceMode,
                   gracefulFallback,
                 })
-              : spotifyRes.tts;
+              : resolvedTts;
             void conversationService.persistMessages(effectiveThreadId, text, spotifyVoiceText).then(async () => {
               if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
                 summarizationService.startPresummarize(effectiveThreadId);
               }
             });
-            const spotifyOnlyPayload = {
+            const spotifyOnlyPayload = buildSpotifyIngestPayload({
               threadId: effectiveThreadId,
               responseText: spotifyVoiceText,
-              ...spotifyRes.spotifyPayload,
-              ...(correlationId ? { correlation_id: correlationId } : {}),
+              spotify: spotifyRes.spotifyPayload,
+              action: spotifyRes.action,
+              routingPath: inferSpotifyRoutingPath(spotifyRes.musicPlanReason),
+              correlationId: correlationId || undefined,
               planner: { source: 'openai_music_agent', route: spotifyRes.musicPlanRoute, reason: spotifyRes.musicPlanReason },
-            };
+            });
             if (sseStream !== null) { pushSseResponse(spotifyOnlyPayload); return reply; }
             return reply.code(200).send(spotifyOnlyPayload);
           }
@@ -2180,10 +2179,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     });
 
+    // Pre-warm TTS: start audio generation in background so the Desktop's
+    // subsequent /v1/tts call hits the cache instead of waiting for HA/OpenAI.
+    if (voiceEnabled) {
+      warmTtsInBackground(toSingleParagraphPlainText(assistantTextVoice));
+    }
+
     const payload = {
       threadId: effectiveThreadId,
       responseText: toSingleParagraphPlainText(assistantTextVoice),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
+      replyMeta: {
+        kind: responseDomain,
+        source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
+        ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
+        semanticDecision: semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated'),
+        ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
+      },
     };
 
     const validated = responseSchema.safeParse(payload);
@@ -2427,6 +2439,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const text = toSingleParagraphPlainText(parsed.data.text);
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
+
+    // ── Warm cache check ──────────────────────────────────────────────────────
+    // ingest pre-warms TTS while building the response. If the Desktop calls
+    // /v1/tts shortly after, we serve the pre-generated audio immediately.
+    const ttsKey = text.trim().slice(0, 512);
+    const warmHit = ttsWarmCache.get(ttsKey);
+    if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
+      recordPerf('tts', Date.now() - t0);
+      app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_cache', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+      return reply.code(200).header('content-type', warmHit.contentType).header('x-tts-provider', 'warm_cache').send(warmHit.bytes);
+    }
+    // If pre-warm is still in-flight, join it instead of racing a duplicate request
+    const warmPending = ttsWarmInFlight.get(ttsKey);
+    if (warmPending) {
+      const prewarmed = await warmPending;
+      if (prewarmed) {
+        recordPerf('tts', Date.now() - t0);
+        app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_inflight', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+        return reply.code(200).header('content-type', prewarmed.contentType).header('x-tts-provider', 'warm_inflight').send(prewarmed.bytes);
+      }
+    }
+
     const configuredEntity = deps.env.HA_TTS_ENTITY_ID?.trim();
     const primaryEngineId = configuredEntity && configuredEntity.length > 0
       ? configuredEntity
@@ -2640,6 +2674,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     recordPerf('tts', Date.now() - t0);
     app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+    // Store in warm cache so any duplicate call within 30s is instant
+    ttsWarmCache.set(ttsKey, { bytes: winner.bytes, contentType: winner.contentType, at: Date.now() });
     return reply
       .code(200)
       .header('content-type', winner.contentType)
