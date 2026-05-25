@@ -566,7 +566,7 @@ async function _executeSpotifyCapability(input: {
     if (!flatItems.length) {
       return {
         status: 'need_clarification',
-        tts: `Aucun résultat Spotify pour "${query}". Ce n’est pas faute d’avoir essayé.`,
+        tts: `Aucun résultat Spotify pour "${query}".`,
         error_code: 'spotify_search_no_results',
         data: {
           query,
@@ -587,7 +587,7 @@ async function _executeSpotifyCapability(input: {
     return {
       status: 'success',
       tts: firstUrl
-        ? `${flatItems.length} résultat(s) — premier : ${firstName}.`
+        ? `${flatItems.length} résultat(s). Premier: ${firstName}.`
         : `${flatItems.length} résultat(s) pour "${query}".`,
       data: {
         query,

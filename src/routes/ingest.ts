@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import type { Env } from '../env';
 
 import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
@@ -48,7 +49,7 @@ import { evaluateHighRiskE1Activation } from '../routing/highRiskE1Activation';
 import { analyzeMultiIntentLikelihood } from '../routing/multiIntentLikelihood';
 import { dispatchAcceptedSearchE2Route } from '../routing/routeDispatcher';
 import { warmupRouteEmbeddings } from '../routing/routeScoring';
-import { SEMANTIC_ROUTES, findRouteByKey, getRouteDeterministicResponse } from '../routing/semanticRouteCatalog';
+import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
 import { trySemanticRouter } from '../routing/semanticRouter';
 import type { EmbeddingClientConfig, SemanticRouterInput } from '../routing/semanticRouter.types';
 import { getSearchAgentConfig, isSearchAgentKey } from '../search/agents';
@@ -57,7 +58,11 @@ import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/cont
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
-import { synthesizeDeterministicWeatherReply } from '../weather/deterministicWeatherReply';
+import {
+  isClearlyExternalWeather,
+  isClearlyLocalWeather,
+  synthesizeDeterministicWeatherReply,
+} from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
 import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
@@ -95,6 +100,7 @@ const sttParamsSchema = z.object({
 const ttsRequestSchema = z.object({
   text: z.string().min(1),
   language: z.string().min(1).optional(),
+  provider: z.enum(['auto', 'ha', 'openai']).optional(),
 });
 
 type EntityStateLike = {
@@ -103,6 +109,17 @@ type EntityStateLike = {
 };
 
 type AudioTransformOpts = { speed: number; pitchSemitones: number; clarity: boolean };
+type TtsRouteMode = 'auto' | 'ha' | 'openai';
+type OpenAiTtsRuntimeConfig = {
+  apiKey: string;
+  baseUrl: string;
+  timeoutMs: number;
+  model: string;
+  voice: string;
+  format: 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
+  instructions?: string;
+  speed: number;
+};
 
 // Build ffmpeg audio filter chain (speed is optional — OpenAI handles it natively)
 function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string[] {
@@ -170,12 +187,54 @@ function uniqueNonEmpty(values: string[]): string[] {
   return out;
 }
 
+function resolveOpenAiTtsRuntimeConfig(env: Env): OpenAiTtsRuntimeConfig | null {
+  const apiKey = env.OPENAI_TTS_API_KEY?.trim() || env.OPENAI_API_KEY?.trim();
+  const baseUrl = env.OPENAI_TTS_BASE_URL?.trim() || env.OPENAI_BASE_URL;
+  if (!apiKey || !baseUrl) return null;
+  return {
+    apiKey,
+    baseUrl,
+    timeoutMs: env.OPENAI_TTS_TIMEOUT_MS,
+    model: env.OPENAI_TTS_MODEL.trim(),
+    voice: env.OPENAI_TTS_VOICE.trim(),
+    format: env.OPENAI_TTS_FORMAT,
+    instructions: env.OPENAI_TTS_INSTRUCTIONS?.trim(),
+    speed: env.TTS_SPEED,
+  };
+}
+
+function hasHaTtsConfig(env: Env): boolean {
+  return Boolean(env.HA_BASE_URL && env.HA_TOKEN);
+}
+
+function resolveRequestedTtsMode(defaultMode: TtsRouteMode, requested?: TtsRouteMode): TtsRouteMode {
+  if (defaultMode !== 'auto' || !requested || requested === 'auto') return defaultMode;
+  return requested;
+}
+
+function isLikelyLocalWeatherQuery(text: string): boolean {
+  return isClearlyLocalWeather(text) && !isClearlyExternalWeather(text);
+}
+
 function normalizeClientChannel(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase().replace(/\s+/g, '-');
   if (!normalized) return undefined;
   if (!/^[a-z0-9._-]{2,64}$/.test(normalized)) return undefined;
   return normalized;
+}
+
+function isLikelyTruncatedVoiceUtterance(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (t.length <= 8) return true;
+  if (t.endsWith('...') || t.endsWith('..')) return true;
+  return /^[A-Za-zÀ-ÿ]{1,8}[.]$/.test(t);
+}
+
+function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string {
+  if (!clientChannel?.includes('voice-hub')) return text;
+  return `${text}\n\nInstruction: Réponds strictement en français.`;
 }
 
 const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
@@ -400,15 +459,35 @@ async function callSearchAgent(
 
   const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
   const raw = data.choices?.[0]?.message?.content?.trim();
-  // Strip Perplexity citation markers [1], [2][3], bold markers **, and leftover markdown
-  const content = raw
-    ?.replace(/\[\d+\]/g, '')       // [1] [2] [3]
-    ?.replace(/\*\*(.+?)\*\*/g, '$1') // **bold** → bold
-    ?.replace(/\*(.+?)\*/g, '$1')    // *italic* → italic
-    ?.replace(/\s{2,}/g, ' ')        // multiple spaces
-    ?.trim();
+  const content = raw ? sanitizeSearchAgentContent(raw) : '';
   params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey, content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
   return content || "Je n'ai pas obtenu cette information.";
+}
+
+function sanitizeSearchAgentContent(raw: string): string {
+  const withoutMarkdown = raw
+    .replace(/\[\d+\]/g, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1');
+
+  const filteredLines = withoutMarkdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => {
+      if (/^(sources?|references?|références?)\s*[:\-]/iu.test(line)) return false;
+      if (/^(?:[-*]\s*)?https?:\/\/\S+$/iu.test(line)) return false;
+      return true;
+    });
+
+  const compact = filteredLines.join(' ')
+    .replace(/(?:^|\s)\((?:source|sources|reference|references|référence|références)\s*:[^)]+\)/giu, ' ')
+    .replace(/\b(?:sources?|references?|références?)\s*:\s*(?:https?:\/\/\S+\s*)+/giu, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return toSingleParagraphPlainText(compact);
 }
 
 
@@ -611,6 +690,55 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
   }
 
+  // Warm up dedicated OpenAI-compatible TTS backend (for example Kokoro)
+  // to reduce first-request latency after a fresh container restart.
+  if (process.env.NODE_ENV !== 'test') {
+    const startupTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
+    const hasDedicatedTtsBackend =
+      Boolean(startupTtsCfg)
+      && typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
+      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
+
+    if (startupTtsCfg && hasDedicatedTtsBackend) {
+      setTimeout(() => {
+        const t0 = Date.now();
+        const ctrl = new AbortController();
+        const timeoutId = setTimeout(() => ctrl.abort(), startupTtsCfg.timeoutMs);
+        void fetch(`${startupTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${startupTtsCfg.apiKey}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: startupTtsCfg.model,
+            voice: startupTtsCfg.voice,
+            input: 'warmup',
+            response_format: startupTtsCfg.format,
+            speed: startupTtsCfg.speed,
+            ...(startupTtsCfg.instructions ? { instructions: startupTtsCfg.instructions } : {}),
+          }),
+          signal: ctrl.signal,
+        })
+          .then(async (res) => {
+            if (!res.ok) {
+              const body = await res.text();
+              app.log.warn({ status: res.status, body: body.slice(0, 200) }, 'tts_openai_startup_warmup_failed');
+              return;
+            }
+            await res.arrayBuffer();
+            app.log.info({ elapsed_ms: Date.now() - t0 }, 'tts_openai_startup_warmup_done');
+          })
+          .catch((err) => {
+            app.log.warn({ err }, 'tts_openai_startup_warmup_failed');
+          })
+          .finally(() => {
+            clearTimeout(timeoutId);
+          });
+      }, 1_000);
+    }
+  }
+
   let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
   let ttsProviderRefreshPromise: Promise<void> | null = null;
   const TTS_PROVIDER_CACHE_TTL_MS = runtimeCfg.ttsProviderCacheTtlMs;
@@ -673,10 +801,55 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const existing = ttsWarmCache.get(key);
     if (existing && Date.now() - existing.at < TTS_WARM_TTL_MS) return;
     if (ttsWarmInFlight.has(key)) return;
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) return;
+
+    const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
+    const useDedicatedOpenAiTts =
+      Boolean(openAiTtsCfg)
+      && typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
+      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
+
+    if (!useDedicatedOpenAiTts && (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN)) return;
 
     const work = (async (): Promise<TtsWarmEntry | null> => {
       try {
+        if (useDedicatedOpenAiTts && openAiTtsCfg) {
+          const response = await Promise.race([
+            fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${openAiTtsCfg.apiKey}`,
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: openAiTtsCfg.model,
+                voice: openAiTtsCfg.voice,
+                input: text,
+                response_format: openAiTtsCfg.format,
+                speed: openAiTtsCfg.speed,
+                ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
+              }),
+            }),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_openai_timeout')), openAiTtsCfg.timeoutMs)),
+          ]);
+          if (!response.ok) return null;
+
+          const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
+          const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: false }, true);
+          const openAiBody = response.body;
+          const bytes = openAiFilters.length > 0 && openAiBody
+            ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
+            : Buffer.from(await response.arrayBuffer());
+
+          const entry: TtsWarmEntry = { bytes, contentType, at: Date.now() };
+          ttsWarmCache.set(key, entry);
+          if (ttsWarmCache.size > 40) {
+            const now = Date.now();
+            for (const [k, v] of ttsWarmCache) { if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k); }
+          }
+          app.log.info({ text_chars: text.length }, 'tts_warm_cached');
+          return entry;
+        }
+
         const haBase = deps.env.HA_BASE_URL!.replace(/\/$/, '');
         const engineId = deps.env.HA_TTS_ENTITY_ID?.trim() || 'tts.elevenlabs_text_to_speech';
         if (isTtsCbOpen(engineId)) return null;
@@ -772,6 +945,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
+    const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
     let assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
@@ -799,6 +973,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+
+    // Guard against truncated voice captures (e.g. "Démar...") that can trigger
+    // wrong routing/action. Ask for a clean reformulation instead.
+    if (isVoiceHubChannel && isLikelyTruncatedVoiceUtterance(text)) {
+      const clarification = 'Je n\'ai pas bien entendu la commande. Peux-tu reformuler en une phrase complète ?';
+      await conversationService.persistMessages(effectiveThreadId, text, clarification);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      app.log.info(
+        { threadId: effectiveThreadId, requestId, text_len: text.length, client_channel: clientChannel },
+        'ingest_voice_hub_truncated_guard',
+      );
+      return reply.code(200).send({ threadId: effectiveThreadId, responseText: clarification });
+    }
 
     if (voiceEnabled && isLastMailSummaryRequest(text)) {
       const mailState = voiceThreadState.get(effectiveThreadId);
@@ -1733,6 +1920,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           requestId,
           router_status: 'rejected',
           router_error: String(routerResult.reason),
+          local_weather_candidate: isLikelyLocalWeatherQuery(text),
           multi_intent_likelihood: multiIntent.score,
           multi_intent_marker_count: multiIntent.markerCount,
           multi_intent_segment_count: multiIntent.segmentCount,
@@ -1752,6 +1940,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (routerResult.status === 'fulfilled') {
       const agentEntryById = new Map(allAgentEntries.map((entry) => [entry.agentId, entry]));
       let validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
+      const externalWeatherCandidate = isClearlyExternalWeather(assistantInputText) && !isLikelyLocalWeatherQuery(assistantInputText);
 
       app.log.info(
         {
@@ -1899,7 +2088,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
-            const searchAgentKey = agentEntry!.key ?? 'search';
+            const searchAgentKey = externalWeatherCandidate && agentEntry?.key === 'search.news'
+              ? 'search.news.external_weather'
+              : agentEntry!.key ?? 'search';
             app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
             tasks.push(
               callSearchAgent(searchAgentKey, {
@@ -2033,7 +2224,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           } else {
             tasks.push(
               conversationService
-                .callHomeAssistantConversation(assistantInputText, effectiveThreadId, undefined, haTarget.agentId)
+                .callHomeAssistantConversation(
+                  applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+                  effectiveThreadId,
+                  undefined,
+                  haTarget.agentId,
+                )
                 .then((txt): SpecializedResult | null => {
                   if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
                     app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
@@ -2060,23 +2256,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
           if (spotifyRes && goodResults.length === 1) {
-            const semanticRoute = semanticActivatedRouteKey ? findRouteByKey(semanticActivatedRouteKey) : undefined;
-            // Actions aveugles (pas de données dynamiques) : on peut remplacer par une réponse déterministe.
-            // now_playing / list_devices retournent des données live → l'executor est source de vérité.
-            const BLIND_SPOTIFY_ACTIONS = new Set(['pause', 'play', 'next', 'previous', 'clear_queue']);
-            const deterministicTts =
-              semanticRoute?.deterministicResponses && BLIND_SPOTIFY_ACTIONS.has(spotifyRes.action)
-                ? getRouteDeterministicResponse(semanticRoute)
-                : undefined;
-            const resolvedTts = deterministicTts ?? spotifyRes.tts;
             const spotifyVoiceText = voiceEnabled
               ? formatVoiceResponse({
-                  text: resolvedTts,
+                  text: spotifyRes.tts,
                   domain: 'spotify',
                   mode: voiceMode,
                   gracefulFallback,
                 })
-              : resolvedTts;
+              : spotifyRes.tts;
             void conversationService.persistMessages(effectiveThreadId, text, spotifyVoiceText).then(async () => {
               if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
                 summarizationService.startPresummarize(effectiveThreadId);
@@ -2136,7 +2323,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (assistantText === undefined) {
       try {
         app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
-        const haText = await conversationService.callHomeAssistantConversation(assistantInputText, effectiveThreadId, undefined, generalAgentId);
+        const haText = await conversationService.callHomeAssistantConversation(
+          applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+          effectiveThreadId,
+          undefined,
+          generalAgentId,
+        );
         if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
           app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
           assistantText = toDeterministicHaFailureMessage();
@@ -2426,14 +2618,32 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
   });
 
-  app.post('/v1/tts', async (req, reply) => {
+  const registerTtsRoute = (path: string, defaultMode: TtsRouteMode): void => {
+    app.post(path, async (req, reply) => {
     const parsed = ttsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
     }
 
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) {
+    const mode = resolveRequestedTtsMode(defaultMode, parsed.data.provider);
+    const haEnabled = mode !== 'openai' && hasHaTtsConfig(deps.env);
+    const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
+    const preferOpenAiInAuto =
+      mode === 'auto' &&
+      Boolean(openAiTtsCfg) &&
+      typeof deps.env.OPENAI_TTS_BASE_URL === 'string' &&
+      deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
+
+    if (!haEnabled && !openAiTtsCfg) {
+      return reply.code(503).send({ error: 'tts_not_configured', provider: mode });
+    }
+
+    if (mode === 'ha' && !haEnabled) {
       return reply.code(503).send({ error: 'ha_not_configured' });
+    }
+
+    if (mode === 'openai' && !openAiTtsCfg) {
+      return reply.code(503).send({ error: 'openai_tts_not_configured' });
     }
 
     const text = toSingleParagraphPlainText(parsed.data.text);
@@ -2444,20 +2654,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // ingest pre-warms TTS while building the response. If the Desktop calls
     // /v1/tts shortly after, we serve the pre-generated audio immediately.
     const ttsKey = text.trim().slice(0, 512);
-    const warmHit = ttsWarmCache.get(ttsKey);
-    if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
-      recordPerf('tts', Date.now() - t0);
-      app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_cache', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-      return reply.code(200).header('content-type', warmHit.contentType).header('x-tts-provider', 'warm_cache').send(warmHit.bytes);
-    }
-    // If pre-warm is still in-flight, join it instead of racing a duplicate request
-    const warmPending = ttsWarmInFlight.get(ttsKey);
-    if (warmPending) {
-      const prewarmed = await warmPending;
-      if (prewarmed) {
+    if (mode === 'auto') {
+      const warmHit = ttsWarmCache.get(ttsKey);
+      if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
         recordPerf('tts', Date.now() - t0);
-        app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_inflight', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-        return reply.code(200).header('content-type', prewarmed.contentType).header('x-tts-provider', 'warm_inflight').send(prewarmed.bytes);
+        app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_cache', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+        return reply.code(200).header('content-type', warmHit.contentType).header('x-tts-provider', 'warm_cache').send(warmHit.bytes);
+      }
+      // If pre-warm is still in-flight, join it instead of racing a duplicate request
+      const warmPending = ttsWarmInFlight.get(ttsKey);
+      if (warmPending) {
+        const prewarmed = await warmPending;
+        if (prewarmed) {
+          recordPerf('tts', Date.now() - t0);
+          app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_inflight', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+          return reply.code(200).header('content-type', prewarmed.contentType).header('x-tts-provider', 'warm_inflight').send(prewarmed.bytes);
+        }
       }
     }
 
@@ -2470,19 +2682,35 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       .map((value) => value.trim())
       .filter((value) => value.length > 0);
     let candidateEngineIds = uniqueNonEmpty([primaryEngineId, ...fallbackFromEnv]);
-    const haBaseUrl = deps.env.HA_BASE_URL.replace(/\/$/, '');
+    const haBaseUrl = deps.env.HA_BASE_URL?.replace(/\/$/, '') ?? '';
 
-    if (deps.ha) {
+    if (haEnabled && deps.ha) {
       const nowMs = Date.now();
       const hasFreshProviderCache = Boolean(ttsProviderCache) && nowMs - ttsProviderCache!.at <= TTS_PROVIDER_CACHE_TTL_MS;
 
       if (hasFreshProviderCache) {
+        const discoveredProviders = Array.from(ttsProviderCache!.providers.values());
         const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
         if (availableCandidates.length > 0) {
-          candidateEngineIds = availableCandidates;
+          // Keep configured priority, then try other discovered HA TTS providers.
+          candidateEngineIds = uniqueNonEmpty([...availableCandidates, ...discoveredProviders]);
+        } else if (discoveredProviders.length > 0) {
+          // Configured provider seems invalid/unavailable: try discovered providers instead.
+          candidateEngineIds = discoveredProviders;
         }
       } else {
-        void refreshTtsProviderCache();
+        if (mode === 'ha') {
+          await refreshTtsProviderCache();
+          if (ttsProviderCache?.providers?.size) {
+            const discoveredProviders = Array.from(ttsProviderCache.providers.values());
+            const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
+            candidateEngineIds = availableCandidates.length > 0
+              ? uniqueNonEmpty([...availableCandidates, ...discoveredProviders])
+              : discoveredProviders;
+          }
+        } else {
+          void refreshTtsProviderCache();
+        }
       }
     }
 
@@ -2504,6 +2732,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // ── HA TTS coroutine ──────────────────────────────────────────────────────
     const doHaTts = async (): Promise<TtsWin> => {
+      if (!haEnabled) throw new Error('ha_not_configured');
       for (let index = 0; index < candidateEngineIds.length; index += 1) {
         if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
         const engineId = candidateEngineIds[index]!;
@@ -2614,22 +2843,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // ── OpenAI TTS coroutine ──────────────────────────────────────────────────
     const doOpenAiTts = async (): Promise<TtsWin> => {
-      const openAiApiKey = deps.env.OPENAI_API_KEY?.trim();
-      if (!openAiApiKey) throw new Error('openai_api_key_missing');
-      const model = deps.env.OPENAI_TTS_MODEL.trim();
-      const voice = deps.env.OPENAI_TTS_VOICE.trim();
-      const format = deps.env.OPENAI_TTS_FORMAT;
+      if (!openAiTtsCfg) throw new Error('openai_tts_not_configured');
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), deps.env.OPENAI_TTS_TIMEOUT_MS);
+      const timeoutId = setTimeout(() => controller.abort(), openAiTtsCfg.timeoutMs);
       const onExternal = () => controller.abort();
       openAiAbort.signal.addEventListener('abort', onExternal, { once: true });
-      const response = await fetch(`${deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/speech`, {
+      const response = await fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${openAiApiKey}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${openAiTtsCfg.apiKey}`, 'content-type': 'application/json' },
         // Speed is passed natively to OpenAI API (0.25–4.0); voice character via instructions if set
         body: JSON.stringify({
-          model, voice, input: text, response_format: format, speed: deps.env.TTS_SPEED,
-          ...(deps.env.OPENAI_TTS_INSTRUCTIONS ? { instructions: deps.env.OPENAI_TTS_INSTRUCTIONS } : {}),
+          model: openAiTtsCfg.model,
+          voice: openAiTtsCfg.voice,
+          input: text,
+          response_format: openAiTtsCfg.format,
+          speed: openAiTtsCfg.speed,
+          ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
         }),
         signal: controller.signal,
       }).finally(() => {
@@ -2648,7 +2877,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const bytes = openAiFilters.length > 0 && openAiBody
         ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
         : Buffer.from(await response.arrayBuffer());
-      return { bytes, contentType, engineId: `openai:${model}`, via: `openai:${model}` };
+      return { bytes, contentType, engineId: `openai:${openAiTtsCfg.model}`, via: `openai:${openAiTtsCfg.model}` };
     };
 
     // ── Race: ElevenLabs vs OpenAI — first success wins, loser aborted ────────
@@ -2656,9 +2885,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // ElevenLabs quota/500 retries → OpenAI wins after ~1s, ElevenLabs sleep interrupted via haAbort.
     let winner: TtsWin;
     try {
-      const haPromise = doHaTts().then((v) => { openAiAbort.abort('race_winner_ha'); return v; });
-      const activePromises: Promise<TtsWin>[] = [haPromise];
-      if (deps.env.OPENAI_API_KEY?.trim()) {
+      const activePromises: Promise<TtsWin>[] = [];
+      if (mode !== 'openai' && !preferOpenAiInAuto) {
+        const haPromise = doHaTts().then((v) => { openAiAbort.abort('race_winner_ha'); return v; });
+        activePromises.push(haPromise);
+      }
+      if (mode !== 'ha' && openAiTtsCfg) {
         const openAiPromise = doOpenAiTts().then((v) => { haAbort.abort('race_winner_openai'); return v; });
         activePromises.push(openAiPromise);
       }
@@ -2668,6 +2900,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         for (const p of activePromises) p.then(resolve, onFail);
       });
     } catch {
+      if (mode === 'ha' && openAiTtsCfg) {
+        try {
+          winner = await doOpenAiTts();
+          app.log.warn(
+            { attempts, via: winner.via, voice_turn_id: voiceTurnId || undefined },
+            'tts_ha_fallback_openai'
+          );
+          recordPerf('tts', Date.now() - t0);
+          app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
+          return reply
+            .code(200)
+            .header('content-type', winner.contentType)
+            .header('x-tts-provider', `${winner.via}:ha_fallback`)
+            .send(winner.bytes);
+        } catch {
+          // keep existing failure response below
+        }
+      }
       app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
       return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
     }
@@ -2675,13 +2925,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     recordPerf('tts', Date.now() - t0);
     app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
     // Store in warm cache so any duplicate call within 30s is instant
-    ttsWarmCache.set(ttsKey, { bytes: winner.bytes, contentType: winner.contentType, at: Date.now() });
+    if (mode === 'auto') {
+      ttsWarmCache.set(ttsKey, { bytes: winner.bytes, contentType: winner.contentType, at: Date.now() });
+    }
     return reply
       .code(200)
       .header('content-type', winner.contentType)
       .header('x-tts-provider', winner.via)
       .send(winner.bytes);
-  });
+    });
+  };
+
+  registerTtsRoute('/v1/tts', 'auto');
+  registerTtsRoute('/v1/tts/ha', 'ha');
+  registerTtsRoute('/v1/tts/openai', 'openai');
 
   app.get('/v1/threads', async (req, reply) => {
     const listQuerySchema = z.object({
