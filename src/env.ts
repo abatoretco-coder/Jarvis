@@ -54,6 +54,8 @@ const envSchema = z
 
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  OPENAI_TTS_API_KEY: optionalNonEmptyString,
+  OPENAI_TTS_BASE_URL: optionalUrl,
 
   // Perplexity — used for real-time search (sonar/sonar-pro per agent config). Takes priority over gpt-4o-search-preview.
   // Model is selected per search agent in src/search/agents.ts — no global override needed.
@@ -75,7 +77,7 @@ const envSchema = z
   // Set to 'true' only if local faster_whisper is GPU-accelerated and faster than OpenAI cloud.
   STT_LOCAL_FIRST: z.boolean({ coerce: true }).default(false),
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
-  OPENAI_TTS_VOICE: z.string().default('alloy'),
+  OPENAI_TTS_VOICE: z.string().default('onyx'),
   OPENAI_TTS_FORMAT: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).default('mp3'),
   // Optional: pass speaking style instructions to gpt-4o-mini-tts (e.g. deep voice, pacing)
   OPENAI_TTS_INSTRUCTIONS: optionalNonEmptyString,
