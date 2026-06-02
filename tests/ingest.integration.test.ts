@@ -602,6 +602,74 @@ describe('/v1/ingest integration', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('tts openai route uses dedicated TTS base URL without HA', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      expect(url).toBe('http://127.0.0.1:8880/v1/audio/speech');
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { 'content-type': 'audio/mpeg' },
+      });
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_BASE_URL: undefined,
+      HA_TOKEN: undefined,
+      OPENAI_API_KEY: undefined,
+      OPENAI_TTS_API_KEY: 'test-tts-key',
+      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
+      OPENAI_TTS_MODEL: 'kokoro',
+      OPENAI_TTS_VOICE: 'fr_siwis',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tts/openai',
+      payload: { text: 'Bonjour tout le monde' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-tts-provider']).toBe('openai:kokoro');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tts auto route falls back to dedicated OpenAI-compatible TTS when HA is absent', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      expect(url).toBe('http://127.0.0.1:8880/v1/audio/speech');
+      return new Response(new Uint8Array([9, 8, 7]), {
+        status: 200,
+        headers: { 'content-type': 'audio/mpeg' },
+      });
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_BASE_URL: undefined,
+      HA_TOKEN: undefined,
+      OPENAI_API_KEY: undefined,
+      OPENAI_TTS_API_KEY: 'test-tts-key',
+      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
+      OPENAI_TTS_MODEL: 'kokoro',
+      OPENAI_TTS_VOICE: 'fr_siwis',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/tts',
+      payload: { text: 'Bonjour depuis le mode auto' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-tts-provider']).toBe('openai:kokoro');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('semantic activation: definition E2 live bypasses LLM router', async () => {
     const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules.';
     mockedTrySemanticRouter.mockResolvedValue({

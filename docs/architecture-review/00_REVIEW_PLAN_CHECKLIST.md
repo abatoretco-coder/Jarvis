@@ -6,8 +6,8 @@ Objectif: relire ensemble l architecture complete de Jarvis, du signal entrant j
 - [x] Etape 1 - Sources d entree (texte, voix) et ingestion
 - [x] Etape 2 - Normalisation des entrees avant routing
 - [x] Etape 3 - Fonctionnement du routing (semantic + orchestrateur + fallback)
-- [ ] Etape 4 - Orchestration par action: service appele + execution + construction de reponse
-- [ ] Etape 5 - Reexpedition de la reponse vers la source
+- [x] Etape 4 - Orchestration par action: service appele + execution + construction de reponse
+- [x] Etape 5 - Reexpedition de la reponse vers la source
 - [ ] Etape 6 - Adaptation finale selon source texte ou vocale
 
 ## Documents de travail (nouveaux)

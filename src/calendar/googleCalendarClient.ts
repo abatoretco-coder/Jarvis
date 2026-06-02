@@ -55,7 +55,8 @@ interface CachedToken {
 const _tokenCache = new Map<string, CachedToken>();
 const _keepaliveScheduled = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;           // refresh 60 s before expiry
-const KEEPALIVE_INTERVAL_MS  = 30 * 24 * 3_600_000; // 30 days
+const KEEPALIVE_DAYS = 30;
+const KEEPALIVE_TICK_MS = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
 
 const GOOGLE_CAL_BASE = 'https://www.googleapis.com/calendar/v3';
 
@@ -95,10 +96,15 @@ export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<strin
 
   if (!_keepaliveScheduled.has(cacheKey)) {
     _keepaliveScheduled.add(cacheKey);
+    let dayCount = 0;
     const timer = setInterval(() => {
-      _tokenCache.delete(cacheKey);
-      refreshCalendarToken(env).catch(() => {});
-    }, KEEPALIVE_INTERVAL_MS);
+      dayCount += 1;
+      if (dayCount >= KEEPALIVE_DAYS) {
+        dayCount = 0;
+        _tokenCache.delete(cacheKey);
+        refreshCalendarToken(env).catch(() => {});
+      }
+    }, KEEPALIVE_TICK_MS);
     if (timer.unref) timer.unref();
   }
 

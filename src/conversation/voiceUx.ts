@@ -170,6 +170,5 @@ export function formatVoiceResponse(input: {
       break;
   }
 
-  if (!input.gracefulFallback) return compact(body);
-  return compact(`J ai eu un delai, je reprends en mode direct. ${body}`);
+  return compact(body);
 }

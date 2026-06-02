@@ -183,7 +183,8 @@ const _googleTokenCache         = new Map<string, CachedToken>();
 const _googleLiveRefreshToken   = new Map<string, string>(); // captures rotated tokens
 const _googleKeepaliveScheduled = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS    = 60_000;           // refresh access token 60 s before expiry
-const KEEPALIVE_INTERVAL_MS     = 30 * 24 * 3_600_000; // 30 days
+const KEEPALIVE_DAYS            = 30;
+const KEEPALIVE_TICK_MS         = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
 
 // ─── Google — token refresh ───────────────────────────────────────────────────
 
@@ -236,10 +237,15 @@ async function refreshGoogleToken(env: {
 
   if (!_googleKeepaliveScheduled.has(cacheKey)) {
     _googleKeepaliveScheduled.add(cacheKey);
+    let dayCount = 0;
     const timer = setInterval(() => {
-      _googleTokenCache.delete(cacheKey);
-      refreshGoogleToken(env).catch(() => {});
-    }, KEEPALIVE_INTERVAL_MS);
+      dayCount += 1;
+      if (dayCount >= KEEPALIVE_DAYS) {
+        dayCount = 0;
+        _googleTokenCache.delete(cacheKey);
+        refreshGoogleToken(env).catch(() => {});
+      }
+    }, KEEPALIVE_TICK_MS);
     if (timer.unref) timer.unref();
   }
 

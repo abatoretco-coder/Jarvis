@@ -116,7 +116,12 @@ Rules:
 
 ---
 
-## 6) Initial Policy Matrix (v1)
+## 6) Runtime Policy Matrix (v1 - exhaustive)
+
+Source of truth:
+- src/routing/render/policies.ts
+
+The matrix is now filled for all current semantic route keys plus domain defaults.
 
 ### Spotify
 
@@ -131,10 +136,8 @@ Rules:
 - spotify.search_and_play -> deterministic_template
 - spotify.queue_add -> deterministic_template
 - spotify.transfer -> deterministic_template
+- spotify.add_to_playlist -> deterministic_template
 - spotify.volume_set -> deterministic_template
-- spotify.repeat_set -> deterministic_template
-- spotify.shuffle_set -> deterministic_template
-- spotify.seek -> deterministic_template
 
 ### Search
 
@@ -143,7 +146,9 @@ Rules:
 - search.news.current_news -> service_text_passthrough
 - search.web.definition -> service_text_passthrough
 - search.web.quick_lookup -> service_text_passthrough
-- search.deep.* -> llm_domain_rephrase (optional, policy controlled)
+- search.deep.analysis -> llm_domain_rephrase
+- search.deep.history -> llm_domain_rephrase
+- search.deep.comparison -> llm_domain_rephrase
 
 ### Weather
 
@@ -151,28 +156,75 @@ Rules:
 - weather.current_humidity -> deterministic_template
 - weather.current_precipitation -> deterministic_template
 - weather.current_conditions -> deterministic_template
-- complex weather question -> llm_domain_rephrase
 
 ### Todo
 
-- list/create/update/complete/delete simple -> deterministic_template
-- complex summary of many tasks -> llm_domain_rephrase
+- todo.list_tasks -> deterministic_template
+- todo.list_tasks.today -> deterministic_template
+- todo.list_tasks.tomorrow -> deterministic_template
+- todo.list_tasks.this_week -> deterministic_template
+- todo.list_tasks.overdue -> deterministic_template
+- todo.list_lists -> deterministic_template
+- todo.add_task -> llm_domain_rephrase
+- todo.complete_task -> deterministic_template
+- todo.delete_task -> deterministic_template
+- todo.update_task -> llm_domain_rephrase
+- todo.create_list -> deterministic_template
+- todo.delete_list -> deterministic_template
+- todo.add_checklist_item -> deterministic_template
+- todo.complete_checklist_item -> deterministic_template
+- todo.delete_checklist_item -> deterministic_template
 
 ### Mail
 
-- list/search/read simple -> deterministic_template or service_text_passthrough
-- compose/send/reply preview -> deterministic_template
-- long mailbox digest -> llm_domain_rephrase
-
-### Calendar
-
-- list/create/update/delete simple -> deterministic_template
-- complex agenda synthesis -> llm_domain_rephrase
+- mail.list_inbox -> deterministic_template
+- mail.list_inbox.unread -> deterministic_template
+- mail.search_emails -> service_text_passthrough
+- mail.send_email -> llm_domain_rephrase
+- mail.reply_email -> llm_domain_rephrase
+- mail.forward_email -> llm_domain_rephrase
+- mail.mark_read -> deterministic_template
+- mail.mark_unread -> deterministic_template
+- mail.trash_email -> deterministic_template
+- mail.flag_email -> deterministic_template
 
 ### Executors
 
-- simple HA command execution -> deterministic_template
-- ambiguous target -> deterministic_error (need_clarification)
+- executor.greeting -> deterministic_template
+- executor.help -> service_text_passthrough
+- executor.status -> service_text_passthrough
+- executor.timer -> deterministic_template
+- executor.note -> deterministic_template
+- executor.scene_set -> deterministic_template
+- executor.media_play_pause -> deterministic_template
+- executor.media_next -> deterministic_template
+- executor.media_previous -> deterministic_template
+- executor.volume_up -> deterministic_template
+- executor.volume_down -> deterministic_template
+- executor.mute -> deterministic_template
+- executor.unmute -> deterministic_template
+- executor.climate_set -> deterministic_template
+- executor.lock -> deterministic_template
+- executor.unlock -> deterministic_template
+- executor.vacuum_start -> deterministic_template
+- executor.vacuum_stop -> deterministic_template
+- executor.cover_open -> deterministic_template
+- executor.cover_close -> deterministic_template
+
+### Calendar
+
+- calendar domain default -> llm_domain_rephrase
+
+### Domain defaults
+
+- spotify -> deterministic_template
+- search -> llm_domain_rephrase
+- weather -> deterministic_template
+- todo -> llm_domain_rephrase
+- mail -> llm_domain_rephrase
+- calendar -> llm_domain_rephrase
+- executors -> deterministic_template
+- general -> service_text_passthrough
 
 ---
 
@@ -189,12 +241,10 @@ Prompt constraints:
 4. Preserve status semantics (success/error/clarification).
 5. Keep tone consistent with assistant persona.
 
-Recommended prompt files:
-- src/routing/render/prompts/spotifyRephrasePrompt.md
-- src/routing/render/prompts/weatherRephrasePrompt.md
-- src/routing/render/prompts/todoRephrasePrompt.md
-- src/routing/render/prompts/mailRephrasePrompt.md
-- src/routing/render/prompts/multiSynthesisPrompt.md
+Current prompt/config files:
+- src/routing/render/prompts/domainRephraseSystemPrompt.ts
+- src/routing/render/prompts/domainRephraseUserPrompt.ts
+- src/routing/render/openAiConfig.ts
 
 ---
 
