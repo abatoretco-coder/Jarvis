@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { analyzeMultiIntentLikelihood } from '../src/routing/multiIntentLikelihood';
 import {
   ROUTING_CONFIG_HASH,
   ROUTING_CONFIG_VERSION,
   SEMANTIC_ROUTER_CONFIG_HASH,
 } from '../src/routing/deterministic/config/routingDeterministicConfig';
+import { analyzeMultiIntentLikelihood } from '../src/routing/multiIntentLikelihood';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
 
 type EvalCase = {

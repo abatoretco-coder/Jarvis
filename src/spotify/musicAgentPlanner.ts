@@ -3,12 +3,12 @@ import { z } from 'zod';
 import type { Env } from '../env';
 import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { SPOTIFY_CAPABILITIES } from './capabilityRegistry';
-import { buildMusicAgentSystemPrompt } from './prompts/musicAgentSystemPrompt';
-import { buildMusicAgentUserTemplate } from './prompts/musicAgentUserTemplate';
 import { spotifyActionSchema } from './contracts';
 import {
   evaluateSearchAndPlayDeterministicGate,
 } from './deterministicSpotifyIntent';
+import { buildMusicAgentSystemPrompt } from './prompts/musicAgentSystemPrompt';
+import { buildMusicAgentUserTemplate } from './prompts/musicAgentUserTemplate';
 
 type LoggerLike = {
   info?: (obj: Record<string, unknown>, msg?: string) => void;
@@ -77,12 +77,6 @@ function parseJsonObject(raw: string): unknown {
     }
     throw new Error('music_agent_invalid_json');
   }
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : undefined;
 }
 
 function buildActionCatalog(): string {

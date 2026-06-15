@@ -1,6 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import { MUSIC_ROUTING_MATRIX } from '../src/spotify/musicRoutingMatrix';
 
@@ -50,7 +50,7 @@ function main(): void {
   commands.push(runCommand('npm run build'));
   commands.push(
     runCommand(
-      `npm test -- --runTestsByPath tests/music-routing.business.test.ts tests/music-routing.matrix.test.ts --json --outputFile \"${jestJsonPath}\"`,
+      `npm test -- --runTestsByPath tests/music-routing.business.test.ts tests/music-routing.matrix.test.ts --json --outputFile "${jestJsonPath}"`,
     ),
   );
 

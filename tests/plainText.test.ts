@@ -140,7 +140,7 @@ describe('toSingleParagraphPlainText', () => {
     expect(result).toContain('18°C');
     expect(result).toContain('Ciel dégagé');
     // No double spaces
-    expect(result).not.toMatch(/  /);
+    expect(result).not.toMatch(/ {2}/);
   });
 
   test('multi-target join output (two clean parts) stays clean after plain text', () => {

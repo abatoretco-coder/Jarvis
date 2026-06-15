@@ -10,7 +10,3 @@ export const SEARCH_LIVE_SPORT_RESPONSES = ['Je ne trouve pas les résultats spo
 export const SEARCH_CURRENT_NEWS_RESPONSES = ['Pas d\'actualités disponibles.'];
 export const SEARCH_DEFINITION_RESPONSES = ['Je n\'arrive pas à définir ça.'];
 export const SEARCH_QUICK_LOOKUP_RESPONSES = ['Je cherche...'];
-
-export function getSearchResponse(action: string, params?: Record<string, any>): string {
-  return 'Recherche en cours...';
-}

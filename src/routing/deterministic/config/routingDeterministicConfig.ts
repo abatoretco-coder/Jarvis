@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 
-import multiIntentLikelihoodRaw from './multiIntentLikelihood.json';
-import localWeatherRoutingRaw from './localWeatherRouting.json';
 import ingestAckRaw from './ingestAck.json';
 import ingestRuntimeTuningRaw from './ingestRuntimeTuning.json';
+import localWeatherRoutingRaw from './localWeatherRouting.json';
+import multiIntentLikelihoodRaw from './multiIntentLikelihood.json';
 
 type MultiIntentWeights = {
   segmentStep: number;

@@ -13,6 +13,35 @@ function normalizeContent(content: string): string {
     .trim();
 }
 
+function buildConversationTitle(content: string): string {
+  const normalized = normalizeContent(content)
+    .replace(/^(?:ok\s+)?(?:jarvis|jervis|charvis)\b[\s,;:!.-]*/i, '')
+    .replace(/^(bonjour|bonsoir|salut|hello|hey)\b[\s,;:!-]*/i, '')
+    .replace(/^(?:est[\s-]*ce que\s+)?tu\s+(?:peux|pourrais)\s+(?:me\s+)?/i, '')
+    .replace(/^(?:peux|pourrais)[\s-]*tu\s+(?:me\s+)?/i, '')
+    .replace(
+      /^(?:je\s+)?(?:voudrais|veux|souhaite|j'aimerais)\s+|^merci de\s+|^(?:donne|mets|remets|coupe)[\s-]*(?:moi|nous)?\s*/i,
+      '',
+    )
+    .replace(/[\s,;:!.-]*(?:s['’]il te pla[iî]t|merci)\s*$/i, '')
+    .replace(/^[\s,;:!?.-]+/, '')
+    .replace(/[?.!]+$/g, '')
+    .trim();
+  if (!normalized) return 'Nouvelle conversation';
+
+  const firstSentence = normalized.split(/[.!?]\s/)[0]?.trim() || normalized;
+  const words = firstSentence.split(/\s+/).filter(Boolean);
+  let title = '';
+  for (const word of words) {
+    const candidate = title ? `${title} ${word}` : word;
+    if (candidate.length > 52) break;
+    title = candidate;
+    if (title.split(/\s+/).length >= 7) break;
+  }
+  title = title || firstSentence.slice(0, 52).trim();
+  return title.charAt(0).toLocaleUpperCase('fr-FR') + title.slice(1);
+}
+
 function assertSummaryStatus(value: string): SummaryStatus {
   if (value === 'idle' || value === 'running' || value === 'ready' || value === 'failed') {
     return value;
@@ -23,34 +52,20 @@ function assertSummaryStatus(value: string): SummaryStatus {
 export class SqliteThreadRepository implements ThreadRepository {
   constructor(private readonly db: Database.Database) {}
 
-  async getOrCreate(threadId: string, options?: { channel?: string | null }): Promise<ThreadRecord> {
-    const now = Date.now();
-    const incomingChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
-    this.db
-      .prepare(
-        `INSERT INTO conversation_threads (
-          thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, '', 0, 0, NULL, NULL, 'idle', 0, ?, ?)
-        ON CONFLICT(thread_id) DO NOTHING`
-      )
-      .run(threadId, incomingChannel || null, now, now);
-
-    if (incomingChannel) {
-      this.db
-        .prepare("UPDATE conversation_threads SET channel = ?, updated_at_ms = ? WHERE thread_id = ? AND (channel IS NULL OR channel = '' OR channel <> ?)")
-        .run(incomingChannel, now, threadId, incomingChannel);
-    }
-
+  async findById(threadId: string): Promise<ThreadRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, last_response_time_ms, conversation_window_expires_at_ms
+        `SELECT thread_id, channel, title, summary, summary_upto_seq, summary_version,
+                summary_candidate, summary_candidate_upto_seq, summary_status,
+                interaction_count, last_response_time_ms, conversation_window_expires_at_ms
          FROM conversation_threads
-         WHERE thread_id = ?`
+         WHERE thread_id = ?`,
       )
       .get(threadId) as
       | {
           thread_id: string;
           channel: string | null;
+          title: string;
           summary: string;
           summary_upto_seq: number;
           summary_version: number;
@@ -63,13 +78,11 @@ export class SqliteThreadRepository implements ThreadRepository {
         }
       | undefined;
 
-    if (!row) {
-      throw new Error(`Thread not found after create: ${threadId}`);
-    }
-
+    if (!row) return null;
     return {
       threadId: row.thread_id,
       channel: row.channel,
+      title: row.title ?? '',
       summary: row.summary ?? '',
       summaryUptoSeq: Number(row.summary_upto_seq ?? 0),
       summaryVersion: Number(row.summary_version ?? 0),
@@ -80,6 +93,31 @@ export class SqliteThreadRepository implements ThreadRepository {
       lastResponseTimeMs: Number(row.last_response_time_ms ?? 0),
       conversationWindowExpiresAtMs: Number(row.conversation_window_expires_at_ms ?? 0),
     };
+  }
+
+  async getOrCreate(threadId: string, options?: { channel?: string | null }): Promise<ThreadRecord> {
+    const now = Date.now();
+    const incomingChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
+    this.db
+      .prepare(
+        `INSERT INTO conversation_threads (
+          thread_id, channel, title, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, '', '', 0, 0, NULL, NULL, 'idle', 0, ?, ?)
+        ON CONFLICT(thread_id) DO NOTHING`
+      )
+      .run(threadId, incomingChannel || null, now, now);
+
+    if (incomingChannel) {
+      this.db
+        .prepare("UPDATE conversation_threads SET channel = ?, updated_at_ms = ? WHERE thread_id = ? AND (channel IS NULL OR channel = '' OR channel <> ?)")
+        .run(incomingChannel, now, threadId, incomingChannel);
+    }
+
+    const row = await this.findById(threadId);
+    if (!row) {
+      throw new Error(`Thread not found after create: ${threadId}`);
+    }
+    return row;
   }
 
   async incrementInteractionCount(threadId: string): Promise<number> {
@@ -190,6 +228,15 @@ export class SqliteThreadRepository implements ThreadRepository {
     return tx();
   }
 
+  async updateTitle(threadId: string, title: string): Promise<void> {
+    const normalized = normalizeContent(title).slice(0, 80);
+    if (!normalized) return;
+    await this.getOrCreate(threadId);
+    this.db
+      .prepare("UPDATE conversation_threads SET title = ?, title_source = 'ai' WHERE thread_id = ?")
+      .run(normalized, threadId);
+  }
+
   async listRecent(limit: number, options?: { channel?: string | null }): Promise<ThreadListItem[]> {
     const safeLimit = Math.max(1, Math.min(limit, 200));
     const filterChannel = typeof options?.channel === 'string' ? options.channel.trim() : '';
@@ -197,8 +244,11 @@ export class SqliteThreadRepository implements ThreadRepository {
       ? `SELECT
           t.thread_id,
           t.channel,
+          t.title,
+          t.title_source,
           t.summary,
           t.updated_at_ms,
+          (SELECT m.content FROM conversation_messages m WHERE m.thread_id = t.thread_id AND m.role = 'user' ORDER BY m.seq ASC LIMIT 1) as first_user_content,
           (SELECT COUNT(*) FROM conversation_messages m WHERE m.thread_id = t.thread_id) as message_count
          FROM conversation_threads t
          WHERE t.channel = ?
@@ -207,8 +257,11 @@ export class SqliteThreadRepository implements ThreadRepository {
       : `SELECT
           t.thread_id,
           t.channel,
+          t.title,
+          t.title_source,
           t.summary,
           t.updated_at_ms,
+          (SELECT m.content FROM conversation_messages m WHERE m.thread_id = t.thread_id AND m.role = 'user' ORDER BY m.seq ASC LIMIT 1) as first_user_content,
           (SELECT COUNT(*) FROM conversation_messages m WHERE m.thread_id = t.thread_id) as message_count
          FROM conversation_threads t
          ORDER BY t.updated_at_ms DESC
@@ -219,18 +272,35 @@ export class SqliteThreadRepository implements ThreadRepository {
       .all(...(filterChannel ? [filterChannel, safeLimit] : [safeLimit])) as Array<{
       thread_id: string;
       channel: string | null;
+      title: string;
+      title_source: string;
       summary: string;
       updated_at_ms: number;
+      first_user_content: string | null;
       message_count: number;
     }>;
 
-    return rows.map((row) => ({
-      threadId: row.thread_id,
-      channel: row.channel,
-      summary: row.summary || `Conversation ${row.thread_id.slice(-8)}`,
-      lastActivityMs: Number(row.updated_at_ms),
-      messageCount: Number(row.message_count),
-    }));
+    return rows.map((row) => {
+      const title =
+        row.title_source === 'ai'
+          ? row.title
+          : row.first_user_content
+            ? buildConversationTitle(row.first_user_content)
+            : row.title || '';
+      if (title && row.title_source !== 'ai' && row.title !== title) {
+        this.db
+          .prepare("UPDATE conversation_threads SET title = ?, title_source = 'heuristic' WHERE thread_id = ?")
+          .run(title, row.thread_id);
+      }
+      return {
+        threadId: row.thread_id,
+        channel: row.channel,
+        title,
+        summary: row.summary || `Conversation ${row.thread_id.slice(-8)}`,
+        lastActivityMs: Number(row.updated_at_ms),
+        messageCount: Number(row.message_count),
+      };
+    });
   }
 
   async deleteThread(threadId: string): Promise<boolean> {
@@ -262,7 +332,7 @@ export class SqliteThreadRepository implements ThreadRepository {
     
     const row = this.db
       .prepare(
-        `SELECT thread_id, channel, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, last_response_time_ms, conversation_window_expires_at_ms
+        `SELECT thread_id, channel, title, summary, summary_upto_seq, summary_version, summary_candidate, summary_candidate_upto_seq, summary_status, interaction_count, last_response_time_ms, conversation_window_expires_at_ms
          FROM conversation_threads
          WHERE conversation_window_expires_at_ms > ? AND (? = '' OR channel = ?)
          ORDER BY conversation_window_expires_at_ms DESC
@@ -272,6 +342,7 @@ export class SqliteThreadRepository implements ThreadRepository {
       | {
           thread_id: string;
           channel: string | null;
+          title: string;
           summary: string;
           summary_upto_seq: number;
           summary_version: number;
@@ -291,6 +362,7 @@ export class SqliteThreadRepository implements ThreadRepository {
     return {
       threadId: row.thread_id,
       channel: row.channel,
+      title: row.title ?? '',
       summary: row.summary ?? '',
       summaryUptoSeq: Number(row.summary_upto_seq ?? 0),
       summaryVersion: Number(row.summary_version ?? 0),
@@ -325,6 +397,15 @@ export class SqliteMessageRepository implements MessageRepository {
            VALUES (?, ?, ?, ?, ?)`
         )
         .run(input.threadId, nextSeq, input.role, normalized, now);
+      if (input.role === 'user') {
+        this.db
+          .prepare(
+            `UPDATE conversation_threads
+             SET title = ?, title_source = 'heuristic', updated_at_ms = ?
+             WHERE thread_id = ? AND (title IS NULL OR trim(title) = '')`
+          )
+          .run(buildConversationTitle(normalized), now, input.threadId);
+      }
       return nextSeq;
     });
 
@@ -429,6 +510,8 @@ export function createConversationDb(dbPath: string): Database.Database {
     CREATE TABLE IF NOT EXISTS conversation_threads (
       thread_id TEXT PRIMARY KEY,
       channel TEXT,
+      title TEXT NOT NULL DEFAULT '',
+      title_source TEXT NOT NULL DEFAULT 'heuristic',
       summary TEXT NOT NULL DEFAULT '',
       summary_upto_seq INTEGER NOT NULL DEFAULT 0,
       summary_version INTEGER NOT NULL DEFAULT 0,
@@ -464,6 +547,12 @@ export function createConversationDb(dbPath: string): Database.Database {
   const hasChannelColumn = threadColumns.some((column) => column.name === 'channel');
   if (!hasChannelColumn) {
     db.exec('ALTER TABLE conversation_threads ADD COLUMN channel TEXT;');
+  }
+  if (!threadColumns.some((column) => column.name === 'title')) {
+    db.exec("ALTER TABLE conversation_threads ADD COLUMN title TEXT NOT NULL DEFAULT '';");
+  }
+  if (!threadColumns.some((column) => column.name === 'title_source')) {
+    db.exec("ALTER TABLE conversation_threads ADD COLUMN title_source TEXT NOT NULL DEFAULT 'heuristic';");
   }
 
   db.exec(`

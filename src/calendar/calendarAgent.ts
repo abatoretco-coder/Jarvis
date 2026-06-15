@@ -15,13 +15,12 @@ import {
   calendarApiRequest,
   fetchUpcomingEventsMultiCalendar,
   formatEventDate,
+  type GoogleCalendarEvent,
   hasCalendarConfig,
   parseCalendarIds,
   refreshCalendarToken,
   resolveEventEnd,
   resolveEventStart,
-  type CalendarTokenEnv,
-  type GoogleCalendarEvent,
 } from './googleCalendarClient';
 
 // ─── Key detection ────────────────────────────────────────────────────────────

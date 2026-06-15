@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
-import type { SemanticRouteDefinition } from '../../src/routing/semanticRouter.types';
-import { clearRouteEmbeddingCache, warmupRouteEmbeddings } from '../../src/routing/routeScoring';
 import { getEmbeddings } from '../../src/routing/embeddingClient';
+import { clearRouteEmbeddingCache, warmupRouteEmbeddings } from '../../src/routing/routeScoring';
+import type { SemanticRouteDefinition } from '../../src/routing/semanticRouter.types';
 
 jest.mock('../../src/routing/embeddingClient', () => ({
   getEmbeddings: jest.fn(),

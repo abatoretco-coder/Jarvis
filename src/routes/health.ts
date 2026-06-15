@@ -18,7 +18,7 @@ export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void 
     const dependencies: Record<string, unknown> = {
       planner: {
         status: 'ok',
-        mode: 'local_intent_words',
+        mode: 'semantic_router',
       },
       homeassistant: deps.ha
         ? { status: 'configured' }

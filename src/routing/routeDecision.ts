@@ -7,13 +7,13 @@
  * Phase 1A: decision logic is computed but never overrides the LLM router.
  */
 
+import type { RouteScoringResult } from './routeScoring';
 import type {
   SemanticRouteDecision,
   SemanticRouteResult,
   SemanticRouterOptions,
 } from './semanticRouter.types';
 import { DEFAULT_SEMANTIC_ROUTER_OPTIONS } from './semanticRouter.types';
-import type { RouteScoringResult } from './routeScoring';
 
 export function makeRouteDecision(
   scoring: RouteScoringResult,

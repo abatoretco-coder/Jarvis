@@ -1,6 +1,12 @@
+import { randomBytes } from 'node:crypto';
+
 import { FastifyInstance } from 'fastify';
-import { AppDeps } from '../server';
+
 import { setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { AppDeps } from '../server';
+
+const OAUTH_STATE_TTL_MS = 10 * 60_000;
+const MAX_PENDING_OAUTH_STATES = 64;
 
 /**
  * OAuth routes for credential acquisition (oneshot flow).
@@ -18,6 +24,28 @@ import { setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
 
 export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
   const redirectUri = deps.env.OAUTH_REDIRECT_URI?.trim() || 'http://127.0.0.1:8090/v1/oauth/google/callback';
+  const pendingStates = new Map<string, number>();
+
+  const issueState = (): string => {
+    const now = Date.now();
+    for (const [state, expiresAt] of pendingStates) {
+      if (expiresAt <= now) pendingStates.delete(state);
+    }
+    while (pendingStates.size >= MAX_PENDING_OAUTH_STATES) {
+      const oldest = pendingStates.keys().next().value as string | undefined;
+      if (!oldest) break;
+      pendingStates.delete(oldest);
+    }
+    const state = randomBytes(32).toString('base64url');
+    pendingStates.set(state, now + OAUTH_STATE_TTL_MS);
+    return state;
+  };
+
+  const consumeState = (state: string): boolean => {
+    const expiresAt = pendingStates.get(state);
+    pendingStates.delete(state);
+    return typeof expiresAt === 'number' && expiresAt > Date.now();
+  };
 
   /**
    * GET /v1/oauth/google/authorize
@@ -32,6 +60,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
+    const state = issueState();
     const params = new URLSearchParams({
       client_id: env.GOOGLE_CLIENT_ID,
       redirect_uri: redirectUri,
@@ -39,14 +68,13 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       scope: 'https://mail.google.com/',
       access_type: 'offline',
       prompt: 'consent',
-      device_id: 'jarvis-vm400',
-      device_name: 'Jarvis',
+      state,
     });
 
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
     return reply.send({
       authorization_url: authUrl,
-      instructions: 'Open the URL above, authorize, then copy the displayed code and call /v1/oauth/google/callback?code=<code>',
+      state_expires_in_seconds: OAUTH_STATE_TTL_MS / 1000,
     });
   });
 
@@ -54,14 +82,22 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
    * GET /v1/oauth/google/callback?code=...
    * Exchanges the authorization code for a refresh token and stores it.
    */
-  app.get<{ Querystring: { code?: string } }>('/v1/oauth/google/callback', async (req, reply) => {
+  app.get<{ Querystring: { code?: string; state?: string } }>('/v1/oauth/google/callback', async (req, reply) => {
     const env = deps.env;
     const code = req.query.code?.trim();
+    const state = req.query.state?.trim();
 
-    if (!code) {
+    if (!code || !state) {
       return reply.code(400).send({
-        error: 'missing_code',
-        message: 'code query parameter is required',
+        error: 'missing_oauth_parameters',
+        message: 'code and state query parameters are required',
+      });
+    }
+
+    if (!consumeState(state)) {
+      return reply.code(403).send({
+        error: 'invalid_oauth_state',
+        message: 'OAuth state is invalid or expired',
       });
     }
 
@@ -88,10 +124,11 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       });
 
       if (!tokenResponse.ok) {
-        const errorText = await tokenResponse.text().catch(() => 'Unknown error');
+        await tokenResponse.text().catch(() => '');
+        app.log.warn({ status: tokenResponse.status }, 'google_oauth_code_exchange_failed');
         return reply.code(401).send({
           error: 'code_exchange_failed',
-          message: `Google returned ${tokenResponse.status}: ${errorText.slice(0, 200)}`,
+          message: 'Google rejected the authorization code',
         });
       }
 
@@ -143,10 +180,10 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
         refresh_token_stored: true,
       });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
+      app.log.warn({ error }, 'google_oauth_callback_failed');
       return reply.code(500).send({
         error: 'token_exchange_error',
-        message: msg,
+        message: 'OAuth token exchange failed',
       });
     }
   });

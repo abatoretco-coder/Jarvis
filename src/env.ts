@@ -52,6 +52,13 @@ const envSchema = z
   HA_TTS_ENTITY_ID: optionalNonEmptyString,
   HA_TTS_FALLBACK_ENTITY_IDS: optionalNonEmptyString,
 
+  // Read-only NAS metrics collector.
+  NAS_STATUS_URL: optionalUrl,
+  NAS_STATUS_TOKEN: optionalNonEmptyString,
+  NAS_STATUS_TIMEOUT_MS: numberFromEnv.default('2500'),
+  NAS_STATUS_CACHE_TTL_MS: numberFromEnv.default('60000'),
+  NAS_STATUS_CACHE_STALE_MS: numberFromEnv.default('600000'),
+
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
   OPENAI_TTS_API_KEY: optionalNonEmptyString,
@@ -99,6 +106,7 @@ const envSchema = z
   SPOTIFY_WEBAPI_CLIENT_ID: optionalNonEmptyString,
   SPOTIFY_WEBAPI_CLIENT_SECRET: optionalNonEmptyString,
   SPOTIFY_WEBAPI_REFRESH_TOKEN: optionalNonEmptyString,
+  SPOTIFY_WEBAPI_TOKEN_STORE_PATH: z.string().default('/app/data/spotify-token.json'),
   // Optional: target a specific Spotify Connect device id (otherwise controls the current active device)
   SPOTIFY_WEBAPI_DEVICE_ID: optionalNonEmptyString,
   // Optional: fallback target device name when SPOTIFY_WEBAPI_DEVICE_ID is not found (e.g. after reconnect)

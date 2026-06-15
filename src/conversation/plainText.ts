@@ -1,5 +1,5 @@
 const FORBIDDEN_BULLETS_RE = /[•◦▪▫●○■□◆◇]/g;
-const MARKDOWN_TOKENS_RE = /[#*_`>|\[\]\(\)]/g;
+const MARKDOWN_TOKENS_RE = /[#*_`>|[\]()]/g;
 
 export function toSingleParagraphPlainText(input: string): string {
   return String(input ?? '')

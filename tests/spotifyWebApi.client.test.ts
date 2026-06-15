@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, test } from '@jest/globals';
 
 import type { Env } from '../src/env';
@@ -8,6 +11,10 @@ function makeEnv(overrides?: Partial<Env>): Env {
     SPOTIFY_WEBAPI_CLIENT_ID: 'cid',
     SPOTIFY_WEBAPI_CLIENT_SECRET: 'csecret',
     SPOTIFY_WEBAPI_REFRESH_TOKEN: 'refresh-token',
+    SPOTIFY_WEBAPI_TOKEN_STORE_PATH: join(
+      tmpdir(),
+      `jarvis-spotify-test-${process.pid}-${Math.random().toString(16).slice(2)}.json`,
+    ),
     SPOTIFY_WEBAPI_DEVICE_ID: undefined,
     SPOTIFY_WEBAPI_DEVICE_NAME: 'jarvis vm400',
     SPOTIFY_WEBAPI_DEVICE_ALIAS_PHONE_NAME: 'Galaxy S22',
@@ -36,10 +43,6 @@ function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
-}
-
-function noContent(status = 204): Response {
-  return new Response('', { status });
 }
 
 function parseMockUrl(input: string | URL | Request): URL {

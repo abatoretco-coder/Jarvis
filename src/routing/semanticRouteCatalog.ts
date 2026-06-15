@@ -12,42 +12,35 @@
  * - deterministicResponses : fonction retournant réponses non-IA
  */
 
-import type { SemanticRouteDefinition } from './semanticRouter.types';
-import {
-  SPOTIFY_PAUSE_RESPONSES,
-  SPOTIFY_PLAY_RESPONSES,
-  SPOTIFY_NEXT_RESPONSES,
-  SPOTIFY_PREVIOUS_RESPONSES,
-  SPOTIFY_NOW_PLAYING_RESPONSES,
-  SPOTIFY_LIST_DEVICES_RESPONSES,
-  SPOTIFY_CLEAR_QUEUE_RESPONSES,
-  getSpotifyResponse,
-} from './deterministic/spotifyResponses';
-
-import {
-  SEARCH_WEATHER_RESPONSES,
-  SEARCH_LIVE_SPORT_RESPONSES,
-  SEARCH_CURRENT_NEWS_RESPONSES,
-  SEARCH_DEFINITION_RESPONSES,
-  SEARCH_QUICK_LOOKUP_RESPONSES,
-  getSearchResponse,
-} from './deterministic/searchResponses';
-
-import {
-  TODO_LIST_TASKS_RESPONSES,
-  TODO_LIST_TASKS_TODAY_RESPONSES,
-  TODO_LIST_TASKS_TOMORROW_RESPONSES,
-  TODO_LIST_TASKS_THIS_WEEK_RESPONSES,
-  TODO_LIST_TASKS_OVERDUE_RESPONSES,
-  TODO_LIST_LISTS_RESPONSES,
-  getTodoResponse,
-} from './deterministic/todoResponses';
-
 import {
   MAIL_LIST_INBOX_RESPONSES,
   MAIL_LIST_INBOX_UNREAD_RESPONSES,
-  getMailResponse,
 } from './deterministic/mailResponses';
+import {
+  SEARCH_CURRENT_NEWS_RESPONSES,
+  SEARCH_DEFINITION_RESPONSES,
+  SEARCH_LIVE_SPORT_RESPONSES,
+  SEARCH_QUICK_LOOKUP_RESPONSES,
+  SEARCH_WEATHER_RESPONSES,
+} from './deterministic/searchResponses';
+import {
+  SPOTIFY_CLEAR_QUEUE_RESPONSES,
+  SPOTIFY_LIST_DEVICES_RESPONSES,
+  SPOTIFY_NEXT_RESPONSES,
+  SPOTIFY_NOW_PLAYING_RESPONSES,
+  SPOTIFY_PAUSE_RESPONSES,
+  SPOTIFY_PLAY_RESPONSES,
+  SPOTIFY_PREVIOUS_RESPONSES,
+} from './deterministic/spotifyResponses';
+import {
+  TODO_LIST_LISTS_RESPONSES,
+  TODO_LIST_TASKS_OVERDUE_RESPONSES,
+  TODO_LIST_TASKS_RESPONSES,
+  TODO_LIST_TASKS_THIS_WEEK_RESPONSES,
+  TODO_LIST_TASKS_TODAY_RESPONSES,
+  TODO_LIST_TASKS_TOMORROW_RESPONSES,
+} from './deterministic/todoResponses';
+import type { SemanticRouteDefinition } from './semanticRouter.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPOTIFY — E2 Routes (7)

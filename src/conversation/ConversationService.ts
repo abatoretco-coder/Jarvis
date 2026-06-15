@@ -9,6 +9,7 @@ export type ConversationServiceOptions = {
   minIntervalMs: number;
   retryCount: number;
   retryDelayMs: number;
+  onFirstInteractionPersisted?: (threadId: string, userText: string, assistantText: string) => void;
 };
 
 export const JARVIS_HA_AGENT_GENERAL = 'conversation.openai_conversation';
@@ -159,6 +160,9 @@ export class ConversationService {
       content: toSingleParagraphPlainText(assistantText),
       createdAtMs: now + 1,
     });
-    await this.threadRepository.incrementInteractionCount(threadId);
+    const interactionCount = await this.threadRepository.incrementInteractionCount(threadId);
+    if (interactionCount === 1) {
+      this.options.onFirstInteractionPersisted?.(threadId, userText, assistantText);
+    }
   }
 }

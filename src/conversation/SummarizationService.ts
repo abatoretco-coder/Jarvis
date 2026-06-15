@@ -1,5 +1,5 @@
-import { SYSTEM_PROMPT_SUMMARIZER, USER_TEMPLATE_SUMMARIZER } from './prompts';
 import { toSingleParagraphPlainText } from './plainText';
+import { SYSTEM_PROMPT_SUMMARIZER, USER_TEMPLATE_SUMMARIZER } from './prompts';
 import type { MessageRepository } from './repositories/MessageRepository';
 import type { ThreadRepository } from './repositories/ThreadRepository';
 
@@ -64,6 +64,11 @@ export class SummarizationService {
 
   startPresummarize(threadId: string): void {
     void this.runPresummarize(threadId);
+  }
+
+  startTitleGeneration(threadId: string, userText: string, assistantText: string): void {
+    if (!this.options.openAiApiKey) return;
+    void this.runTitleGeneration(threadId, userText, assistantText);
   }
 
   async commitCandidateIfReady(threadId: string): Promise<{ committed: boolean; usedSummaryVersion?: string }> {
@@ -162,6 +167,53 @@ export class SummarizationService {
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'summary_job_failed';
       await this.threadRepository.markSummaryFailed(threadId, reason);
+    }
+  }
+
+  private async runTitleGeneration(threadId: string, userText: string, assistantText: string): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.openAiTimeoutMs);
+    try {
+      const response = await fetch(`${this.options.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.options.openAiApiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.options.openAiModelSummary,
+          temperature: 0.15,
+          max_tokens: 30,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Donne un titre français précis de 3 à 7 mots pour cette conversation. Sans guillemets, sans ponctuation finale, sans préfixe.',
+            },
+            {
+              role: 'user',
+              content: `Utilisateur: ${toSingleParagraphPlainText(userText)}\nJarvis: ${toSingleParagraphPlainText(assistantText)}`,
+            },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const raw = data.choices?.[0]?.message?.content ?? '';
+      const title = toSingleParagraphPlainText(raw)
+        .replace(/^\s*(titre\s*:|title\s*:)/i, '')
+        .replace(/^["'«`]+|["'»`]+$/g, '')
+        .replace(/[.!?;:]+$/g, '')
+        .trim()
+        .split(/\s+/)
+        .slice(0, 7)
+        .join(' ');
+      if (title) await this.threadRepository.updateTitle(threadId, title);
+    } catch {
+      // The immediate deterministic title remains available on provider failure.
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

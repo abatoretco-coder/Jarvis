@@ -19,6 +19,17 @@ function compact(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function stripWebSourceLabel(text: string): string {
+  return text
+    .replace(/(?:^|\s)source\s*:\s*(?:synth[eè]se\s+)?web\.?/giu, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+export function sanitizeResponseAttribution(text: string, domain: VoiceResponseDomain): string {
+  return domain === 'search' ? text : stripWebSourceLabel(text);
+}
+
 function splitSentences(text: string): string[] {
   return text
     .split(/(?<=[.!?])\s+/)
@@ -34,7 +45,13 @@ function capSentences(text: string, maxSentences: number): string {
 
 export function isVoiceRequest(input: { voiceTurnId?: string; clientChannel?: string | null }): boolean {
   if (input.voiceTurnId && input.voiceTurnId.trim().length > 0) return true;
-  return (input.clientChannel ?? '').toLowerCase() === 'voice';
+  const channel = (input.clientChannel ?? '').toLowerCase();
+  return channel === 'voice' || channel.includes('voice-hub');
+}
+
+export function isLikelyTruncatedVoiceUtterance(text: string): boolean {
+  const trimmed = text.trim();
+  return !trimmed || /(?:\.\.\.|…)$/.test(trimmed);
 }
 
 export function resolveVoiceResponseMode(input: {
@@ -46,11 +63,10 @@ export function resolveVoiceResponseMode(input: {
     : typeof input.clientContext?.['voiceMode'] === 'string'
       ? String(input.clientContext['voiceMode']).toLowerCase().trim()
       : '';
-  if (forced === 'short' || forced === 'normal' || forced === 'detailed') return forced;
-
   const t = input.text.toLowerCase();
   if (/(detaille|détaille|en detail|en détail|approfondis)/.test(t)) return 'detailed';
   if (/(resume vite|résume vite|en bref|rapidement|court)/.test(t)) return 'short';
+  if (forced === 'short' || forced === 'normal' || forced === 'detailed') return forced;
   return 'normal';
 }
 
@@ -132,8 +148,11 @@ function formatExecutorOral(text: string, mode: VoiceResponseMode): string {
 
 function formatSearchOral(text: string, mode: VoiceResponseMode): string {
   if (mode === 'short') return firstSentence(text);
-  if (mode === 'detailed') return `${capSentences(text, 4)} Source: synthese web.`;
-  return `${capSentences(text, 2)} Source: synthese web. Je peux detailler si tu veux.`;
+  const capped = capSentences(text, mode === 'detailed' ? 4 : 2);
+  const sourced = /\bsource\s*:\s*(?:synth[eè]se\s+)?web\b/iu.test(capped)
+    ? capped
+    : `${capped} Source : web.`;
+  return mode === 'detailed' ? sourced : `${sourced} Je peux detailler si tu veux.`;
 }
 
 function formatTodoOral(text: string, mode: VoiceResponseMode): string {
@@ -146,9 +165,8 @@ export function formatVoiceResponse(input: {
   text: string;
   domain: VoiceResponseDomain;
   mode: VoiceResponseMode;
-  gracefulFallback: boolean;
 }): string {
-  const clean = compact(input.text);
+  const clean = compact(sanitizeResponseAttribution(input.text, input.domain));
   if (!clean) return clean;
 
   let body: string;

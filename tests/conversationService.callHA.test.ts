@@ -24,7 +24,7 @@
 
 import { afterEach, describe, expect, test } from '@jest/globals';
 
-import { ConversationService, JARVIS_HA_AGENT_GENERAL, type ConversationServiceOptions } from '../src/conversation/ConversationService';
+import { ConversationService, type ConversationServiceOptions,JARVIS_HA_AGENT_GENERAL } from '../src/conversation/ConversationService';
 import { InMemoryMessageRepository, InMemoryThreadRepository } from '../src/conversation/repositories/InMemoryRepositories';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

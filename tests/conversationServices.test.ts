@@ -4,6 +4,13 @@ import { InMemoryMessageRepository, InMemoryThreadRepository } from '../src/conv
 import { SummarizationService } from '../src/conversation/SummarizationService';
 
 describe('conversation services', () => {
+  test('findById does not create a missing conversation', async () => {
+    const threadRepository = new InMemoryThreadRepository();
+
+    expect(await threadRepository.findById('missing')).toBeNull();
+    expect(await threadRepository.deleteThread('missing')).toBe(false);
+  });
+
   test('commitCandidateIfReady performs atomic candidate swap', async () => {
     const threadRepository = new InMemoryThreadRepository();
 

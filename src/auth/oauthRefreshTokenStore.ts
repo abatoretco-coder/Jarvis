@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 type RefreshTokenStore = Record<string, string>;
@@ -33,10 +33,11 @@ async function loadStore(filePath: string): Promise<RefreshTokenStore> {
 
 async function saveStore(filePath: string, store: RefreshTokenStore): Promise<void> {
   const dir = dirname(filePath);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const tmpPath = `${filePath}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(store, null, 2), 'utf-8');
+  await writeFile(tmpPath, JSON.stringify(store, null, 2), { encoding: 'utf-8', mode: 0o600 });
   await rename(tmpPath, filePath);
+  await chmod(filePath, 0o600);
   _storeCache.set(filePath, store);
 }
 

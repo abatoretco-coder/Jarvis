@@ -5,14 +5,14 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Fastify, { type FastifyInstance } from 'fastify';
 
-import type { Env } from '../src/env';
-import { registerIngestRoute } from '../src/routes/ingest';
-import type { AppDeps } from '../src/server';
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
+import type { Env } from '../src/env';
+import { callMailAgent } from '../src/mail/mailAgent';
+import { registerIngestRoute } from '../src/routes/ingest';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
+import type { AppDeps } from '../src/server';
 import { planSpotifyActionFromTextWithOpenAi } from '../src/spotify/musicAgentPlanner';
 import { callTodoAgent } from '../src/todo/todoAgent';
-import { callMailAgent } from '../src/mail/mailAgent';
 
 jest.mock('../src/conversation/orchestratorRouter', () => {
   const actual = jest.requireActual('../src/conversation/orchestratorRouter') as Record<string, unknown>;
@@ -3140,5 +3140,24 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).toContain('22');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 404 for an unknown history without creating a phantom thread', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    registerIngestRoute(app, makeDeps(makeEnv(dbPath), []));
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/v1/threads/unknown-thread/history',
+    });
+    expect(history.statusCode).toBe(404);
+    expect(history.json()).toEqual({ error: 'thread_not_found' });
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/threads?limit=10',
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toEqual({ items: [] });
   });
 });

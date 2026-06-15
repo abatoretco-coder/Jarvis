@@ -19,9 +19,12 @@ RUN npm ci --omit=dev
 
 FROM base AS runtime
 ENV NODE_ENV=production
-RUN apk add --no-cache ffmpeg
+RUN apk add --no-cache ffmpeg su-exec
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./package.json
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8090
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

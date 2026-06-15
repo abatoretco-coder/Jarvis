@@ -22,7 +22,7 @@ $RemoteJarvisPath = "/opt/naas/stacks/Jarvis"
 
 # Create tar archive of files used by Docker build on VM400
 Write-Host "   Creating source archive..." -ForegroundColor Gray
-$ArchiveEntries = @("Dockerfile", "package.json", "tsconfig.json", "src")
+$ArchiveEntries = @("Dockerfile", "docker-entrypoint.sh", "package.json", "tsconfig.json", "src")
 if (Test-Path ".\package-lock.json") {
     $ArchiveEntries += "package-lock.json"
 }
@@ -60,7 +60,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Step 4: Wait for container to be healthy
 Write-Host "`n[4/4] Waiting for Jarvis to be healthy (20s timeout)..." -ForegroundColor Yellow
-ssh ${User}@${HostIP} "for i in {1..10}; do curl -s http://localhost:8090/health && exit 0 || sleep 2; done; exit 1" | Out-Null
+ssh ${User}@${HostIP} "for i in {1..10}; do docker exec home-assistant-jarvis-1 wget -qO- http://127.0.0.1:8090/health && exit 0 || sleep 2; done; exit 1" | Out-Null
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Jarvis is healthy!" -ForegroundColor Green

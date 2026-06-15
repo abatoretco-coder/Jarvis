@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import type { Env } from '../src/env';
 import { registerIngestRoute } from '../src/routes/ingest';
-import type { AppDeps } from '../src/server';
-import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
+import type { AppDeps } from '../src/server';
 import { planSpotifyActionFromTextWithOpenAi } from '../src/spotify/musicAgentPlanner';
 
 jest.mock('../src/conversation/orchestratorRouter', () => {

@@ -106,7 +106,7 @@ export const SPOTIFY_CLEAR_QUEUE_RESPONSES = [
  * Récupère une réponse aléatoire pour une action Spotify.
  * Utilisé par E2 direct executor.
  */
-export function getSpotifyResponse(action: string, params?: Record<string, any>): string {
+export function getSpotifyResponse(action: string, params?: Record<string, string | undefined>): string {
   const randomize = (arr: string[]): string => {
     return arr.length > 0 ? arr[Math.floor(Math.random() * arr.length)] : 'Action effectuée.';
   };

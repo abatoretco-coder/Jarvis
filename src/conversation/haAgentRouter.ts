@@ -6,13 +6,12 @@
  * and any external consumers that import from `haAgentRouter`.
  */
 
+export type { RouterOptions, RouterResult, RouterTarget } from './orchestratorRouter';
 export {
-  SPOTIFY_AGENT_ID,
   routeUserRequest as routeToHaAgent,
+  SPOTIFY_AGENT_ID,
   synthesizeAgentResponses,
 } from './orchestratorRouter';
-
-export type { RouterOptions, RouterResult, RouterTarget } from './orchestratorRouter';
 
 /**
  * HaAgentEntry — agent entry without the routing `key` label.

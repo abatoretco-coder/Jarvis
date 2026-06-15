@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { detectEffectiveThreadId } from '../src/conversation/conversationWindow';
 import { enrichWithContextNote, getPersistableUserText } from '../src/conversation/contextNote';
+import { detectEffectiveThreadId } from '../src/conversation/conversationWindow';
 
 describe('conversation window helpers', () => {
   it('reuses active thread id when available', () => {

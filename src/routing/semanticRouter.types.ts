@@ -329,7 +329,7 @@ export type ExecuteSemanticRouteInput = {
   /**
    * Contexte d'exécution (env, deps, loggers, etc.).
    */
-  context: any;
+  context: Record<string, unknown>;
 
   /**
    * Logger minimaliste.
@@ -358,10 +358,10 @@ export type ExecuteSemanticRouteOutput = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type MinimalLogger = {
-  debug: (obj: Record<string, any>, msg: string) => void;
-  info: (obj: Record<string, any>, msg: string) => void;
-  warn: (obj: Record<string, any>, msg: string) => void;
-  error: (obj: Record<string, any>, msg: string) => void;
+  debug: (obj: Record<string, unknown>, msg: string) => void;
+  info: (obj: Record<string, unknown>, msg: string) => void;
+  warn: (obj: Record<string, unknown>, msg: string) => void;
+  error: (obj: Record<string, unknown>, msg: string) => void;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,8 @@
  * 3. Snapshot generation and edge cases
  */
 
-import { describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, expect, it } from '@jest/globals';
+
 import {
   isClearlyExternalWeather,
   isClearlyLocalWeather,

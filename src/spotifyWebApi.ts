@@ -1,4 +1,4 @@
-import { mkdir,readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import type { Env } from './env';
@@ -224,7 +224,7 @@ export class SpotifyWebApiClient {
   constructor(env: Env, logger?: SpotifyLogger) {
     this.env = env;
     this.logger = logger;
-    this.tokenFilePath = '/app/data/spotify-token.json';
+    this.tokenFilePath = env.SPOTIFY_WEBAPI_TOKEN_STORE_PATH;
     // Load persisted token on startup (non-blocking)
     this.loadTokenFromDisk().catch(() => {
       // Ignore errors (file may not exist on first run)
@@ -269,8 +269,12 @@ export class SpotifyWebApiClient {
     try {
       const data: PersistedToken = { token, expiresAtMs, ...(refreshToken ? { refreshToken } : {}) };
       const dir = dirname(this.tokenFilePath);
-      await mkdir(dir, { recursive: true });
-      await writeFile(this.tokenFilePath, JSON.stringify(data, null, 2), 'utf-8');
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await writeFile(this.tokenFilePath, JSON.stringify(data, null, 2), {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      await chmod(this.tokenFilePath, 0o600);
     } catch (err) {
       // Log but don't fail (persistence is best-effort)
       this.log('error', 'token_save_failed', { err: String(err) });
@@ -426,10 +430,9 @@ export class SpotifyWebApiClient {
       ),
     });
     
-    // Persist token to disk (non-blocking)
-    this.saveTokenToDisk(parsed.access_token, expiresAtMs, this.getRefreshToken()).catch(() => {
-      // Ignore save errors
-    });
+    // Keep refresh completion and persistence in the same lifecycle. The save
+    // remains best-effort because saveTokenToDisk handles its own errors.
+    await this.saveTokenToDisk(parsed.access_token, expiresAtMs, this.getRefreshToken());
 
     return { ok: true, token: parsed.access_token };
   }

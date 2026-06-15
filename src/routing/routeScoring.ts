@@ -7,9 +7,9 @@
  * Phase 1A: supports shadow-mode evaluation.
  */
 
-import type { SemanticRouteDefinition, ScoredRoute } from './semanticRouter.types';
 import { getEmbeddings } from './embeddingClient';
-import type { EmbeddingClientConfig } from './semanticRouter.types';
+import type { EmbeddingClientConfig,ScoredRoute,SemanticRouteDefinition  } from './semanticRouter.types';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cosine similarity

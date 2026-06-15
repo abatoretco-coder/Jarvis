@@ -7,11 +7,11 @@
  * Phase 1B+: accepted_e2 routes will bypass the LLM router entirely.
  */
 
-import type { SemanticRouterInput, SemanticRouteResult } from './semanticRouter.types';
-import { SEMANTIC_ROUTES } from './semanticRouteCatalog';
 import { getEmbedding } from './embeddingClient';
-import { scoreRoutes } from './routeScoring';
 import { makeRouteDecision } from './routeDecision';
+import { scoreRoutes } from './routeScoring';
+import { SEMANTIC_ROUTES } from './semanticRouteCatalog';
+import type { SemanticRouteResult,SemanticRouterInput } from './semanticRouter.types';
 
 export type { SemanticRouteResult };
 

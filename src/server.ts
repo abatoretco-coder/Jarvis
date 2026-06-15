@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
+import { NasStatusClient } from './nas/NasStatusClient';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
 import { registerDashboardRoute } from './routes/dashboard';
@@ -9,14 +10,17 @@ import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerIngestRoute } from './routes/ingest';
+import { registerNasStatusRoute } from './routes/nasStatus';
 import { registerNewsSummaryRoute } from './routes/newsSummary';
 import { registerOAuthRoutes } from './routes/oauth';
+import { registerSecurityHooks } from './routes/securityHooks';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 
 export type AppDeps = {
   env: Env;
   ha?: HomeAssistantClient;
   spotifyWebApi: SpotifyWebApiClient;
+  nasStatus?: NasStatusClient;
 };
 
 export function buildApp(env: Env): FastifyInstance {
@@ -46,9 +50,10 @@ export function buildApp(env: Env): FastifyInstance {
   });
 
   const spotifyWebApi = new SpotifyWebApiClient(env, app.log);
+  const nasStatus = new NasStatusClient(env);
   spotifyWebApi.startSituationPrefetch();
 
-  const deps: AppDeps = { env, ha, spotifyWebApi };
+  const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus };
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();
@@ -74,6 +79,7 @@ export function buildApp(env: Env): FastifyInstance {
   }
 
   registerHealthRoute(app, deps);
+  registerSecurityHooks(app);
   registerApiKeyHook(app, env);
 
   registerCapabilitiesRoute(app, deps);
@@ -81,6 +87,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);
   registerNewsSummaryRoute(app, deps);
+  registerNasStatusRoute(app, deps);
   registerOAuthRoutes(app, deps);
 
   registerIngestRoute(app, deps);

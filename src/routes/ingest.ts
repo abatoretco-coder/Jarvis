@@ -4,8 +4,8 @@ import { Readable } from 'node:stream';
 
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { Env } from '../env';
 
+import { callCalendarAgent, isCalendarAgentKey } from '../calendar/calendarAgent';
 import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
@@ -30,13 +30,15 @@ import {
   extractMailStateFromReply,
   formatVoiceResponse,
   isLastMailSummaryRequest,
+  isLikelyTruncatedVoiceUtterance,
   isVoiceRequest,
   resolveVoiceResponseMode,
+  sanitizeResponseAttribution,
   type VoiceResponseDomain,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
+import type { Env } from '../env';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
-import { callCalendarAgent, isCalendarAgentKey } from '../calendar/calendarAgent';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -67,10 +69,12 @@ import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
 import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
 
+const threadIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+
 const ingestSchema = z.object({
-  threadId: z.string().min(1),
-  text: z.string().min(1),
-  contextNote: z.string().optional(),
+  threadId: threadIdSchema,
+  text: z.string().min(1).max(32_000),
+  contextNote: z.string().max(8_000).optional(),
   clientContext: z.record(z.unknown()).optional(),
   correlation_id: z.string().optional(),
   user_id: z.string().optional(),
@@ -94,12 +98,12 @@ const historyQuerySchema = z.object({
 });
 
 const sttParamsSchema = z.object({
-  engineId: z.string().min(1),
+  engineId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u),
 });
 
 const ttsRequestSchema = z.object({
-  text: z.string().min(1),
-  language: z.string().min(1).optional(),
+  text: z.string().min(1).max(5_000),
+  language: z.string().min(1).max(32).optional(),
   provider: z.enum(['auto', 'ha', 'openai']).optional(),
 });
 
@@ -222,14 +226,6 @@ function normalizeClientChannel(value: unknown): string | undefined {
   if (!normalized) return undefined;
   if (!/^[a-z0-9._-]{2,64}$/.test(normalized)) return undefined;
   return normalized;
-}
-
-function isLikelyTruncatedVoiceUtterance(text: string): boolean {
-  const t = text.trim();
-  if (!t) return true;
-  if (t.length <= 8) return true;
-  if (t.endsWith('...') || t.endsWith('..')) return true;
-  return /^[A-Za-zÀ-ÿ]{1,8}[.]$/.test(t);
 }
 
 function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string {
@@ -476,7 +472,7 @@ function sanitizeSearchAgentContent(raw: string): string {
     .map((line) => line.trim())
     .filter(Boolean)
     .filter((line) => {
-      if (/^(sources?|references?|références?)\s*[:\-]/iu.test(line)) return false;
+      if (/^(sources?|references?|références?)\s*[:-]/iu.test(line)) return false;
       if (/^(?:[-*]\s*)?https?:\/\/\S+$/iu.test(line)) return false;
       return true;
     });
@@ -594,13 +590,21 @@ function getIngestAckText(keys: (string | undefined)[]): string | null {
   return cfg.responses.default;
 }
 
-function normalizeRoutingText(text: string): string {
-  return text
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
+function getContextualFallbackAck(text: string): string {
+  const normalized = text.toLocaleLowerCase('fr-FR');
+  if (/\b(mail|email|courriel|boite de reception)\b/u.test(normalized)) {
+    return 'Je consulte tes emails, un instant.';
+  }
+  if (/\b(nas|serveur|stockage|disque|temperature|memoire|ram|cpu)\b/u.test(normalized)) {
+    return 'Je verifie le serveur, un instant.';
+  }
+  if (/\b(recherche|cherche|actualite|actualité|information|compare|analyse)\b/u.test(normalized)) {
+    return 'Je regarde ca, un instant.';
+  }
+  if (/\b(pourquoi|explique|reflechis|réfléchis|raisonne)\b/u.test(normalized)) {
+    return 'Je reflechis, laisse-moi un instant.';
+  }
+  return 'Je regarde, un instant.';
 }
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
@@ -635,6 +639,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   void runRetentionCleanup();
   const retentionTimer = setInterval(() => { void runRetentionCleanup(); }, CLEANUP_INTERVAL_MS);
   retentionTimer.unref();
+  app.addHook('onClose', async () => {
+    clearInterval(retentionTimer);
+    db.close();
+  });
 
   const summarizationService = new SummarizationService(threadRepository, messageRepository, {
     hotWindowK: deps.env.LIMIT_K,
@@ -653,6 +661,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     minIntervalMs: deps.env.HA_CONVERSATION_MIN_INTERVAL_MS,
     retryCount: deps.env.HA_CONVERSATION_RETRY_COUNT,
     retryDelayMs: deps.env.HA_CONVERSATION_RETRY_DELAY_MS,
+    onFirstInteractionPersisted: (threadId, userText, assistantText) => {
+      summarizationService.startTitleGeneration(threadId, userText, assistantText);
+    },
   });
 
   const semanticEmbeddingCfg: EmbeddingClientConfig = {
@@ -940,13 +951,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const threadId = parsed.data.threadId.trim();
-    let text = toSingleParagraphPlainText(parsed.data.text ?? '');
+    const text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
     const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
-    let assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
+    const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
@@ -1043,7 +1054,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           text: refreshedMailText,
           domain: 'mail',
           mode: voiceMode,
-          gracefulFallback: false,
         });
 
         await conversationService.persistMessages(effectiveThreadId, text, refreshedVoice);
@@ -1107,8 +1117,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         .header('X-Accel-Buffering', 'no')
         .send(sseStream);
     }
-    const pushSseAck      = (text: string): void => { sseStream?.push(`event: ack\ndata: ${JSON.stringify({ text })}\n\n`); };
-    const pushSseResponse = (data: unknown): void => { sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`); sseStream?.push(null); };
+    let sseAckSent = false;
+    let sseSettled = false;
+    const pushSseAck = (text: string): void => {
+      if (sseAckSent || sseSettled || sseStream === null) return;
+      sseAckSent = true;
+      sseStream.push(`event: ack\ndata: ${JSON.stringify({ text })}\n\n`);
+    };
+    const fallbackAckTimer = sseStream === null
+      ? undefined
+      : setTimeout(() => pushSseAck(getContextualFallbackAck(assistantInputText)), 650);
+    fallbackAckTimer?.unref();
+    const pushSseResponse = (data: unknown): void => {
+      sseSettled = true;
+      if (fallbackAckTimer) clearTimeout(fallbackAckTimer);
+      sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`);
+      sseStream?.push(null);
+    };
 
     // ── Parallel initialization (performance optimization) ────────────────────
     // These 3 operations have no dependencies and can run concurrently
@@ -1938,8 +1963,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // ── Resolve targets ───────────────────────────────────────────────────────
 
     if (routerResult.status === 'fulfilled') {
-      const agentEntryById = new Map(allAgentEntries.map((entry) => [entry.agentId, entry]));
-      let validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
+      const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
       const externalWeatherCandidate = isClearlyExternalWeather(assistantInputText) && !isLikelyLocalWeatherQuery(assistantInputText);
 
       app.log.info(
@@ -2084,8 +2108,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const isMailAgent     = isMailAgentKey(agentEntry?.key);
           const isCalendarAgent = isCalendarAgentKey(agentEntry?.key);
           const isWeatherAgent = agentEntry?.key === 'weather';
-          const isExecutorsAgent = agentEntry?.key === 'executors' || haTarget.agentId === executorsEntry?.agentId;
-
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
             const searchAgentKey = externalWeatherCandidate && agentEntry?.key === 'search.news'
@@ -2261,7 +2283,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   text: spotifyRes.tts,
                   domain: 'spotify',
                   mode: voiceMode,
-                  gracefulFallback,
                 })
               : spotifyRes.tts;
             void conversationService.persistMessages(effectiveThreadId, text, spotifyVoiceText).then(async () => {
@@ -2348,14 +2369,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
+    const assistantTextForClient = sanitizeResponseAttribution(assistantText, responseDomain);
     const assistantTextVoice = voiceEnabled
       ? formatVoiceResponse({
-          text: assistantText,
+          text: assistantTextForClient,
           domain: responseDomain,
           mode: voiceMode,
-          gracefulFallback,
         })
-      : assistantText;
+      : assistantTextForClient;
 
     if (responseDomain === 'mail') {
       const parsedMail = extractMailStateFromReply(assistantText);
@@ -2959,7 +2980,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
   app.get('/v1/threads/:threadId/history', async (req, reply) => {
-    const params = z.object({ threadId: z.string().min(1) }).safeParse(req.params);
+    const params = z.object({ threadId: threadIdSchema }).safeParse(req.params);
     if (!params.success) {
       return reply.code(400).send({ error: 'invalid_thread_id' });
     }
@@ -2972,7 +2993,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const threadId = params.data.threadId.trim();
     const limit = parsedQuery.data.limit ?? 200;
 
-    const thread = await threadRepository.getOrCreate(threadId);
+    const thread = await threadRepository.findById(threadId);
+    if (!thread) {
+      return reply.code(404).send({ error: 'thread_not_found' });
+    }
     const recent = await messageRepository.getRecentMessages(threadId, limit);
 
     return reply.code(200).send({
@@ -2990,7 +3014,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
   app.delete('/v1/threads/:threadId', async (req, reply) => {
-    const params = z.object({ threadId: z.string().min(1) }).safeParse(req.params);
+    const params = z.object({ threadId: threadIdSchema }).safeParse(req.params);
     if (!params.success) {
       return reply.code(400).send({ error: 'invalid_thread_id' });
     }
@@ -2998,13 +3022,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const threadId = params.data.threadId.trim();
 
     try {
-      // Delete from database (CASCADE will delete messages too)
-      const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
-      const result = db.prepare('DELETE FROM conversation_threads WHERE thread_id = ?').run(threadId);
+      const deleted = await threadRepository.deleteThread(threadId);
 
       return reply.code(200).send({
         threadId,
-        deleted: result.changes > 0,
+        deleted,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown_error';

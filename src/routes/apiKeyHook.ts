@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 import type { FastifyInstance } from 'fastify';
 
 import type { Env } from '../env';
@@ -9,7 +11,7 @@ function isProtectedV1Route(url?: string): boolean {
 
 function isOAuthRoute(url?: string): boolean {
   if (!url) return false;
-  return url === '/v1/oauth' || url.startsWith('/v1/oauth/');
+  return url === '/v1/oauth/google/callback' || url.startsWith('/v1/oauth/google/callback?');
 }
 
 function isIngestRoute(url?: string): boolean {
@@ -59,13 +61,19 @@ function normalizeIp(value: string | undefined): string {
   return trimmed;
 }
 
-function readClientIp(req: { ip: string; headers: Record<string, string | string[] | undefined> }): string {
-  const xff = normalizeHeaderValue(req.headers['x-forwarded-for']);
-  if (xff) {
-    const first = xff.split(',')[0]?.trim();
-    if (first) return normalizeIp(first);
-  }
+function readClientIp(req: { ip: string }): string {
   return normalizeIp(req.ip);
+}
+
+function safeTokenEquals(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function hasAllowedToken(allowed: Set<string>, provided: string | undefined): boolean {
+  if (!provided) return false;
+  return [...allowed].some((candidate) => safeTokenEquals(candidate, provided));
 }
 
 function allowedIngressIps(env: Env): Set<string> {
@@ -83,7 +91,7 @@ export function registerApiKeyHook(app: FastifyInstance, env: Env): void {
     if (isIngestRoute(req.url)) {
       const allowlist = allowedIngressIps(env);
       if (allowlist.size > 0) {
-        const clientIp = readClientIp(req as unknown as { ip: string; headers: Record<string, string | string[] | undefined> });
+        const clientIp = readClientIp(req);
         if (!allowlist.has(clientIp)) {
           return reply.code(403).send({
             error: 'forbidden_ip',
@@ -103,8 +111,8 @@ export function registerApiKeyHook(app: FastifyInstance, env: Env): void {
     const providedBearer = parseAuthorizationBearer(normalizeHeaderValue(req.headers.authorization));
 
     const isAuthorized = Boolean(
-      (providedApiKey && allowed.has(providedApiKey))
-      || (providedBearer && allowed.has(providedBearer))
+      hasAllowedToken(allowed, providedApiKey)
+      || hasAllowedToken(allowed, providedBearer)
     );
 
     if (!isAuthorized) {

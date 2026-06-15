@@ -315,7 +315,6 @@ async function buildAgendaFromGoogle(
   const limited = active.slice(0, 6);
 
   const lines = limited.map((ev) => {
-    const isAllDay = !ev.start?.dateTime;
     const start = resolveEventStart(ev);
     const title = ev.summary?.trim() || '(sans titre)';
     return `${formatDateForLine(start)} | ${title}`;
@@ -1070,6 +1069,8 @@ function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null 
 }
 
 export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): void {
+  let dashboardCache: { payload: Record<string, unknown>; fetchedAt: number } | undefined;
+  const dashboardCacheTtlMs = 2 * 60 * 1000;
   app.get('/v1/mail/messages', async (req, reply) => {
     try {
       const query = (req.query ?? {}) as { page?: unknown; pageSize?: unknown; accountLabel?: unknown };
@@ -1132,7 +1133,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       const statusMatch = message.match(/^gmail_get_failed:(\d+):/);
       const status = statusMatch ? Number(statusMatch[1]) : 500;
       app.log.warn({ error }, 'dashboard_mail_message_failed');
-      return reply.code(Number.isFinite(status) ? status : 500).send({ error: 'mail_message_failed', details: message });
+      return reply.code(Number.isFinite(status) ? status : 500).send({ error: 'mail_message_failed' });
     }
   });
 
@@ -1328,6 +1329,12 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
   });
 
   app.get('/v1/dashboard', async (_req, reply) => {
+    if (dashboardCache && Date.now() - dashboardCache.fetchedAt < dashboardCacheTtlMs) {
+      return reply.code(200).send({
+        ...dashboardCache.payload,
+        cache: { hit: true, fetchedAt: new Date(dashboardCache.fetchedAt).toISOString() },
+      });
+    }
     const haStatesPromise = deps.ha
       ? deps.ha.getStates()
         .then((data) => Array.isArray(data) ? data as HaState[] : [])
@@ -1360,7 +1367,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     const weather = buildWeatherPayload(haStates);
     const agenda = googleAgenda ?? makeSection('Agenda', 'google-calendar', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
 
-    return reply.code(200).send({
+    const payload = {
       status: 'ok',
       generatedAt: new Date().toISOString(),
       weather,
@@ -1370,6 +1377,11 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         agenda,
         links: LOCAL_LINKS,
       },
+    };
+    dashboardCache = { payload, fetchedAt: Date.now() };
+    return reply.code(200).send({
+      ...payload,
+      cache: { hit: false, fetchedAt: new Date(dashboardCache.fetchedAt).toISOString() },
     });
   });
 }

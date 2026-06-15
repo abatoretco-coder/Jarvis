@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
 
+import type { HaAgentEntry, RouterOptions } from '../src/conversation/haAgentRouter';
 import {
   parseAgentMap,
   routeToHaAgent,
   SPOTIFY_AGENT_ID,
 } from '../src/conversation/haAgentRouter';
-import type { HaAgentEntry, RouterOptions } from '../src/conversation/haAgentRouter';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

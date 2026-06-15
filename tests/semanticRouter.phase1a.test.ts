@@ -7,11 +7,12 @@
  * 3. trySemanticRouter (semanticRouter) — shadow mode, with mocked embedding
  */
 
-import { describe, it, expect, beforeEach, jest } from '@jest/globals';
-import { cosineSimilarity, clearRouteEmbeddingCache } from '../src/routing/routeScoring';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+
+import { clearEmbeddingCache , getEmbedding, getEmbeddings } from '../src/routing/embeddingClient';
 import { makeRouteDecision } from '../src/routing/routeDecision';
-import { clearEmbeddingCache } from '../src/routing/embeddingClient';
 import type { RouteScoringResult } from '../src/routing/routeScoring';
+import { clearRouteEmbeddingCache,cosineSimilarity } from '../src/routing/routeScoring';
 import type { SemanticRouteDefinition } from '../src/routing/semanticRouter.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -195,7 +196,7 @@ jest.mock('../src/routing/embeddingClient', () => ({
   clearEmbeddingCache: jest.fn(),
 }));
 
-import { getEmbedding, getEmbeddings } from '../src/routing/embeddingClient';
+
 import { trySemanticRouter } from '../src/routing/semanticRouter';
 
 const mockedGetEmbedding = getEmbedding as jest.MockedFunction<typeof getEmbedding>;

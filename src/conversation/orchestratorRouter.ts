@@ -10,9 +10,9 @@
  *  - Does NOT transform the user text — routing only.
  */
 
-import type { MessageRecord } from './repositories/MessageRepository';
 import { buildOrchestratorSystemPrompt } from './prompts/orchestratorSystemPrompt';
 import { buildOrchestratorUserPrompt } from './prompts/orchestratorUserTemplate';
+import type { MessageRecord } from './repositories/MessageRepository';
 
 type MinLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
