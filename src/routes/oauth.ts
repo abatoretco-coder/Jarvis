@@ -4,6 +4,7 @@ import { FastifyInstance, FastifyRequest } from 'fastify';
 
 import { GOOGLE_OAUTH_SCOPES, storeGoogleRefreshToken } from '../google/googleCredentialService';
 import { AppDeps } from '../server';
+import { isAuthorizedApiKey } from './apiKeyAuth';
 
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
 const MAX_PENDING_OAUTH_STATES = 64;
@@ -50,20 +51,12 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
   const isAuthorizedSetupRequest = (req: FastifyRequest): boolean => {
     if (deps.env.OAUTH_SETUP_ENABLED === true) return true;
     if (!deps.env.REQUIRE_API_KEY) return false;
-    const configured = new Set([
-      deps.env.API_KEY,
-      ...(deps.env.API_KEYS ? deps.env.API_KEYS.split(',') : []),
-    ].map((value) => value?.trim()).filter((value): value is string => Boolean(value)));
-    const header = req.headers['x-api-key'];
-    const bearer = typeof req.headers.authorization === 'string' && req.headers.authorization.toLowerCase().startsWith('bearer ')
-      ? req.headers.authorization.slice(7).trim()
-      : undefined;
-    const candidate = typeof header === 'string' ? header.trim() : bearer;
-    return Boolean(candidate && configured.has(candidate));
+    return isAuthorizedApiKey(req, deps.env);
   };
 
   app.addHook('preHandler', async (req, reply) => {
     if (!req.url.startsWith('/v1/oauth/')) return;
+    if (req.url === '/v1/oauth/google/callback' || req.url.startsWith('/v1/oauth/google/callback?')) return;
     if (isAuthorizedSetupRequest(req)) return;
     return reply.code(403).send({
       error: 'oauth_setup_disabled',

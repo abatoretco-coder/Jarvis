@@ -40,9 +40,9 @@ const envSchema = z
   API_KEY: optionalNonEmptyString,
   API_KEYS: optionalNonEmptyString,
   INGEST_ALLOWLIST_IPS: optionalNonEmptyString,
-  RATE_LIMIT_WINDOW_MS: numberFromEnv.default(60000),
-  RATE_LIMIT_MAX: numberFromEnv.default(240),
-  RATE_LIMIT_MAX_TRACKED_CLIENTS: numberFromEnv.default(10000),
+  RATE_LIMIT_WINDOW_MS: numberFromEnv.pipe(z.number().min(1000).max(3600000)).default(60000),
+  RATE_LIMIT_MAX: numberFromEnv.pipe(z.number().min(10).max(10000)).default(240),
+  RATE_LIMIT_MAX_TRACKED_CLIENTS: numberFromEnv.pipe(z.number().min(100).max(100000)).default(10000),
 
   // Home Assistant connection (conversation/services)
   HA_BASE_URL: z.string().url().optional(),

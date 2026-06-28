@@ -75,6 +75,7 @@ describe('calendar ingest confirmation', () => {
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
     expect(payload.responseText).toContain('Confirme dans ce fil');
+    expect(payload.responseText).toContain('confirme agenda cal');
     expect(payload.replyMeta).toMatchObject({
       kind: 'calendar',
       routeKey: 'calendar.create_event',
@@ -134,6 +135,9 @@ describe('calendar ingest confirmation', () => {
     });
 
     expect(first.statusCode).toBe(200);
+    const firstPayload = first.json() as { replyMeta?: Record<string, unknown> };
+    const proposalId = String(firstPayload.replyMeta?.proposalId);
+    expect(proposalId).toMatch(/^cal/);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(0);
 
     const second = await app.inject({
@@ -141,7 +145,7 @@ describe('calendar ingest confirmation', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-calendar-confirm',
-        text: 'oui je confirme',
+        text: `confirme agenda ${proposalId}`,
         clientContext: { channel: 'desktop-confirm' },
       },
     });

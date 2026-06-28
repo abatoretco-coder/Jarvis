@@ -44,6 +44,8 @@ export interface GoogleCalendarEvent {
   htmlLink?: string;
 }
 
+export type GoogleConfigState = 'missing_client' | 'missing_refresh_token' | 'ready';
+
 // ─── Token cache (in-memory, per process) ────────────────────────────────────
 //
 // Access tokens are cached until TOKEN_EXPIRY_BUFFER_MS before their expiry.
@@ -148,6 +150,17 @@ export async function calendarApiRequest<T>(
 /** Returns true when the minimum Google OAuth credentials are present. */
 export function hasCalendarConfig(env: Partial<CalendarTokenEnv>): env is CalendarTokenEnv {
   return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && (env.GOOGLE_REFRESH_TOKEN || env.OAUTH_REFRESH_TOKEN_STORE_PATH));
+}
+
+export async function getGoogleCalendarConfigState(env: Partial<CalendarTokenEnv>): Promise<GoogleConfigState> {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return 'missing_client';
+  const credentials = await resolveGoogleCredentials({
+    GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REFRESH_TOKEN: env.GOOGLE_REFRESH_TOKEN,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+  });
+  return credentials ? 'ready' : 'missing_refresh_token';
 }
 
 /**

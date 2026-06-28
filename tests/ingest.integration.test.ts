@@ -109,7 +109,7 @@ function haSpeechResponse(speech: string): Response {
   );
 }
 
-function nonTitleFetchCalls(fetchMock: jest.Mock): unknown[][] {
+function nonTitleFetchCalls(fetchMock: { mock: { calls: unknown[][] } }): unknown[][] {
   return fetchMock.mock.calls.filter(([, init]) => {
     const body = typeof (init as RequestInit | undefined)?.body === 'string'
       ? String((init as RequestInit).body)
@@ -144,7 +144,7 @@ describe('/v1/ingest integration', () => {
     (global as { fetch?: unknown }).fetch = undefined;
   });
 
-  it('HA general fallback reuses active thread id in conversation window', async () => {
+  it('HA general fallback keeps explicit desktop thread id even during conversation window', async () => {
     const calls: Array<{ conversation_id?: string }> = [];
     (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? '{}')) as { conversation_id?: string };
@@ -185,9 +185,9 @@ describe('/v1/ingest integration', () => {
     expect(second.statusCode).toBe(200);
 
     const secondPayload = second.json() as { threadId: string };
-    expect(secondPayload.threadId).toBe('thread-a');
+    expect(secondPayload.threadId).toBe('thread-b');
     expect(calls).toHaveLength(2);
-    expect(calls[1]?.conversation_id).toBe('thread-a');
+    expect(calls[1]?.conversation_id).toBe('thread-b');
   });
 
   it('weather direct: simple local weather question is deterministic without OpenAI call', async () => {
@@ -421,7 +421,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Prévision fallback.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -530,7 +530,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    const fetchMock = jest.fn(async () => (
+    const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Demain a Florence, attends-toi a 27 degres et du soleil.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -583,7 +583,7 @@ describe('/v1/ingest integration', () => {
       confidence: 0.96,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async () => (
+    const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -707,7 +707,7 @@ describe('/v1/ingest integration', () => {
       confidence: 0.95,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async () => (
+    const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -778,7 +778,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'weather', confidence: 0.99 }],
       reason: 'llm_weather_route',
     });
-    const fetchMock = jest.fn(async () => new Response('search_down', { status: 500 }));
+    const fetchMock = jest.fn(async (..._args: unknown[]) => new Response('search_down', { status: 500 }));
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -821,7 +821,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Paris: 20 degres demain.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -879,7 +879,7 @@ describe('/v1/ingest integration', () => {
       confidence: 0.95,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async () => (
+    const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1016,7 +1016,7 @@ describe('/v1/ingest integration', () => {
     });
     expect(second.statusCode).toBe(200);
     const secondPayload = second.json() as { threadId: string };
-    expect(secondPayload.threadId).toBe('thread-semantic-e1-search');
+    expect(secondPayload.threadId).toBe('thread-other-id');
   });
 
   it('semantic E1 live: spotify.search_and_play bypasses LLM router and avoids double planning', async () => {
@@ -1108,7 +1108,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    const fetchMock = jest.fn(async () => (
+    const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1177,7 +1177,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'weather', confidence: 0.99 }],
       reason: 'llm_weather_route',
     });
-    const fetchMock = jest.fn(async () => new Response('search_down', { status: 500 }));
+    const fetchMock = jest.fn(async (..._args: unknown[]) => new Response('search_down', { status: 500 }));
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1290,7 +1290,7 @@ describe('/v1/ingest integration', () => {
     });
     expect(second.statusCode).toBe(200);
     const secondPayload = second.json() as { threadId: string };
-    expect(secondPayload.threadId).toBe('thread-semantic-e1-todo-live');
+    expect(secondPayload.threadId).toBe('thread-other-after-todo');
   });
 
   it('semantic E1 live: mail.list_inbox.unread bypasses LLM router', async () => {
@@ -1414,7 +1414,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1470,7 +1470,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM après erreur mail.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1604,8 +1604,8 @@ describe('/v1/ingest integration', () => {
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { threadId: string; responseText: string };
     expect(payload.threadId).toBe('thread-semantic-e1-todo-add-live');
-    expect(payload.responseText).toContain('tache ajoutee');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
 
     const history = await app.inject({
@@ -1614,7 +1614,7 @@ describe('/v1/ingest integration', () => {
     });
     expect(history.statusCode).toBe(200);
     const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
-    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('tache ajoutee'))).toBe(true);
+    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('modifie des donnees'))).toBe(true);
 
     (global as { fetch: typeof fetch }).fetch = (async () => haSpeechResponse('Réponse HA')) as unknown as typeof fetch;
     mockedTrySemanticRouter.mockResolvedValueOnce({
@@ -1643,7 +1643,7 @@ describe('/v1/ingest integration', () => {
     });
     expect(second.statusCode).toBe(200);
     const secondPayload = second.json() as { threadId: string };
-    expect(secondPayload.threadId).toBe('thread-semantic-e1-todo-add-live');
+    expect(secondPayload.threadId).toBe('thread-after-todo-add');
   });
 
   it('semantic E1 live: todo.complete_task bypasses LLM router', async () => {
@@ -1690,8 +1690,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('marquee comme faite');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -1739,8 +1739,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('mail est marque comme lu');
-    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -1788,8 +1788,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('non lu');
-    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -1816,7 +1816,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1848,7 +1848,7 @@ describe('/v1/ingest integration', () => {
     expect(mockedCallMailAgent).not.toHaveBeenCalled();
   });
 
-  it('semantic E1 todo/mail mutation agent error falls back to LLM router', async () => {
+  it('semantic E1 todo/mail mutation is blocked before agent execution', async () => {
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,
       decision: 'accepted_e1',
@@ -1872,7 +1872,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM après erreur todo.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -1900,7 +1900,10 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
   it('semantic E1 live todo.add_task emits SSE ack before response', async () => {
@@ -1957,7 +1960,7 @@ describe('/v1/ingest integration', () => {
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
     expect(body).toContain('Deux secondes, je regarde tes taches.');
-    expect(body).toContain('tache ajoutee');
+    expect(body).toContain('modifie des donnees');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2005,8 +2008,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('decalee');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2054,8 +2057,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('supprimee');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2103,8 +2106,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('liste est creee');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2152,8 +2155,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('checklist ajoute');
-    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2201,8 +2204,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('marque comme important');
-    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2229,7 +2232,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -2315,7 +2318,7 @@ describe('/v1/ingest integration', () => {
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
     expect(body).toContain('Deux secondes, je consulte tes emails.');
-    expect(body).toContain('marque important');
+    expect(body).toContain('modifie des donnees');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2343,7 +2346,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -2403,7 +2406,7 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async () => (
+    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
         JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
@@ -2488,8 +2491,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('Mail envoye');
-    expect(mockedCallMailAgent).toHaveBeenCalledTimes(1);
+    expect(payload.responseText).toContain('modifie des donnees');
+    expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -2715,9 +2718,9 @@ describe('/v1/ingest integration', () => {
 
     expect(afterSpotify.statusCode).toBe(200);
     const afterSpotifyPayload = afterSpotify.json() as { threadId: string };
-    expect(afterSpotifyPayload.threadId).toBe('thread-spotify-1');
+    expect(afterSpotifyPayload.threadId).toBe('thread-after-spotify');
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.conversation_id).toBe('thread-spotify-1');
+    expect(calls[0]?.conversation_id).toBe('thread-after-spotify');
   });
 
   it('structured spotify remains robust with noisy STT-like text across all music actions', async () => {
@@ -2837,7 +2840,7 @@ describe('/v1/ingest integration', () => {
     });
     const deps = makeDeps(env);
 
-    const playMock = jest.fn(async () => ({ ok: true }));
+    const playMock = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
     deps.spotifyWebApi = {
       isConfigured: () => true,
       scheduleSituationRefresh: jest.fn(),
@@ -2889,7 +2892,7 @@ describe('/v1/ingest integration', () => {
     });
     const deps = makeDeps(env);
 
-    const setVolumeMock = jest.fn(async () => ({ ok: true }));
+    const setVolumeMock = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
     deps.spotifyWebApi = {
       isConfigured: () => true,
       scheduleSituationRefresh: jest.fn(),

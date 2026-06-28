@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 
 import {
+  type CalendarTokenEnv,
   fetchUpcomingEventsMultiCalendarDetailed,
-  hasCalendarConfig,
+  getGoogleCalendarConfigState,
   parseCalendarIds,
   resolveEventEnd,
   resolveEventStart,
@@ -11,6 +12,7 @@ import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import type { AppDeps } from '../server';
+import { getParisStartOfDayUtc } from '../time/parisTime';
 
 type HaState = {
   entity_id: string;
@@ -292,19 +294,26 @@ export async function buildAgendaFromGoogle(
   env: AppDeps['env'],
   now = new Date(),
 ): Promise<DashboardSection> {
-  if (!hasCalendarConfig(env)) {
+  const configState = await getGoogleCalendarConfigState(env);
+  if (configState === 'missing_client') {
     return {
       ...makeSection('Agenda', 'google-calendar', 'Google Calendar n est pas configure sur ce serveur.'),
       status: 'error',
     };
   }
+  if (configState === 'missing_refresh_token') {
+    return {
+      ...makeSection('Agenda', 'google-calendar', 'Connecte Google via OAuth pour activer l agenda.'),
+      status: 'error',
+    };
+  }
 
-  const windowStart = startOfToday(now);
-  const windowEnd = addDays(windowStart, 7);
+  const windowStart = getParisStartOfDayUtc(now);
+  const windowEnd = getParisStartOfDayUtc(now, 7);
   const calendarIds = parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
 
   const result = await fetchUpcomingEventsMultiCalendarDetailed(
-    env,
+    env as CalendarTokenEnv,
     calendarIds,
     windowStart.toISOString(),
     windowEnd.toISOString(),

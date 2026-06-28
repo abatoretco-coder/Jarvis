@@ -10,10 +10,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'Analyse approfondie.'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'Analyse approfondie.'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -36,12 +36,12 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => {
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => {
         throw new Error('search_deep_unavailable');
       }),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     await expect(dispatchAcceptedE1Route({
@@ -66,10 +66,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     };
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => plan),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => plan),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -88,10 +88,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -108,10 +108,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Tu as 3 taches aujourd hui.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Tu as 3 taches aujourd hui.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -133,10 +133,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Listes: Perso, Travail.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Listes: Perso, Travail.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -154,10 +154,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'Tu as 2 mails non lus.'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'Tu as 2 mails non lus.'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -179,10 +179,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => '3 emails trouves.'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => '3 emails trouves.'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -200,10 +200,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Tache ajoutee.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Tache ajoutee.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -225,10 +225,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Tache marquee comme faite.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Tache marquee comme faite.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -246,10 +246,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'Mail marque comme lu.'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'Mail marque comme lu.'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -271,10 +271,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'Mail remis en non lu.'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'Mail remis en non lu.'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -292,10 +292,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Tache mise a jour.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Tache mise a jour.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -313,10 +313,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Tache supprimee.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Tache supprimee.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -334,10 +334,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Liste creee.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Liste creee.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -355,10 +355,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Liste supprimee.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Liste supprimee.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -376,10 +376,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Element ajoute.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Element ajoute.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -397,10 +397,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Element coche.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Element coche.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -418,10 +418,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'Element supprime.'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'Element supprime.'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -439,10 +439,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     expect(route).toBeDefined();
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'Mail marque important.'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'Mail marque important.'),
     };
 
     const result = await dispatchAcceptedE1Route({
@@ -466,10 +466,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     };
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const todoResult = await dispatchAcceptedE1Route({
@@ -492,10 +492,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     };
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const mailResult = await dispatchAcceptedE1Route({
@@ -518,10 +518,10 @@ describe('dispatchAcceptedE1Route (live-safe subset)', () => {
     } as unknown as SemanticRouteDefinition;
 
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'none', reason: 'unused' })),
-      callSearchAgent: jest.fn(async () => 'unused'),
-      callTodoAgent: jest.fn(async () => 'unused'),
-      callMailAgent: jest.fn(async () => 'unused'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'none', reason: 'unused' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'unused'),
     };
 
     const result = await dispatchAcceptedE1Route({

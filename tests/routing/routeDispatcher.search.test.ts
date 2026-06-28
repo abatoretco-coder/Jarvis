@@ -26,7 +26,7 @@ const baseSearchParams = {
 
 describe('dispatchAcceptedSearchE2Route', () => {
   it('search.news.external_weather -> calls callSearchAgent(search.news)', async () => {
-    const callSearchAgent = jest.fn(async () => 'Météo externe.');
+    const callSearchAgent = jest.fn(async (..._args: unknown[]) => 'Météo externe.');
     const result = await dispatchAcceptedSearchE2Route({
       route: makeRoute('search.news.external_weather', 'search.news', 'external_weather'),
       text: 'Météo à Paris demain',
@@ -42,7 +42,7 @@ describe('dispatchAcceptedSearchE2Route', () => {
   });
 
   it('search.news.current_news -> calls callSearchAgent(search.news)', async () => {
-    const callSearchAgent = jest.fn(async () => 'Actus du jour.');
+    const callSearchAgent = jest.fn(async (..._args: unknown[]) => 'Actus du jour.');
     const result = await dispatchAcceptedSearchE2Route({
       route: makeRoute('search.news.current_news', 'search.news', 'current_news'),
       text: 'Quelles sont les actus ?',
@@ -58,7 +58,7 @@ describe('dispatchAcceptedSearchE2Route', () => {
   });
 
   it('search.web.definition -> calls callSearchAgent(search.web)', async () => {
-    const callSearchAgent = jest.fn(async () => 'Définition.');
+    const callSearchAgent = jest.fn(async (..._args: unknown[]) => 'Définition.');
     const result = await dispatchAcceptedSearchE2Route({
       route: makeRoute('search.web.definition', 'search.web', 'definition'),
       text: "C'est quoi une ZTL ?",
@@ -74,7 +74,7 @@ describe('dispatchAcceptedSearchE2Route', () => {
   });
 
   it('returns null when search agent throws', async () => {
-    const callSearchAgent = jest.fn(async () => {
+    const callSearchAgent = jest.fn(async (..._args: unknown[]) => {
       throw new Error('search_unavailable');
     });
     const result = await dispatchAcceptedSearchE2Route({

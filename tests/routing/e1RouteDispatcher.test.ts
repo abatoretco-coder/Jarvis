@@ -6,10 +6,10 @@ import { findRouteByKey } from '../../src/routing/semanticRouteCatalog';
 describe('dispatchAcceptedE1Route', () => {
   it('spotify.search_and_play uses Spotify planner', async () => {
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
-      callSearchAgent: jest.fn(async () => 'search'),
-      callTodoAgent: jest.fn(async () => 'todo'),
-      callMailAgent: jest.fn(async () => 'mail'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'search'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'todo'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'mail'),
     };
     const route = findRouteByKey('spotify.search_and_play');
     expect(route).toBeDefined();
@@ -27,10 +27,10 @@ describe('dispatchAcceptedE1Route', () => {
 
   it('search.deep.analysis uses search.deep agent', async () => {
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
-      callSearchAgent: jest.fn(async () => 'analyse'),
-      callTodoAgent: jest.fn(async () => 'todo'),
-      callMailAgent: jest.fn(async () => 'mail'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'analyse'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'todo'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'mail'),
     };
     const route = findRouteByKey('search.deep.analysis');
     expect(route).toBeDefined();
@@ -47,10 +47,10 @@ describe('dispatchAcceptedE1Route', () => {
 
   it('todo.add_task uses Todo agent', async () => {
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
-      callSearchAgent: jest.fn(async () => 'analyse'),
-      callTodoAgent: jest.fn(async () => 'todo_ok'),
-      callMailAgent: jest.fn(async () => 'mail'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'analyse'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'todo_ok'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'mail'),
     };
     const route = findRouteByKey('todo.add_task');
     expect(route).toBeDefined();
@@ -67,10 +67,10 @@ describe('dispatchAcceptedE1Route', () => {
 
   it('mail.search_emails uses Mail agent', async () => {
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
-      callSearchAgent: jest.fn(async () => 'analyse'),
-      callTodoAgent: jest.fn(async () => 'todo_ok'),
-      callMailAgent: jest.fn(async () => 'mail_ok'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'analyse'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'todo_ok'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'mail_ok'),
     };
     const route = findRouteByKey('mail.search_emails');
     expect(route).toBeDefined();
@@ -87,11 +87,11 @@ describe('dispatchAcceptedE1Route', () => {
 
   it('calendar.create_event uses Calendar agent', async () => {
     const deps = {
-      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
-      callSearchAgent: jest.fn(async () => 'analyse'),
-      callTodoAgent: jest.fn(async () => 'todo_ok'),
-      callMailAgent: jest.fn(async () => 'mail_ok'),
-      callCalendarAgent: jest.fn(async () => 'calendar_ok'),
+      planSpotifyAction: jest.fn(async (..._args: unknown[]) => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async (..._args: unknown[]) => 'analyse'),
+      callTodoAgent: jest.fn(async (..._args: unknown[]) => 'todo_ok'),
+      callMailAgent: jest.fn(async (..._args: unknown[]) => 'mail_ok'),
+      callCalendarAgent: jest.fn(async (..._args: unknown[]) => 'calendar_ok'),
     };
     const route = findRouteByKey('calendar.create_event');
     expect(route).toBeDefined();

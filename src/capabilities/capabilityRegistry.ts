@@ -51,10 +51,20 @@ const coreCapabilities: CapabilityDefinition[] = [
   define({ agent: 'mail', action: 'reply_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.reply_email' }),
   define({ agent: 'mail', action: 'forward_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.forward_email' }),
   define({ agent: 'mail', action: 'trash_email', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.trash_email' }),
-  define({ agent: 'todo', action: 'create', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.add_task' }),
-  define({ agent: 'todo', action: 'update', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo' }),
-  define({ agent: 'todo', action: 'delete', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo' }),
-  define({ agent: 'todo', action: 'complete', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo' }),
+  define({ agent: 'mail', action: 'mark_read', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.mark_read' }),
+  define({ agent: 'mail', action: 'mark_unread', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.mark_unread' }),
+  define({ agent: 'mail', action: 'flag_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.flag_email' }),
+  define({ agent: 'todo', action: 'list_tasks', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.list_tasks' }),
+  define({ agent: 'todo', action: 'list_lists', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.list_lists' }),
+  define({ agent: 'todo', action: 'add_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.add_task' }),
+  define({ agent: 'todo', action: 'complete_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.complete_task' }),
+  define({ agent: 'todo', action: 'delete_task', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_task' }),
+  define({ agent: 'todo', action: 'update_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.update_task' }),
+  define({ agent: 'todo', action: 'create_list', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.create_list' }),
+  define({ agent: 'todo', action: 'delete_list', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_list' }),
+  define({ agent: 'todo', action: 'add_checklist_item', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.add_checklist_item' }),
+  define({ agent: 'todo', action: 'complete_checklist_item', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.complete_checklist_item' }),
+  define({ agent: 'todo', action: 'delete_checklist_item', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_checklist_item' }),
   define({ agent: 'weather', action: 'current', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'weather', routeKey: 'weather.current_temperature' }),
   define({ agent: 'search', action: 'query', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'search' }),
   define({ agent: 'executor', action: 'timer', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'executor', routeKey: 'executor.timer' }),
@@ -72,5 +82,5 @@ export function findCapability(agent: CapabilityAgent, action: string): Capabili
 }
 
 export function requiresCapabilityConfirmation(capability: CapabilityDefinition): boolean {
-  return capability.requiresConfirmation || writeOrDestructive(capability.effect);
+  return capability.requiresConfirmation;
 }

@@ -152,7 +152,7 @@ describe('music routing business tests', () => {
       reason: 'router_direct_play',
     });
 
-    const play = jest.fn(async () => ({ ok: true }));
+    const play = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
 
     const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
       OPENAI_API_KEY: 'test-openai-key',
@@ -219,7 +219,7 @@ describe('music routing business tests', () => {
       },
     });
 
-    const play = jest.fn(async () => ({ ok: true }));
+    const play = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
 
     const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
       OPENAI_API_KEY: 'test-openai-key',

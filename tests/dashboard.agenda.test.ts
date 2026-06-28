@@ -33,6 +33,20 @@ describe('dashboard Google agenda', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('reports missing OAuth refresh token before calling Google Calendar', async () => {
+    const fetchMock = jest.fn();
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const section = await buildAgendaFromGoogle(env({
+      GOOGLE_REFRESH_TOKEN: undefined,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: '/tmp/jarvis-missing-google-token.json',
+    }));
+
+    expect(section.status).toBe('error');
+    expect(section.summary).toContain('Connecte Google via OAuth');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('returns partial status when one configured calendar fails', async () => {
     const fetchMock = jest.fn(async (url: string) => {
       const rawUrl = String(url);

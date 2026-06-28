@@ -16,10 +16,11 @@ import { z } from 'zod';
 import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
   calendarApiRequest,
+  type CalendarTokenEnv,
   fetchUpcomingEventsMultiCalendar,
   formatEventDate,
+  getGoogleCalendarConfigState,
   type GoogleCalendarEvent,
-  hasCalendarConfig,
   parseCalendarIds,
   refreshCalendarToken,
   resolveEventEnd,
@@ -261,7 +262,8 @@ export async function planCalendarAgentAction(
   text: string,
   env: CalendarAgentEnv,
 ): Promise<CalendarAction> {
-  if (!hasCalendarConfig(env)) {
+  const configState = await getGoogleCalendarConfigState(env);
+  if (configState !== 'ready') {
     throw new Error('calendar_credentials_missing');
   }
   if (!env.OPENAI_API_KEY?.trim()) {
@@ -323,9 +325,10 @@ async function executeCalendarAction(
   plan: CalendarAction,
   env: CalendarAgentEnv,
 ): Promise<string> {
-  if (!hasCalendarConfig(env)) {
-    return 'Le calendrier Google n\'est pas configuré sur ce serveur.';
-  }
+  const configState = await getGoogleCalendarConfigState(env);
+  if (configState === 'missing_client') return 'Le calendrier Google n\'est pas configuré sur ce serveur.';
+  if (configState === 'missing_refresh_token') return 'Connecte Google via OAuth pour activer le calendrier.';
+  const tokenEnv = env as CalendarTokenEnv;
 
   switch (plan.action) {
     case 'list_upcoming': {
@@ -334,7 +337,7 @@ async function executeCalendarAction(
         : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
 
       const events = await fetchUpcomingEventsMultiCalendar(
-        env,
+        tokenEnv,
         calendarIds,
         plan.timeMin,
         plan.timeMax,
@@ -351,7 +354,7 @@ async function executeCalendarAction(
     }
 
     case 'search_events': {
-      const token = await refreshCalendarToken(env);
+      const token = await refreshCalendarToken(tokenEnv);
       const calendarIds = plan.calendarId
         ? [plan.calendarId]
         : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
@@ -395,7 +398,7 @@ async function executeCalendarAction(
     }
 
     case 'create_event': {
-      const token = await refreshCalendarToken(env);
+      const token = await refreshCalendarToken(tokenEnv);
       const calendarId = resolveCreateCalendarId(plan, env);
 
       const eventBody: Record<string, unknown> = {
@@ -449,9 +452,11 @@ export async function callCalendarAgent(
   log: MinLogger,
   options: { mode?: CalendarAgentMode } = {},
 ): Promise<string> {
-  if (!hasCalendarConfig(env)) {
+  const configState = await getGoogleCalendarConfigState(env);
+  if (configState === 'missing_client') {
     return 'Le calendrier Google n\'est pas configuré. Connecte Google via OAuth ou ajoute les identifiants Google côté serveur.';
   }
+  if (configState === 'missing_refresh_token') return 'Connecte Google via OAuth pour activer le calendrier.';
 
   if (!env.OPENAI_API_KEY?.trim()) {
     throw new Error('calendar_agent_openai_key_missing');

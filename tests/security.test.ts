@@ -1,4 +1,4 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, jest, test } from '@jest/globals';
 import Fastify from 'fastify';
 
 import { loadEnv } from '../src/env';
@@ -59,10 +59,41 @@ describe('security hooks', () => {
     const callbackWithInvalidState = await app.inject({
       method: 'GET',
       url: '/v1/oauth/google/callback?code=fake&state=invalid',
-      headers: { 'x-api-key': 'test-api-key' },
     });
     expect(callbackWithInvalidState.statusCode).toBe(403);
 
+    await app.close();
+  });
+
+  test('OAuth callback consumes a valid state without requiring an API key on Google redirect', async () => {
+    const env = makeEnv();
+    const app = Fastify();
+    registerSecurityHooks(app, env);
+    registerApiKeyHook(app, env);
+    registerOAuthRoutes(app, makeDeps(env));
+    const fetchMock = jest.fn(async () => new Response(JSON.stringify({ access_token: 'access-token' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const authorized = await app.inject({
+      method: 'GET',
+      url: '/v1/oauth/google/authorize',
+      headers: { 'x-api-key': 'test-api-key' },
+    });
+    const authorizationUrl = new URL(authorized.json().authorization_url as string);
+    const state = authorizationUrl.searchParams.get('state');
+
+    const callback = await app.inject({
+      method: 'GET',
+      url: `/v1/oauth/google/callback?code=fake&state=${state}`,
+    });
+
+    expect(callback.statusCode).toBe(401);
+    expect(callback.json()).toMatchObject({ error: 'no_refresh_token' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    (global as { fetch?: unknown }).fetch = undefined;
     await app.close();
   });
 
@@ -103,20 +134,23 @@ describe('security hooks', () => {
   test('rate limit uses env settings for v1 routes', async () => {
     const env = makeEnv({
       RATE_LIMIT_WINDOW_MS: '60000',
-      RATE_LIMIT_MAX: '1',
-      RATE_LIMIT_MAX_TRACKED_CLIENTS: '10',
+      RATE_LIMIT_MAX: '10',
+      RATE_LIMIT_MAX_TRACKED_CLIENTS: '100',
       REQUIRE_API_KEY: 'false',
     });
     const app = Fastify();
     registerSecurityHooks(app, env);
     app.get('/v1/ping', async () => ({ ok: true }));
 
-    const first = await app.inject({ method: 'GET', url: '/v1/ping' });
-    const second = await app.inject({ method: 'GET', url: '/v1/ping' });
+    const responses = [];
+    for (let index = 0; index < 11; index += 1) {
+      responses.push(await app.inject({ method: 'GET', url: '/v1/ping' }));
+    }
 
-    expect(first.statusCode).toBe(200);
-    expect(second.statusCode).toBe(429);
-    expect(second.json()).toEqual({ error: 'rate_limited' });
+    expect(responses[0]?.statusCode).toBe(200);
+    expect(responses[9]?.statusCode).toBe(200);
+    expect(responses[10]?.statusCode).toBe(429);
+    expect(responses[10]?.json()).toEqual({ error: 'rate_limited' });
     await app.close();
   });
 });

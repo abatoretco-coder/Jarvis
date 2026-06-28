@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "test": "jest --runInBand",
     "lint": "eslint . --max-warnings=0",
+    "typecheck:test": "tsc -p tsconfig.test.json",
     "check:capabilities": "tsx scripts/check-capabilities.ts",
     "oauth:helper": "tsx scripts/oauth-helper.ts",
     "oauth:microsoft:url": "tsx scripts/oauth-helper.ts microsoft:url",
@@ -21,7 +22,7 @@
     "eval:routing": "tsx scripts/evaluate-semantic-router.ts",
     "verify:music-routing": "tsx scripts/verify-music-routing.ts",
     "archive:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/archive-prod-snapshot.ps1",
-    "verify": "npm run lint && npm run build && npm test && npm run check:capabilities",
+    "verify": "npm run lint && npm run build && npm run typecheck:test && npm test && npm run check:capabilities",
     "format": "prettier . --check",
     "format:write": "prettier . --write"
   },
