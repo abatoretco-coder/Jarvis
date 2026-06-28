@@ -1,12 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 
 import {
-  fetchUpcomingEventsMultiCalendar,
+  fetchUpcomingEventsMultiCalendarDetailed,
   hasCalendarConfig,
   parseCalendarIds,
   resolveEventEnd,
   resolveEventStart,
 } from '../calendar/googleCalendarClient';
+import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import type { AppDeps } from '../server';
@@ -22,7 +23,7 @@ type DashboardSection = {
   summary: string;
   lines: string[];
   source: string;
-  status: 'ok' | 'empty' | 'error';
+  status: 'ok' | 'empty' | 'partial' | 'error';
   items?: TodoTaskItem[] | DashboardMailItem[] | AgendaEventItem[];
 };
 
@@ -286,19 +287,23 @@ function startOfToday(base: Date): Date {
 
 /**
  * Build the agenda section by reading events directly from Google Calendar API.
- * Returns null when Google Calendar is not configured (caller falls back to HA states).
  */
-async function buildAgendaFromGoogle(
+export async function buildAgendaFromGoogle(
   env: AppDeps['env'],
   now = new Date(),
-): Promise<DashboardSection | null> {
-  if (!hasCalendarConfig(env)) return null;
+): Promise<DashboardSection> {
+  if (!hasCalendarConfig(env)) {
+    return {
+      ...makeSection('Agenda', 'google-calendar', 'Google Calendar n est pas configure sur ce serveur.'),
+      status: 'error',
+    };
+  }
 
   const windowStart = startOfToday(now);
   const windowEnd = addDays(windowStart, 7);
   const calendarIds = parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
 
-  const events = await fetchUpcomingEventsMultiCalendar(
+  const result = await fetchUpcomingEventsMultiCalendarDetailed(
     env,
     calendarIds,
     windowStart.toISOString(),
@@ -306,10 +311,24 @@ async function buildAgendaFromGoogle(
     50,
   );
 
+  const events = result.events;
   const active = events.filter((ev) => ev.status !== 'cancelled');
+  const failedCount = result.failedCalendarIds.length;
+
+  if (failedCount === calendarIds.length && active.length === 0) {
+    return {
+      ...makeSection('Agenda', 'google-calendar', 'Je n ai pas pu lire Google Calendar pour le moment.'),
+      status: 'error',
+    };
+  }
 
   if (active.length === 0) {
-    return makeSection('Agenda', 'google-calendar', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
+    return {
+      ...makeSection('Agenda', 'google-calendar', failedCount > 0
+        ? `Aucun evenement trouve sur les agendas disponibles, mais ${failedCount} calendrier${failedCount > 1 ? 's' : ''} n ont pas repondu.`
+        : 'Rien a signaler dans l agenda pour les 7 prochains jours.'),
+      status: failedCount > 0 ? 'partial' : 'empty',
+    };
   }
 
   const limited = active.slice(0, 6);
@@ -341,9 +360,9 @@ async function buildAgendaFromGoogle(
   return {
     title: 'Agenda',
     source: 'google-calendar',
-    summary: `${limited.length} evenement${limited.length > 1 ? 's' : ''} prevu${limited.length > 1 ? 's' : ''} cette semaine.`,
+    summary: `${limited.length} evenement${limited.length > 1 ? 's' : ''} prevu${limited.length > 1 ? 's' : ''} cette semaine${failedCount > 0 ? `, avec ${failedCount} calendrier${failedCount > 1 ? 's' : ''} indisponible${failedCount > 1 ? 's' : ''}` : ''}.`,
     lines,
-    status: 'ok',
+    status: failedCount > 0 ? 'partial' : 'ok',
     items,
   };
 }
@@ -380,14 +399,24 @@ async function refreshMicrosoftAccessToken(env: MicrosoftAccessTokenEnv, scope: 
   return payload.access_token;
 }
 
-async function refreshGoogleAccessToken(account: MailAccount): Promise<string> {
+async function refreshGoogleAccessToken(account: MailAccount, env: AppDeps['env']): Promise<string> {
+  const credentials = await resolveGoogleCredentials({
+    GOOGLE_CLIENT_ID: account.clientId,
+    GOOGLE_CLIENT_SECRET: account.clientSecret,
+    GOOGLE_REFRESH_TOKEN: account.refreshToken,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+  });
+  if (!credentials) {
+    throw new Error('google_credentials_missing');
+  }
+
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: account.clientId,
-      client_secret: account.clientSecret,
-      refresh_token: account.refreshToken,
+      client_id: credentials.clientId,
+      client_secret: credentials.clientSecret,
+      refresh_token: credentials.refreshToken,
       grant_type: 'refresh_token',
     }),
     signal: AbortSignal.timeout(8_000),
@@ -865,8 +894,8 @@ function collectMessageBodies(part: GmailMessageBodyPart | undefined): { plain: 
   return { plain, html };
 }
 
-async function fetchMailMessageText(account: MailAccount, messageId: string): Promise<{ text: string; snippet?: string }> {
-  const token = await refreshGoogleAccessToken(account);
+async function fetchMailMessageText(account: MailAccount, env: AppDeps['env'], messageId: string): Promise<{ text: string; snippet?: string }> {
+  const token = await refreshGoogleAccessToken(account, env);
   const full = await gmailGet<GmailFullMessage>(`/messages/${encodeURIComponent(messageId)}?format=full`, token);
   const bodies = collectMessageBodies(full.payload);
   const plainText = cleanMailDetailText(bodies.plain.join('\n\n').trim());
@@ -885,6 +914,7 @@ async function fetchMailMessageText(account: MailAccount, messageId: string): Pr
 async function fetchMailMessageTextFromAnyAccount(
   accounts: MailAccount[],
   preferredAccount: MailAccount | null,
+  env: AppDeps['env'],
   messageId: string,
 ): Promise<{ account: MailAccount; payload: { text: string; snippet?: string } }> {
   if (accounts.length === 0) {
@@ -898,7 +928,7 @@ async function fetchMailMessageTextFromAnyAccount(
   let lastError: unknown = null;
   for (const account of orderedAccounts) {
     try {
-      const payload = await fetchMailMessageText(account, messageId);
+      const payload = await fetchMailMessageText(account, env, messageId);
       return { account, payload };
     } catch (error) {
       lastError = error;
@@ -908,17 +938,18 @@ async function fetchMailMessageTextFromAnyAccount(
   throw lastError instanceof Error ? lastError : new Error('mail_message_failed');
 }
 
-async function fetchMailItemsForAccount(account: MailAccount): Promise<DashboardMailItem[]> {
-  const payload = await fetchMailItemsPageForAccount(account, 0, 40);
+async function fetchMailItemsForAccount(account: MailAccount, env: AppDeps['env']): Promise<DashboardMailItem[]> {
+  const payload = await fetchMailItemsPageForAccount(account, env, 0, 40);
   return payload.items;
 }
 
 async function fetchMailItemsPageForAccount(
   account: MailAccount,
+  env: AppDeps['env'],
   page: number,
   pageSize: number,
 ): Promise<{ items: DashboardMailItem[]; hasMore: boolean }> {
-  const token = await refreshGoogleAccessToken(account);
+  const token = await refreshGoogleAccessToken(account, env);
   const safePage = Math.max(0, Math.floor(page));
   const safePageSize = Math.max(1, Math.min(100, Math.floor(pageSize)));
 
@@ -978,7 +1009,7 @@ async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']
     return makeSection('Mail', 'jarvis-mail', 'La gestion des emails n est pas configuree (identifiants Gmail ou Outlook manquants).');
   }
 
-  const results = await Promise.allSettled(accounts.map((account) => fetchMailItemsForAccount(account)));
+  const results = await Promise.allSettled(accounts.map((account) => fetchMailItemsForAccount(account, env)));
   const availableItems = results
     .filter((result): result is PromiseFulfilledResult<DashboardMailItem[]> => result.status === 'fulfilled')
     .flatMap((result) => result.value)
@@ -1089,7 +1120,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
 
       const safePage = Number.isFinite(page) ? Math.max(0, Math.floor(page)) : 0;
       const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.min(100, Math.floor(pageSize))) : 40;
-      const payload = await fetchMailItemsPageForAccount(account, safePage, safePageSize);
+      const payload = await fetchMailItemsPageForAccount(account, deps.env, safePage, safePageSize);
       return reply.code(200).send({
         page: safePage,
         pageSize: safePageSize,
@@ -1121,7 +1152,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
         : accounts[0];
 
-      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, messageId);
+      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, deps.env, messageId);
       return reply.code(200).send({
         messageId,
         accountLabel: account.label,
@@ -1156,7 +1187,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
         : accounts[0];
 
-      const token = await refreshGoogleAccessToken(account);
+      const token = await refreshGoogleAccessToken(account, deps.env);
       await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token, {});
       return reply.code(200).send({ ok: true });
     } catch (error) {
@@ -1354,18 +1385,20 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       return makeSection('Taches', 'jarvis-todo', 'Impossible de recuperer les taches pour le moment.');
     });
 
-    // Agenda: read directly from Google Calendar when credentials are configured,
-    // fall back to HA states (single next-event per entity) otherwise.
+    // Agenda: read directly from Google Calendar and keep failures visible.
     const agendaPromise = buildAgendaFromGoogle(deps.env).catch((error) => {
       app.log.warn({ error }, 'dashboard_agenda_google_failed');
-      return null;
+      return {
+        ...makeSection('Agenda', 'google-calendar', 'Je n ai pas pu lire Google Calendar pour le moment.'),
+        status: 'error' as const,
+      };
     });
 
     const [haStates, mailSection, tasksSection, googleAgenda] = await Promise.all([
       haStatesPromise, mailPromise, todoPromise, agendaPromise,
     ]);
     const weather = buildWeatherPayload(haStates);
-    const agenda = googleAgenda ?? makeSection('Agenda', 'google-calendar', 'Rien a signaler dans l agenda pour les 7 prochains jours.');
+    const agenda = googleAgenda;
 
     const payload = {
       status: 'ok',

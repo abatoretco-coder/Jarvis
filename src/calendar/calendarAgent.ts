@@ -257,6 +257,19 @@ async function planCalendarAction(
   return parseCalendarAction(parsed, env);
 }
 
+export async function planCalendarAgentAction(
+  text: string,
+  env: CalendarAgentEnv,
+): Promise<CalendarAction> {
+  if (!hasCalendarConfig(env)) {
+    throw new Error('calendar_credentials_missing');
+  }
+  if (!env.OPENAI_API_KEY?.trim()) {
+    throw new Error('calendar_agent_openai_key_missing');
+  }
+  return planCalendarAction(text, env);
+}
+
 // ─── Executor ─────────────────────────────────────────────────────────────────
 
 function formatEventLine(ev: GoogleCalendarEvent): string {
@@ -416,6 +429,13 @@ async function executeCalendarAction(
   }
 }
 
+export async function executeCalendarAgentAction(
+  plan: CalendarAction,
+  env: CalendarAgentEnv,
+): Promise<string> {
+  return executeCalendarAction(plan, env);
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /**
@@ -437,10 +457,7 @@ export async function callCalendarAgent(
     throw new Error('calendar_agent_openai_key_missing');
   }
 
-  const plan = await planCalendarAction(
-    text,
-    env,
-  );
+  const plan = await planCalendarAgentAction(text, env);
 
   log.info({ action: plan.action }, 'calendar_agent_plan');
 

@@ -4,7 +4,14 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { callCalendarAgent, isCalendarAgentKey } from '../calendar/calendarAgent';
+import {
+  type CalendarAction,
+  callCalendarAgent,
+  executeCalendarAgentAction,
+  formatCalendarProposal,
+  isCalendarAgentKey,
+  planCalendarAgentAction,
+} from '../calendar/calendarAgent';
 import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
@@ -819,6 +826,54 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const PERF_MAX = runtimeCfg.perfMaxSamples;
   const perfSamples = new Map<string, number[]>();
   const voiceThreadState = new Map<string, VoiceThreadState>();
+  const pendingCalendarMutations = new Map<string, { plan: CalendarAction; createdAtMs: number; routeKey: 'calendar.create_event' }>();
+  const PENDING_CALENDAR_TTL_MS = 10 * 60_000;
+
+  const buildCalendarEnv = () => ({
+    GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
+    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
+    OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
+    OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
+    OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
+  });
+
+  const normalizeConfirmationText = (value: string): string => (
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/gu, '')
+      .toLowerCase()
+      .replace(/[^\p{Letter}\p{Number}\s'-]/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+  );
+
+  const isClearCalendarConfirmation = (value: string): boolean => {
+    const normalized = normalizeConfirmationText(value);
+    return /^(oui|ok|okay|confirme|je confirme|oui je confirme|vas y|valide|c est bon|d accord|cree le|ajoute le)( merci)?$/u.test(normalized);
+  };
+
+  const isClearCalendarRejection = (value: string): boolean => {
+    const normalized = normalizeConfirmationText(value);
+    return /^(non|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien)( merci)?$/u.test(normalized);
+  };
+
+  const planPendingCalendarCreate = async (threadId: string, inputText: string): Promise<string> => {
+    const plan = await planCalendarAgentAction(inputText, buildCalendarEnv());
+    if (plan.action !== 'create_event') {
+      return executeCalendarAgentAction(plan, buildCalendarEnv());
+    }
+    pendingCalendarMutations.set(threadId, {
+      plan,
+      createdAtMs: Date.now(),
+      routeKey: 'calendar.create_event',
+    });
+    return formatCalendarProposal(plan);
+  };
 
   function recordPerf(key: string, elapsedMs: number): void {
     let arr = perfSamples.get(key);
@@ -881,6 +936,44 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+
+    const pendingCalendar = pendingCalendarMutations.get(effectiveThreadId);
+    if (pendingCalendar && Date.now() - pendingCalendar.createdAtMs > PENDING_CALENDAR_TTL_MS) {
+      pendingCalendarMutations.delete(effectiveThreadId);
+    }
+
+    const activePendingCalendar = pendingCalendarMutations.get(effectiveThreadId);
+    if (activePendingCalendar && text && (isClearCalendarConfirmation(text) || isClearCalendarRejection(text))) {
+      const confirmed = isClearCalendarConfirmation(text);
+      pendingCalendarMutations.delete(effectiveThreadId);
+      const calendarText = confirmed
+        ? await executeCalendarAgentAction(activePendingCalendar.plan, buildCalendarEnv())
+        : 'Ok, je n ajoute rien dans ton agenda.';
+      const responseText = voiceEnabled
+        ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
+        : calendarText;
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      const payload = {
+        threadId: effectiveThreadId,
+        responseText: toSingleParagraphPlainText(responseText),
+        replyMeta: {
+          kind: 'calendar',
+          source: 'calendar_agent',
+          routeKey: activePendingCalendar.routeKey,
+          semanticDecision: confirmed ? 'confirmed' : 'cancelled',
+        },
+      };
+      const validated = responseSchema.safeParse(payload);
+      if (!validated.success) {
+        return reply.code(500).send({ error: 'response_validation_failed' });
+      }
+      app.log.info(
+        { threadId: effectiveThreadId, requestId, confirmed, elapsed_ms: Date.now() - t0 },
+        'calendar_pending_confirmation_resolved',
+      );
+      return reply.code(200).send(validated.data);
+    }
 
     // Guard against truncated voice captures (e.g. "Démar...") that can trigger
     // wrong routing/action. Ask for a clean reformulation instead.
@@ -1121,18 +1214,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       try {
         app.log.info({ threadId: effectiveThreadId, requestId, route: routeKey }, 'calendar_intent_fast_path');
-        const calendarText = await callCalendarAgent(assistantInputText, {
-          GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
-          GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
-          GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
-          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-          GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
-          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
-          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
-          OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
-          OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
-          OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
-        }, app.log, { mode: routeKey === 'calendar.create_event' ? 'propose' : 'execute' });
+        const calendarText = routeKey === 'calendar.create_event'
+          ? await planPendingCalendarCreate(effectiveThreadId, assistantInputText)
+          : await callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
@@ -1743,17 +1827,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         }, app.log);
                       },
                       callCalendarAgent: async () => {
-                        return callCalendarAgent(assistantInputText, {
-                          GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
-                          GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
-                          GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
-                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                          GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
-                          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
-                          OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
-                          OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
-                          OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
-                        }, app.log);
+                        if (routeKey === 'calendar.create_event') {
+                          return planPendingCalendarCreate(effectiveThreadId, assistantInputText);
+                        }
+                        return callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
                       },
                     },
                   });
@@ -2470,7 +2547,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         kind: responseDomain,
         source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
         ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
-        semanticDecision: semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated'),
+        semanticDecision: semanticActivatedRouteKey === 'calendar.create_event'
+          ? 'confirmation_required'
+          : (semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated')),
         ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
       },
     };

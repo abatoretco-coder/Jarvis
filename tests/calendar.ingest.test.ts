@@ -84,4 +84,77 @@ describe('calendar ingest confirmation', () => {
     expect(tokenCalls).toHaveLength(0);
     await app.close();
   });
+
+  it('executes a pending create_event only after same-thread confirmation', async () => {
+    const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            action: 'create_event',
+            summary: 'RDV dentiste',
+            start: '2026-07-01T15:00:00',
+            end: '2026-07-01T16:00:00',
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (rawUrl.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'access-token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
+        expect(init?.method).toBe('POST');
+        return new Response(JSON.stringify({
+          id: 'event-1',
+          summary: 'RDV dentiste',
+          start: { dateTime: '2026-07-01T15:00:00+02:00' },
+          end: { dateTime: '2026-07-01T16:00:00+02:00' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = Fastify({ logger: false });
+    registerIngestRoute(app, {
+      env: env(join(mkdtempSync(join(tmpdir(), 'jarvis-calendar-ingest-')), 'conversation.sqlite')),
+      spotifyWebApi: { isConfigured: () => false } as AppDeps['spotifyWebApi'],
+    } as AppDeps);
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-confirm',
+        text: 'Ajoute un RDV dentiste le 1er juillet a 15h',
+        clientContext: { channel: 'desktop-confirm' },
+      },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(0);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-confirm',
+        text: 'oui je confirme',
+        clientContext: { channel: 'desktop-confirm' },
+      },
+    });
+
+    expect(second.statusCode).toBe(200);
+    const payload = second.json() as { responseText: string; replyMeta?: Record<string, unknown> };
+    expect(payload.responseText).toContain('C\'est ajoute');
+    expect(payload.replyMeta).toMatchObject({
+      kind: 'calendar',
+      routeKey: 'calendar.create_event',
+      semanticDecision: 'confirmed',
+    });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(1);
+    await app.close();
+  });
 });

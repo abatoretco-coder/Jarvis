@@ -198,6 +198,10 @@ export function formatEventDate(date: Date, isAllDay: boolean): string {
 // ─── Multi-calendar fetch ─────────────────────────────────────────────────────
 
 export type CalendarEventWithMeta = GoogleCalendarEvent & { calendarId: string };
+export type CalendarMultiFetchResult = {
+  events: CalendarEventWithMeta[];
+  failedCalendarIds: string[];
+};
 
 /**
  * Fetch upcoming events from multiple calendars in parallel.
@@ -210,13 +214,13 @@ export type CalendarEventWithMeta = GoogleCalendarEvent & { calendarId: string }
  * Failed per-calendar fetches are silently skipped so one broken calendar
  * does not prevent the rest from loading.
  */
-export async function fetchUpcomingEventsMultiCalendar(
+export async function fetchUpcomingEventsMultiCalendarDetailed(
   env: CalendarTokenEnv,
   calendarIds: string[],
   timeMin: string,
   timeMax: string,
   maxPerCalendar = 50,
-): Promise<CalendarEventWithMeta[]> {
+): Promise<CalendarMultiFetchResult> {
   const token = await refreshCalendarToken(env);
 
   const results = await Promise.allSettled(
@@ -239,9 +243,11 @@ export async function fetchUpcomingEventsMultiCalendar(
   );
 
   const all: CalendarEventWithMeta[] = [];
-  for (const result of results) {
+  const failedCalendarIds: string[] = [];
+  results.forEach((result, index) => {
     if (result.status === 'fulfilled') all.push(...result.value);
-  }
+    else failedCalendarIds.push(calendarIds[index] ?? 'unknown');
+  });
 
   // Merge & sort by start time across all calendars
   all.sort((a, b) => {
@@ -250,5 +256,15 @@ export async function fetchUpcomingEventsMultiCalendar(
     return aStart.localeCompare(bStart);
   });
 
-  return all;
+  return { events: all, failedCalendarIds };
+}
+
+export async function fetchUpcomingEventsMultiCalendar(
+  env: CalendarTokenEnv,
+  calendarIds: string[],
+  timeMin: string,
+  timeMax: string,
+  maxPerCalendar = 50,
+): Promise<CalendarEventWithMeta[]> {
+  return (await fetchUpcomingEventsMultiCalendarDetailed(env, calendarIds, timeMin, timeMax, maxPerCalendar)).events;
 }
