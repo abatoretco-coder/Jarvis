@@ -42,6 +42,7 @@ export interface CalendarAgentEnv {
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REFRESH_TOKEN?: string;
   GOOGLE_CALENDAR_CALENDAR_IDS?: string;
+  GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
@@ -50,8 +51,8 @@ export interface CalendarAgentEnv {
 // ─── Planner types ────────────────────────────────────────────────────────────
 
 type CalendarAction =
-  | { action: 'list_upcoming'; calendarId?: string; timeMin: string; timeMax: string }
-  | { action: 'search_events'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; maxResults?: number }
+  | { action: 'list_upcoming'; calendarId?: string; timeMin: string; timeMax: string; summary?: string }
+  | { action: 'search_events'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; maxResults?: number; summary?: string }
   | { action: 'create_event'; summary: string; start: string; end: string; isAllDay?: boolean; description?: string; location?: string; calendarId?: string };
 
 type MinLogger = {
@@ -185,6 +186,36 @@ function formatEventLine(ev: GoogleCalendarEvent): string {
   return `${dateStr} : ${title}`;
 }
 
+function resolveCreateCalendarId(plan: CalendarAction, env: CalendarAgentEnv): string {
+  if ('calendarId' in plan && typeof plan.calendarId === 'string' && plan.calendarId.trim()) {
+    return plan.calendarId.trim();
+  }
+  if (env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID?.trim()) {
+    return env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID.trim();
+  }
+  return 'primary';
+}
+
+function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): string {
+  const start = resolveEventStart(ev);
+  if (isAllDay) {
+    return start.toLocaleDateString('fr-FR', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      timeZone: 'Europe/Paris',
+    });
+  }
+  return start.toLocaleString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Europe/Paris',
+  });
+}
+
 async function executeCalendarAction(
   plan: CalendarAction,
   env: CalendarAgentEnv,
@@ -262,7 +293,7 @@ async function executeCalendarAction(
 
     case 'create_event': {
       const token = await refreshCalendarToken(env);
-      const calendarId = plan.calendarId ?? 'primary';
+      const calendarId = resolveCreateCalendarId(plan, env);
 
       const eventBody: Record<string, unknown> = {
         summary: plan.summary,
@@ -273,18 +304,20 @@ async function executeCalendarAction(
           ? { date: plan.end }
           : { dateTime: plan.end.includes('T') ? plan.end : `${plan.end}T00:00:00`, timeZone: 'Europe/Paris' },
       };
+      eventBody['reminders'] = { useDefault: false, overrides: [] };
       if (plan.description) eventBody['description'] = plan.description;
       if (plan.location)    eventBody['location']    = plan.location;
 
       const created = await calendarApiRequest<GoogleCalendarEvent>(
-        `/calendars/${encodeURIComponent(calendarId)}/events`,
+        `/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
         token,
         { method: 'POST', body: eventBody },
       );
 
-      const start = resolveEventStart(created);
-      const dateStr = formatEventDate(start, plan.isAllDay ?? false);
-      return `Confirmation : événement "${created.summary ?? plan.summary}" créé le ${dateStr}.`;
+      const isAllDay = Boolean(plan.isAllDay);
+      const dateStr = formatCreatedEventDate(created, isAllDay);
+      const title = created.summary ?? plan.summary;
+      return `C'est ajoute dans l'agenda Famille Bourguignon : ${title}, ${dateStr}${isAllDay ? ', toute la journee' : ''}.`;
     }
 
     default:

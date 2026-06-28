@@ -560,6 +560,52 @@ export const MAIL_E1_ROUTES: SemanticRouteDefinition[] = [
 // HA EXECUTORS — E1 Routes (Phase 3)
 // ─────────────────────────────────────────────────────────────────────────────
 
+export const CALENDAR_E1_ROUTES: SemanticRouteDefinition[] = [
+  {
+    key: 'calendar.create_event',
+    level: 'E1',
+    targetAgentId: 'calendar',
+    directRequest: { domain: 'calendar', action: 'create_event' },
+    plannerRequired: true,
+    examples: [
+      'cree un evenement mardi toute la journee',
+      'Jarvis cree un evenement pour mardi soir prochain',
+      'ajoute un rendez-vous dans mon agenda demain matin',
+      'planifie Bar Match Equipe de France mardi toute la journee',
+      'mets un evenement dans le calendrier pour vendredi a dix heures',
+    ],
+    metadata: { category: 'productivity', latencyTarget: 140 },
+  },
+  {
+    key: 'calendar.list_upcoming',
+    level: 'E1',
+    targetAgentId: 'calendar',
+    directRequest: { domain: 'calendar', action: 'list_upcoming' },
+    plannerRequired: true,
+    examples: [
+      'qu est ce que j ai dans mon agenda demain',
+      'liste mes prochains evenements',
+      'quel est mon planning cette semaine',
+      'montre mon calendrier aujourd hui',
+    ],
+    metadata: { category: 'productivity', latencyTarget: 120 },
+  },
+  {
+    key: 'calendar.search_events',
+    level: 'E1',
+    targetAgentId: 'calendar',
+    directRequest: { domain: 'calendar', action: 'search_events' },
+    plannerRequired: true,
+    examples: [
+      'cherche le rendez-vous dentiste dans mon agenda',
+      'retrouve les evenements equipe de France',
+      'est ce que j ai un evenement appele Bar Match',
+      'recherche mes reunions avec Thomas',
+    ],
+    metadata: { category: 'productivity', latencyTarget: 130 },
+  },
+];
+
 export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
   {
     key: 'executor.greeting',
@@ -757,6 +803,7 @@ export const SEMANTIC_ROUTES: SemanticRouteDefinition[] = [
   ...SEARCH_DEEP_E1_ROUTES,
   ...TODO_E1_ROUTES,
   ...MAIL_E1_ROUTES,
+  ...CALENDAR_E1_ROUTES,
   ...HA_E1_ROUTES,
 ];
 
@@ -810,6 +857,7 @@ export function getCatalogStats() {
     search: getCatalogByAgent('search').length,
     todo: getCatalogByAgent('todo').length,
     mail: getCatalogByAgent('mail').length,
+    calendar: getCatalogByAgent('calendar').length,
     executors: getCatalogByAgent('executors').length,
   };
   return {

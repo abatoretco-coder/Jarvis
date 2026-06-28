@@ -4,13 +4,15 @@ export type E1DispatchResult =
   | { kind: 'spotify_plan'; routeKey: string; data: unknown }
   | { kind: 'search_text'; routeKey: string; data: string }
   | { kind: 'todo_text'; routeKey: string; data: string }
-  | { kind: 'mail_text'; routeKey: string; data: string };
+  | { kind: 'mail_text'; routeKey: string; data: string }
+  | { kind: 'calendar_text'; routeKey: string; data: string };
 
 export type E1DispatcherDeps = {
   planSpotifyAction: (text: string) => Promise<unknown>;
   callSearchAgent: (agentKey: 'search.deep', params: { text: string }) => Promise<string>;
   callTodoAgent: (text: string) => Promise<string>;
   callMailAgent: (text: string) => Promise<string>;
+  callCalendarAgent?: (text: string) => Promise<string>;
 };
 
 export async function dispatchAcceptedE1Route(input: {
@@ -39,6 +41,11 @@ export async function dispatchAcceptedE1Route(input: {
   if (route.key.startsWith('mail.')) {
     const data = await deps.callMailAgent(text);
     return { kind: 'mail_text', routeKey: route.key, data };
+  }
+
+  if (route.key.startsWith('calendar.') && deps.callCalendarAgent) {
+    const data = await deps.callCalendarAgent(text);
+    return { kind: 'calendar_text', routeKey: route.key, data };
   }
 
   return null;

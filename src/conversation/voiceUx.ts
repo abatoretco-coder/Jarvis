@@ -1,6 +1,6 @@
 export type VoiceResponseMode = 'short' | 'normal' | 'detailed';
 
-export type VoiceResponseDomain = 'mail' | 'todo' | 'search' | 'executor' | 'weather' | 'spotify' | 'general';
+export type VoiceResponseDomain = 'mail' | 'todo' | 'calendar' | 'search' | 'executor' | 'weather' | 'spotify' | 'general';
 
 export type VoiceThreadState = {
   lastMailCount?: number;

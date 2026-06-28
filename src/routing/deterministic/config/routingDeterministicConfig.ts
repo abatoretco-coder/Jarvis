@@ -34,11 +34,13 @@ type LocalWeatherRoutingConfig = {
 type IngestAckConfig = {
   mailPrefixes: string[];
   todoPrefixes: string[];
+  calendarPrefixes: string[];
   weatherPrefixes: string[];
   searchPrefix: string;
   responses: {
     mailOnly: string;
     todoOnly: string;
+    calendarOnly: string;
     weatherOnly: string;
     searchOnly: string;
     default: string;
@@ -156,11 +158,13 @@ function parseIngestAckConfig(raw: unknown): IngestAckConfig {
   return {
     mailPrefixes: toStringArray(obj.mailPrefixes),
     todoPrefixes: toStringArray(obj.todoPrefixes),
+    calendarPrefixes: toStringArray(obj.calendarPrefixes),
     weatherPrefixes: toStringArray(obj.weatherPrefixes),
     searchPrefix,
     responses: {
       mailOnly: responseOr('mailOnly', 'Deux secondes, je consulte tes emails.'),
       todoOnly: responseOr('todoOnly', 'Deux secondes, je regarde tes taches.'),
+      calendarOnly: responseOr('calendarOnly', 'Je regarde ton agenda, une seconde.'),
       weatherOnly: responseOr('weatherOnly', 'Je regarde la meteo, une seconde.'),
       searchOnly: responseOr('searchOnly', 'Je cherche ca, une seconde.'),
       default: responseOr('default', 'Deux secondes, je traite ta demande.'),

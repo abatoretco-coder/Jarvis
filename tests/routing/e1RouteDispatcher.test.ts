@@ -84,4 +84,27 @@ describe('dispatchAcceptedE1Route', () => {
     expect(result?.kind).toBe('mail_text');
     expect(deps.callMailAgent).toHaveBeenCalledTimes(1);
   });
+
+  it('calendar.create_event uses Calendar agent', async () => {
+    const deps = {
+      planSpotifyAction: jest.fn(async () => ({ route: 'spotify', reason: 'ok' })),
+      callSearchAgent: jest.fn(async () => 'analyse'),
+      callTodoAgent: jest.fn(async () => 'todo_ok'),
+      callMailAgent: jest.fn(async () => 'mail_ok'),
+      callCalendarAgent: jest.fn(async () => 'calendar_ok'),
+    };
+    const route = findRouteByKey('calendar.create_event');
+    expect(route).toBeDefined();
+
+    const text = 'Jarvis, cree un evenement pour mardi toute la journee appele Bar Match Equipe de France';
+    const result = await dispatchAcceptedE1Route({
+      route: route!,
+      text,
+      deps,
+    });
+
+    expect(result).toEqual({ kind: 'calendar_text', routeKey: 'calendar.create_event', data: 'calendar_ok' });
+    expect(deps.callCalendarAgent).toHaveBeenCalledWith(text);
+    expect(deps.callMailAgent).not.toHaveBeenCalled();
+  });
 });

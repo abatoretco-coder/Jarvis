@@ -39,6 +39,7 @@ import {
 } from '../conversation/voiceUx';
 import type { Env } from '../env';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
+import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -218,6 +219,34 @@ function resolveRequestedTtsMode(defaultMode: TtsRouteMode, requested?: TtsRoute
 
 function isLikelyLocalWeatherQuery(text: string): boolean {
   return isClearlyLocalWeather(text) && !isClearlyExternalWeather(text);
+}
+
+function normalizeIntentText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[’']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLikelyCalendarIntent(text: string): boolean {
+  const t = normalizeIntentText(text);
+  if (!t) return false;
+  const hasCalendarObject = /\b(agenda|calendrier|evenement|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(t);
+  if (!hasCalendarObject) return false;
+  return /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve)\b/.test(t)
+    || /\b(planning|prochains? evenements?|qu est ce que j ai)\b/.test(t);
+}
+
+function inferCalendarRouteKey(text: string): string {
+  const t = normalizeIntentText(text);
+  if (/\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve)\b/.test(t)) {
+    return 'calendar.create_event';
+  }
+  if (/\b(cherche|retrouve|recherche)\b/.test(t)) return 'calendar.search_events';
+  return 'calendar.list_upcoming';
 }
 
 function normalizeClientChannel(value: unknown): string | undefined {
@@ -581,12 +610,14 @@ function getIngestAckText(keys: (string | undefined)[]): string | null {
   const ks = keys.map((k) => k ?? '');
   const hasMail = ks.some((k) => k === 'mail' || cfg.mailPrefixes.some((prefix) => k.startsWith(prefix)));
   const hasTodo = ks.some((k) => k === 'todo' || cfg.todoPrefixes.some((prefix) => k.startsWith(prefix)));
+  const hasCalendar = ks.some((k) => k === 'calendar' || cfg.calendarPrefixes.some((prefix) => k.startsWith(prefix)));
   const hasSearch = ks.some((k) => k.startsWith(cfg.searchPrefix));
   const hasWeather = ks.some((k) => k === 'weather' || cfg.weatherPrefixes.some((prefix) => k.startsWith(prefix)));
-  if (hasMail && !hasTodo && !hasSearch) return cfg.responses.mailOnly;
-  if (hasTodo && !hasMail && !hasSearch) return cfg.responses.todoOnly;
-  if (hasWeather && !hasMail && !hasTodo && !hasSearch) return cfg.responses.weatherOnly;
-  if (hasSearch && !hasMail && !hasTodo && ks.length === 1) return cfg.responses.searchOnly;
+  if (hasMail && !hasTodo && !hasCalendar && !hasSearch) return cfg.responses.mailOnly;
+  if (hasTodo && !hasMail && !hasCalendar && !hasSearch) return cfg.responses.todoOnly;
+  if (hasCalendar && !hasMail && !hasTodo && !hasSearch) return cfg.responses.calendarOnly;
+  if (hasWeather && !hasMail && !hasTodo && !hasCalendar && !hasSearch) return cfg.responses.weatherOnly;
+  if (hasSearch && !hasMail && !hasTodo && !hasCalendar && ks.length === 1) return cfg.responses.searchOnly;
   return cfg.responses.default;
 }
 
@@ -1135,6 +1166,85 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       sseStream?.push(null);
     };
 
+    if (deps.nasStatus?.isConfigured() && isNasStatusQuery(assistantInputText)) {
+      pushSseAck(getContextualFallbackAck(assistantInputText));
+      try {
+        const nasStatus = await deps.nasStatus.getStatus();
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: formatNasStatus(nasStatus), domain: 'general', mode: voiceMode })
+          : formatNasStatus(nasStatus);
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        const payload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'nas_status',
+            source: 'nas_status_cache',
+          },
+        };
+        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        return reply.code(200).send(payload);
+      } catch (err) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'nas_status_query_failed');
+      }
+    }
+
+    if (isLikelyCalendarIntent(assistantInputText)) {
+      const routeKey = inferCalendarRouteKey(assistantInputText);
+      const ackMsg = getIngestAckText([routeKey]);
+      if (ackMsg) pushSseAck(ackMsg);
+
+      try {
+        app.log.info({ threadId: effectiveThreadId, requestId, route: routeKey }, 'calendar_intent_fast_path');
+        const calendarText = await callCalendarAgent(assistantInputText, {
+          GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
+          GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
+          GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+          GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
+          OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
+          OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
+          OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
+        }, app.log);
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
+          : calendarText;
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        const payload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'calendar_direct',
+            source: 'calendar_agent',
+            route: routeKey,
+          },
+        };
+        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        return reply.code(200).send(payload);
+      } catch (err) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, route: routeKey, err }, 'calendar_intent_fast_path_failed');
+        const fallbackText = 'Je n arrive pas a acceder a ton agenda pour le moment.';
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: fallbackText, domain: 'calendar', mode: voiceMode })
+          : fallbackText;
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        const payload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'calendar_error',
+            source: 'calendar_agent',
+            route: routeKey,
+          },
+        };
+        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        return reply.code(200).send(payload);
+      }
+    }
+
     // ── Parallel initialization (performance optimization) ────────────────────
     // These 3 operations have no dependencies and can run concurrently
     // Estimated gain: 150-250ms per request
@@ -1482,6 +1592,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     ? 'todo'
                     : routeKey.startsWith('mail.')
                       ? 'mail'
+                      : routeKey.startsWith('calendar.')
+                        ? 'calendar'
                       : routeKey.startsWith('executor.')
                         ? 'executors'
                       : null;
@@ -1490,6 +1602,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               const isSlowReadRoute = routeKey.startsWith('search.deep.')
                 || routeKey.startsWith('todo.')
                 || routeKey.startsWith('mail.')
+                || routeKey.startsWith('calendar.')
                 || routeKey.startsWith('executor.');
 
               if (!safeRouteAllowed || !supportedTarget) {
@@ -1701,6 +1814,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
                         }, app.log);
                       },
+                      callCalendarAgent: async () => {
+                        return callCalendarAgent(assistantInputText, {
+                          GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
+                          GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
+                          GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+                          GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+                          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
+                          OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
+                          OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
+                          OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
+                        }, app.log);
+                      },
                     },
                   });
 
@@ -1724,13 +1849,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       },
                       highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
                     );
-                  } else if (e1Result.kind === 'search_text' || e1Result.kind === 'todo_text' || e1Result.kind === 'mail_text') {
+                  } else if (
+                    e1Result.kind === 'search_text'
+                    || e1Result.kind === 'todo_text'
+                    || e1Result.kind === 'mail_text'
+                    || e1Result.kind === 'calendar_text'
+                  ) {
                     assistantText = e1Result.data;
                     responseDomain = e1Result.kind === 'search_text'
                       ? 'search'
                       : e1Result.kind === 'todo_text'
                         ? 'todo'
-                        : 'mail';
+                        : e1Result.kind === 'calendar_text'
+                          ? 'calendar'
+                          : 'mail';
                     semanticActivatedRouteKey = e1Result.routeKey;
                     app.log.info(
                       {
@@ -2188,6 +2320,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
                 GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
                 GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+                GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
                 OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
                 OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
                 OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
@@ -2313,6 +2446,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             assistantText = parts[0].text;
             if (parts[0].agentId === 'gmail' || parts[0].agentId === 'mail') responseDomain = 'mail';
             else if (parts[0].agentId === 'todo') responseDomain = 'todo';
+            else if (parts[0].agentId === 'calendar') responseDomain = 'calendar';
             else if (parts[0].agentId.startsWith('search')) responseDomain = 'search';
             else if (parts[0].agentId === 'weather') responseDomain = 'weather';
             else responseDomain = 'executor';

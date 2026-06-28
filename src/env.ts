@@ -59,6 +59,11 @@ const envSchema = z
   NAS_STATUS_CACHE_TTL_MS: numberFromEnv.default('60000'),
   NAS_STATUS_CACHE_STALE_MS: numberFromEnv.default('600000'),
 
+  // Helix/Elix news service. Jarvis remains the public proxy for Desktop/mobile clients.
+  HELIX_NEWS_BASE_URL: optionalUrl,
+  HELIX_NEWS_API_TOKEN: optionalNonEmptyString,
+  HELIX_NEWS_TIMEOUT_MS: numberFromEnv.default('60000'),
+
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
   OPENAI_TTS_API_KEY: optionalNonEmptyString,
@@ -220,6 +225,9 @@ const envSchema = z
   // Required scopes: https://www.googleapis.com/auth/calendar.readonly (read) or
   //                  https://www.googleapis.com/auth/calendar (read + write for create_event)
   GOOGLE_CALENDAR_CALENDAR_IDS: optionalNonEmptyString,
+  // Calendar ID used for newly created events when the user does not name a calendar.
+  // Keep GOOGLE_CALENDAR_CALENDAR_IDS for reads/searches across several calendars.
+  GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: optionalNonEmptyString,
 
   // ── Mail provider override ────────────────────────────────────────────────────
   // Mail is Gmail-only. Keep empty or set "gmail".
