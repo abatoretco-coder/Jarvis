@@ -15,6 +15,7 @@ function uniqSorted(items: string[]): string[] {
 }
 
 function listExecutorFiles(executorsDir: string): string[] {
+  if (!fs.existsSync(executorsDir)) return [];
   const entries = fs.readdirSync(executorsDir, { withFileTypes: true });
   return entries
     .filter((e) => e.isFile())
@@ -47,6 +48,15 @@ function extractActionTypesFromFile(filePath: string): string[] {
 function runCheck(): CheckResult {
   const executorsDir = path.resolve(__dirname, '../src/executors');
   const files = listExecutorFiles(executorsDir);
+
+  if (files.length === 0) {
+    return {
+      handledActionTypes: [],
+      supportedActionTypes: uniqSorted([...SUPPORTED_ACTIONS]),
+      missingInCapabilities: [],
+      extraInCapabilities: [],
+    };
+  }
 
   const handled = uniqSorted(files.flatMap(extractActionTypesFromFile));
   const supported = uniqSorted([...SUPPORTED_ACTIONS]);

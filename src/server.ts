@@ -79,7 +79,7 @@ export function buildApp(env: Env): FastifyInstance {
   }
 
   registerHealthRoute(app, deps);
-  registerSecurityHooks(app);
+  registerSecurityHooks(app, env);
   registerApiKeyHook(app, env);
 
   registerCapabilitiesRoute(app, deps);

@@ -30,9 +30,9 @@ type MusicAgentPlan = {
 const plannedSpotifyRequestSchema = z.object({
   domain: z.literal('spotify'),
   action: spotifyActionSchema,
-  slots: z.record(z.unknown()).default({}),
-  context: z.record(z.unknown()).default({}),
-  understanding: z.object({ entities: z.record(z.unknown()).optional() }).optional(),
+  slots: z.record(z.string(), z.unknown()).default({}),
+  context: z.record(z.string(), z.unknown()).default({}),
+  understanding: z.object({ entities: z.record(z.string(), z.unknown()).optional() }).optional(),
   text: z.string().optional(),
 });
 
@@ -42,10 +42,10 @@ const plannerResponseSchema = z.object({
   request: z.object({
     domain: z.literal('spotify'),
     action: spotifyActionSchema,
-    slots: z.record(z.unknown()).default({}),
+    slots: z.record(z.string(), z.unknown()).default({}),
     understanding: z
       .object({
-        entities: z.record(z.unknown()).optional(),
+        entities: z.record(z.string(), z.unknown()).optional(),
       })
       .optional(),
     text: z.string().optional(),
@@ -388,7 +388,7 @@ export async function selectBestSpotifyResult(input: {
     return Math.min(Math.max(0, Math.round(idx)), candidates.length - 1);
   } catch (err: unknown) {
     if (err instanceof Error) throw err;
-    throw new Error('openai_selection_failed_unknown');
+    throw new Error('openai_selection_failed_unknown', { cause: err });
   } finally {
     clearTimeout(timeout);
   }

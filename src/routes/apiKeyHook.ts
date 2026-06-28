@@ -103,6 +103,7 @@ export function registerApiKeyHook(app: FastifyInstance, env: Env): void {
 
     if (!env.REQUIRE_API_KEY) return;
     if (!isProtectedV1Route(req.url)) return;
+    if (env.OAUTH_SETUP_ENABLED && req.url.startsWith('/v1/oauth/')) return;
     // OAuth endpoints are public (used for oneshot credential setup)
     if (isOAuthRoute(req.url)) return;
 

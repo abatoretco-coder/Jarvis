@@ -11,6 +11,9 @@
  *  - create_event   : "Ajoute un RDV dentiste vendredi 15h"
  */
 
+import { z } from 'zod';
+
+import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
   calendarApiRequest,
   fetchUpcomingEventsMultiCalendar,
@@ -41,8 +44,10 @@ export interface CalendarAgentEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REFRESH_TOKEN?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
   GOOGLE_CALENDAR_CALENDAR_IDS?: string;
   GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID?: string;
+  GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
@@ -50,10 +55,92 @@ export interface CalendarAgentEnv {
 
 // ─── Planner types ────────────────────────────────────────────────────────────
 
-type CalendarAction =
+export type CalendarAction =
   | { action: 'list_upcoming'; calendarId?: string; timeMin: string; timeMax: string; summary?: string }
   | { action: 'search_events'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; maxResults?: number; summary?: string }
   | { action: 'create_event'; summary: string; start: string; end: string; isAllDay?: boolean; description?: string; location?: string; calendarId?: string };
+
+export type CalendarAgentMode = 'execute' | 'propose';
+
+const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u);
+const localDateTimeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/u);
+const localTemporalSchema = z.union([localDateSchema, localDateTimeSchema]);
+const optionalCalendarIdSchema = z.string().trim().min(1).max(256).optional();
+
+const calendarActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('list_upcoming'),
+    calendarId: optionalCalendarIdSchema,
+    timeMin: localTemporalSchema,
+    timeMax: localTemporalSchema,
+    summary: z.string().trim().min(1).max(500).optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('search_events'),
+    q: z.string().trim().min(1).max(200),
+    calendarId: optionalCalendarIdSchema,
+    timeMin: localTemporalSchema.optional(),
+    timeMax: localTemporalSchema.optional(),
+    maxResults: z.coerce.number().int().min(1).max(20).default(5),
+    summary: z.string().trim().min(1).max(500).optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('create_event'),
+    summary: z.string().trim().min(1).max(300),
+    start: localTemporalSchema,
+    end: localTemporalSchema,
+    isAllDay: z.boolean().optional(),
+    description: z.string().trim().max(2_000).optional(),
+    location: z.string().trim().max(500).optional(),
+    calendarId: optionalCalendarIdSchema,
+  }).strict(),
+]).superRefine((action, ctx) => {
+  if ('timeMin' in action && action.timeMin && 'timeMax' in action && action.timeMax) {
+    const start = Date.parse(action.timeMin);
+    const end = Date.parse(action.timeMax);
+    if (Number.isFinite(start) && Number.isFinite(end) && end <= start) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timeMax must be after timeMin', path: ['timeMax'] });
+    }
+  }
+  if (action.action !== 'create_event') return;
+  const startIsDate = localDateSchema.safeParse(action.start).success;
+  const endIsDate = localDateSchema.safeParse(action.end).success;
+  const isAllDay = action.isAllDay ?? (startIsDate && endIsDate);
+  if (isAllDay && (!startIsDate || !endIsDate)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'all-day events must use YYYY-MM-DD start/end', path: ['isAllDay'] });
+  }
+  if (!isAllDay && (startIsDate || endIsDate)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timed events must use local date-time start/end', path: ['start'] });
+  }
+  const start = Date.parse(action.start);
+  const end = Date.parse(action.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'end must be after start', path: ['end'] });
+  }
+});
+
+function allowedCalendarIds(env: CalendarAgentEnv): Set<string> {
+  return new Set(parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS));
+}
+
+export function parseCalendarAction(value: unknown, env: CalendarAgentEnv): CalendarAction {
+  const parsed = calendarActionSchema.parse(value);
+  const allowed = allowedCalendarIds(env);
+  const checkAllowed = (calendarId: string | undefined, path: (string | number)[]): void => {
+    if (calendarId && !allowed.has(calendarId)) {
+      throw new z.ZodError([{ code: z.ZodIssueCode.custom, message: 'calendarId is not allowlisted', path }]);
+    }
+  };
+  checkAllowed(parsed.calendarId, ['calendarId']);
+  if (parsed.action === 'create_event') {
+    const createCalendarId = parsed.calendarId?.trim() || env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID?.trim() || 'primary';
+    if (!allowed.has(createCalendarId)) {
+      throw new z.ZodError([{ code: z.ZodIssueCode.custom, message: 'create calendarId is not allowlisted', path: ['calendarId'] }]);
+    }
+    return { ...parsed, calendarId: createCalendarId, isAllDay: parsed.isAllDay ?? localDateSchema.safeParse(parsed.start).success };
+  }
+  return parsed;
+}
 
 type MinLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -123,23 +210,17 @@ Exemples :
 
 async function planCalendarAction(
   text: string,
-  openAiApiKey: string,
-  openAiBaseUrl: string,
-  timeoutMs: number,
+  env: CalendarAgentEnv,
 ): Promise<CalendarAction> {
   const now = new Date();
-  const tz = 'Europe/Paris';
-  const dateStr = now.toLocaleString('fr-FR', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: tz,
-  });
-  const isoDate = now.toISOString().slice(0, 10);
+  const dateStr = formatParisDateTime(now);
+  const isoDate = getParisIsoDate(now);
 
-  const resp = await fetch(`${openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+  const resp = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      authorization: `Bearer ${openAiApiKey}`,
+      authorization: `Bearer ${env.OPENAI_API_KEY?.trim() ?? ''}`,
     },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
@@ -151,7 +232,7 @@ async function planCalendarAction(
         { role: 'user', content: text },
       ],
     }),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(env.OPENAI_TIMEOUT_MS),
   });
 
   if (!resp.ok) {
@@ -173,7 +254,7 @@ async function planCalendarAction(
     throw new Error(`calendar_planner_missing_action:${content.slice(0, 100)}`);
   }
 
-  return parsed as CalendarAction;
+  return parseCalendarAction(parsed, env);
 }
 
 // ─── Executor ─────────────────────────────────────────────────────────────────
@@ -194,6 +275,15 @@ function resolveCreateCalendarId(plan: CalendarAction, env: CalendarAgentEnv): s
     return env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID.trim();
   }
   return 'primary';
+}
+
+export function formatCalendarProposal(plan: CalendarAction): string {
+  if (plan.action !== 'create_event') return 'Action calendrier prête.';
+  const when = plan.isAllDay
+    ? `le ${plan.start}`
+    : `du ${plan.start.replace('T', ' à ')} au ${plan.end.replace('T', ' à ')}`;
+  const place = plan.location ? `, lieu : ${plan.location}` : '';
+  return `Je peux ajouter "${plan.summary}" dans ton agenda ${when}${place}. Confirme dans ce fil si tu veux que je le crée.`;
 }
 
 function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): string {
@@ -317,7 +407,8 @@ async function executeCalendarAction(
       const isAllDay = Boolean(plan.isAllDay);
       const dateStr = formatCreatedEventDate(created, isAllDay);
       const title = created.summary ?? plan.summary;
-      return `C'est ajoute dans l'agenda Famille Bourguignon : ${title}, ${dateStr}${isAllDay ? ', toute la journee' : ''}.`;
+      const agendaLabel = env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL?.trim() || 'ton agenda';
+      return `C'est ajoute dans ${agendaLabel} : ${title}, ${dateStr}${isAllDay ? ', toute la journee' : ''}.`;
     }
 
     default:
@@ -336,9 +427,10 @@ export async function callCalendarAgent(
   text: string,
   env: CalendarAgentEnv,
   log: MinLogger,
+  options: { mode?: CalendarAgentMode } = {},
 ): Promise<string> {
   if (!hasCalendarConfig(env)) {
-    return 'Le calendrier Google n\'est pas configuré. Ajoute GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET et GOOGLE_REFRESH_TOKEN dans l\'environnement.';
+    return 'Le calendrier Google n\'est pas configuré. Connecte Google via OAuth ou ajoute les identifiants Google côté serveur.';
   }
 
   if (!env.OPENAI_API_KEY?.trim()) {
@@ -347,12 +439,14 @@ export async function callCalendarAgent(
 
   const plan = await planCalendarAction(
     text,
-    env.OPENAI_API_KEY,
-    env.OPENAI_BASE_URL,
-    env.OPENAI_TIMEOUT_MS,
+    env,
   );
 
   log.info({ action: plan.action }, 'calendar_agent_plan');
+
+  if (options.mode === 'propose' && plan.action === 'create_event') {
+    return formatCalendarProposal(plan);
+  }
 
   return executeCalendarAction(plan, env);
 }

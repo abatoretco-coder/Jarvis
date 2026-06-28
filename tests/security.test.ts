@@ -30,7 +30,7 @@ describe('security hooks', () => {
   test('OAuth authorize requires an API key and callback requires a one-time state', async () => {
     const env = makeEnv();
     const app = Fastify();
-    registerSecurityHooks(app);
+    registerSecurityHooks(app, env);
     registerApiKeyHook(app, env);
     registerOAuthRoutes(app, makeDeps(env));
 
@@ -52,12 +52,14 @@ describe('security hooks', () => {
     const callbackWithoutState = await app.inject({
       method: 'GET',
       url: '/v1/oauth/google/callback?code=fake',
+      headers: { 'x-api-key': 'test-api-key' },
     });
     expect(callbackWithoutState.statusCode).toBe(400);
 
     const callbackWithInvalidState = await app.inject({
       method: 'GET',
       url: '/v1/oauth/google/callback?code=fake&state=invalid',
+      headers: { 'x-api-key': 'test-api-key' },
     });
     expect(callbackWithInvalidState.statusCode).toBe(403);
 
@@ -86,14 +88,35 @@ describe('security hooks', () => {
   });
 
   test('adds defensive response headers', async () => {
+    const env = makeEnv();
     const app = Fastify();
-    registerSecurityHooks(app);
+    registerSecurityHooks(app, env);
     app.get('/health', async () => ({ status: 'ok' }));
 
     const response = await app.inject({ method: 'GET', url: '/health' });
     expect(response.headers['x-content-type-options']).toBe('nosniff');
     expect(response.headers['x-frame-options']).toBe('DENY');
     expect(response.headers['cache-control']).toBe('no-store');
+    await app.close();
+  });
+
+  test('rate limit uses env settings for v1 routes', async () => {
+    const env = makeEnv({
+      RATE_LIMIT_WINDOW_MS: '60000',
+      RATE_LIMIT_MAX: '1',
+      RATE_LIMIT_MAX_TRACKED_CLIENTS: '10',
+      REQUIRE_API_KEY: 'false',
+    });
+    const app = Fastify();
+    registerSecurityHooks(app, env);
+    app.get('/v1/ping', async () => ({ ok: true }));
+
+    const first = await app.inject({ method: 'GET', url: '/v1/ping' });
+    const second = await app.inject({ method: 'GET', url: '/v1/ping' });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toEqual({ error: 'rate_limited' });
     await app.close();
   });
 });

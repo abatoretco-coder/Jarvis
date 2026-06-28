@@ -21,18 +21,18 @@ export const ingestSpotifyRequestSchema = z.object({
   threadId: z.string().min(1),
   domain: z.literal('spotify'),
   action: spotifyActionSchema,
-  slots: z.record(z.unknown()).default({}),
-  context: z.record(z.unknown()).default({}),
+  slots: z.record(z.string(), z.unknown()).default({}),
+  context: z.record(z.string(), z.unknown()).default({}),
   understanding: z
     .object({
-      entities: z.record(z.unknown()).optional(),
+      entities: z.record(z.string(), z.unknown()).optional(),
     })
     .passthrough()
     .optional(),
   correlation_id: z.string().min(1).optional(),
   user_id: z.string().min(1).optional(),
   text: z.string().optional(),
-  clientContext: z.record(z.unknown()).optional(),
+  clientContext: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type IngestSpotifyRequest = z.infer<typeof ingestSpotifyRequestSchema>;

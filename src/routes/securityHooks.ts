@@ -1,40 +1,46 @@
 import type { FastifyInstance } from 'fastify';
 
-const RATE_WINDOW_MS = 60_000;
-const RATE_LIMIT = 240;
-const MAX_TRACKED_CLIENTS = 10_000;
+import type { Env } from '../env';
 
 type RateEntry = {
   count: number;
   resetAt: number;
 };
 
-export function registerSecurityHooks(app: FastifyInstance): void {
+function normalizeIp(value: string | undefined): string {
+  if (!value) return '';
+  const trimmed = value.trim();
+  if (trimmed.startsWith('::ffff:')) return trimmed.slice('::ffff:'.length);
+  if (trimmed === '::1') return '127.0.0.1';
+  return trimmed;
+}
+
+export function registerSecurityHooks(app: FastifyInstance, env: Env): void {
   const rates = new Map<string, RateEntry>();
 
   app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/v1/')) return;
 
     const now = Date.now();
-    const key = req.ip;
+    const key = normalizeIp(req.ip);
     const current = rates.get(key);
     const entry = !current || current.resetAt <= now
-      ? { count: 1, resetAt: now + RATE_WINDOW_MS }
+      ? { count: 1, resetAt: now + env.RATE_LIMIT_WINDOW_MS }
       : { count: current.count + 1, resetAt: current.resetAt };
     rates.set(key, entry);
 
-    if (rates.size > MAX_TRACKED_CLIENTS) {
+    if (rates.size > env.RATE_LIMIT_MAX_TRACKED_CLIENTS) {
       for (const [client, value] of rates) {
         if (value.resetAt <= now) rates.delete(client);
       }
-      while (rates.size > MAX_TRACKED_CLIENTS) {
+      while (rates.size > env.RATE_LIMIT_MAX_TRACKED_CLIENTS) {
         const oldest = rates.keys().next().value as string | undefined;
         if (!oldest) break;
         rates.delete(oldest);
       }
     }
 
-    if (entry.count > RATE_LIMIT) {
+    if (entry.count > env.RATE_LIMIT_MAX) {
       return reply
         .header('retry-after', String(Math.max(1, Math.ceil((entry.resetAt - now) / 1000))))
         .code(429)

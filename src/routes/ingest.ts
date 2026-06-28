@@ -1,4 +1,3 @@
-﻿import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 
@@ -37,7 +36,6 @@ import {
   type VoiceResponseDomain,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
-import type { Env } from '../env';
 import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
 import {
@@ -69,16 +67,41 @@ import {
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
 import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
+import {
+  audioExtensionFromContentType,
+  bufferToWebBytes,
+  buildFfmpegFilters,
+  hasHaTtsConfig,
+  pipeStreamThroughFfmpeg,
+  resolveOpenAiTtsRuntimeConfig,
+  resolveRequestedTtsMode,
+  type TtsRouteMode,
+} from './ingest/audioRuntime';
+import {
+  buildSpotifyIngestPayload,
+  inferSpotifyRoutingPath,
+  type SpotifyResponseShape,
+} from './ingest/spotifyResponse';
 
 const threadIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 
 const ingestSchema = z.object({
   threadId: threadIdSchema,
-  text: z.string().min(1).max(32_000),
+  text: z.string().min(1).max(32_000).optional(),
   contextNote: z.string().max(8_000).optional(),
-  clientContext: z.record(z.unknown()).optional(),
+  clientContext: z.record(z.string(), z.unknown()).optional(),
   correlation_id: z.string().optional(),
   user_id: z.string().optional(),
+  domain: z.literal('spotify').optional(),
+  action: spotifyActionSchema.optional(),
+  slots: z.record(z.string(), z.unknown()).optional(),
+  context: z.record(z.string(), z.unknown()).optional(),
+  understanding: z
+    .object({
+      entities: z.record(z.string(), z.unknown()).optional(),
+    })
+    .passthrough()
+    .optional(),
 });
 
 const responseSchema = z.object({
@@ -113,73 +136,6 @@ type EntityStateLike = {
   attributes?: Record<string, unknown>;
 };
 
-type AudioTransformOpts = { speed: number; pitchSemitones: number; clarity: boolean };
-type TtsRouteMode = 'auto' | 'ha' | 'openai';
-type OpenAiTtsRuntimeConfig = {
-  apiKey: string;
-  baseUrl: string;
-  timeoutMs: number;
-  model: string;
-  voice: string;
-  format: 'mp3' | 'wav' | 'opus' | 'aac' | 'flac' | 'pcm';
-  instructions?: string;
-  speed: number;
-};
-
-// Build ffmpeg audio filter chain (speed is optional — OpenAI handles it natively)
-function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string[] {
-  const filters: string[] = [];
-  if (opts.pitchSemitones !== 0) {
-    const ratio = Math.pow(2, opts.pitchSemitones / 12);
-    // asetrate expects a plain integer — precompute to avoid expression-parse failure
-    const shiftedRate = Math.round(44100 * ratio);
-    // asetrate shifts pitch+tempo; aresample restores sample rate; atempo corrects speed back
-    filters.push(
-      `asetrate=${shiftedRate}`,
-      'aresample=44100',
-      `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`,
-    );
-  }
-  if (!skipSpeed && opts.speed !== 1.0) {
-    filters.push(`atempo=${Math.max(0.5, Math.min(2.0, opts.speed)).toFixed(6)}`);
-  }
-  if (opts.clarity) {
-    filters.push('highpass=f=100', 'equalizer=f=3000:width_type=o:width=2:g=2');
-  }
-  return filters;
-}
-
-// Stream HTTP response body directly through ffmpeg (transform runs while bytes arrive — no buffer-then-transform)
-function pipeStreamThroughFfmpeg(body: ReadableStream<Uint8Array>, filters: string[]): Promise<Buffer> {
-  return new Promise<Buffer>((resolve, reject) => {
-    const proc = spawn('ffmpeg', [
-      '-f', 'mp3', '-i', 'pipe:0',
-      '-filter:a', filters.join(','),
-      '-f', 'mp3', 'pipe:1',
-      '-loglevel', 'error',
-    ]);
-    const chunks: Buffer[] = [];
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => chunks.push(d));
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.on('close', (code) => {
-      if (code === 0) resolve(Buffer.concat(chunks));
-      else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(0, 200)}`));
-    });
-    proc.on('error', reject);
-    const reader = body.getReader();
-    const pump = (): void => {
-      reader.read().then(({ done, value }) => {
-        if (done) { proc.stdin.end(); return; }
-        const ok = proc.stdin.write(value);
-        if (ok) pump();
-        else proc.stdin.once('drain', pump);
-      }).catch((err: unknown) => { proc.stdin.destroy(err as Error); reject(err); });
-    };
-    pump();
-  });
-}
-
 function uniqueNonEmpty(values: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -190,31 +146,6 @@ function uniqueNonEmpty(values: string[]): string[] {
     out.push(normalized);
   }
   return out;
-}
-
-function resolveOpenAiTtsRuntimeConfig(env: Env): OpenAiTtsRuntimeConfig | null {
-  const apiKey = env.OPENAI_TTS_API_KEY?.trim() || env.OPENAI_API_KEY?.trim();
-  const baseUrl = env.OPENAI_TTS_BASE_URL?.trim() || env.OPENAI_BASE_URL;
-  if (!apiKey || !baseUrl) return null;
-  return {
-    apiKey,
-    baseUrl,
-    timeoutMs: env.OPENAI_TTS_TIMEOUT_MS,
-    model: env.OPENAI_TTS_MODEL.trim(),
-    voice: env.OPENAI_TTS_VOICE.trim(),
-    format: env.OPENAI_TTS_FORMAT,
-    instructions: env.OPENAI_TTS_INSTRUCTIONS?.trim(),
-    speed: env.TTS_SPEED,
-  };
-}
-
-function hasHaTtsConfig(env: Env): boolean {
-  return Boolean(env.HA_BASE_URL && env.HA_TOKEN);
-}
-
-function resolveRequestedTtsMode(defaultMode: TtsRouteMode, requested?: TtsRouteMode): TtsRouteMode {
-  if (defaultMode !== 'auto' || !requested || requested === 'auto') return defaultMode;
-  return requested;
 }
 
 function isLikelyLocalWeatherQuery(text: string): boolean {
@@ -265,62 +196,6 @@ function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string 
 const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
   SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key),
 );
-
-type SpotifyResponseShape = {
-  status: 'success' | 'need_clarification' | 'error';
-  tts?: string;
-  data?: Record<string, unknown>;
-  options?: Array<Record<string, unknown>>;
-  error_code?: string;
-};
-
-type SpotifyRoutingPath = 'router_direct' | 'music_planner';
-
-function inferSpotifyRoutingPath(musicPlanReason?: string): SpotifyRoutingPath {
-  if (typeof musicPlanReason === 'string' && musicPlanReason.startsWith('router_direct:')) {
-    return 'router_direct';
-  }
-  return 'music_planner';
-}
-
-function buildSpotifyIngestPayload(input: {
-  threadId: string;
-  responseText: string;
-  spotify: SpotifyResponseShape;
-  action: string;
-  routingPath: SpotifyRoutingPath;
-  correlationId?: string;
-  planner?: { source: 'openai_music_agent'; route: string; reason?: string };
-}) {
-  const replyMeta = {
-    kind: 'spotify',
-    source: 'spotify_executor',
-    routeKey: `spotify.${input.action}`,
-    ...(input.spotify.status === 'error' ? { fallbackReason: 'execution_error' } : {}),
-  };
-
-  return {
-    threadId: input.threadId,
-    responseText: input.responseText,
-    status: input.spotify.status,
-    ...(input.spotify.data ? { data: input.spotify.data } : {}),
-    ...(input.spotify.options ? { options: input.spotify.options } : {}),
-    ...(input.spotify.error_code ? { error_code: input.spotify.error_code } : {}),
-    ...(input.correlationId ? { correlation_id: input.correlationId } : {}),
-    ...(input.planner ? { planner: input.planner } : {}),
-    replyMeta,
-    music: {
-      routing: {
-        domain: 'spotify',
-        path: input.routingPath,
-        action: input.action,
-      },
-      execution: {
-        status: input.spotify.status,
-      },
-    },
-  };
-}
 
 function resolveExecutorsEntry(agentEntries: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry | null {
   // Preferred explicit mapping: key=executors or direct pseudo-agent id.
@@ -525,15 +400,6 @@ function shouldFallbackFromElevenLabs(status: number, bodyText: string): boolean
   return /(quota|capacity|limit|credit|insufficient|exceed|plan)/i.test(bodyText);
 }
 
-function audioExtensionFromContentType(contentType: string): string {
-  if (/wav/u.test(contentType)) return 'wav';
-  if (/ogg|opus/u.test(contentType)) return 'ogg';
-  if (/flac/u.test(contentType)) return 'flac';
-  if (/aac|m4a|mp4/u.test(contentType)) return 'm4a';
-  if (/mpeg|mp3/u.test(contentType)) return 'mp3';
-  return 'wav';
-}
-
 async function transcribeWithOpenAi(params: {
   env: AppDeps['env'];
   body: Buffer;
@@ -552,7 +418,7 @@ async function transcribeWithOpenAi(params: {
   }
 
   const fileExt = audioExtensionFromContentType(params.incomingContentType);
-  form.set('file', new Blob([params.body], { type: params.incomingContentType }), `audio.${fileExt}`);
+  form.set('file', new Blob([bufferToWebBytes(params.body)], { type: params.incomingContentType }), `audio.${fileExt}`);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_STT_TIMEOUT_MS);
@@ -570,7 +436,7 @@ async function transcribeWithOpenAi(params: {
     throw new Error(`openai_stt_failed:${response.status}:${raw.slice(0, 500)}`);
   }
 
-  let parsed: unknown = {};
+  let parsed: unknown;
   try {
     parsed = raw ? (JSON.parse(raw) as unknown) : {};
   } catch {
@@ -1112,6 +978,64 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
     );
 
+    if (parsed.data.domain === 'spotify' && parsed.data.action) {
+      const explicitSpotifyPayload = ingestSpotifyRequestSchema.safeParse({
+        ...parsed.data,
+        threadId: effectiveThreadId,
+        text: text || undefined,
+        correlation_id: correlationId || undefined,
+        user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+      });
+      if (!explicitSpotifyPayload.success) {
+        return reply.code(400).send({ error: 'invalid_spotify_contract', issues: explicitSpotifyPayload.error.issues });
+      }
+
+      const spotifyResp = await executeSpotifyCapability({
+        request: explicitSpotifyPayload.data,
+        spotifyWebApi: deps.spotifyWebApi,
+        env: deps.env,
+        log: app.log,
+      });
+      const spotifyVoiceText = voiceEnabled
+        ? formatVoiceResponse({
+            text: spotifyResp.tts,
+            domain: 'spotify',
+            mode: voiceMode,
+          })
+        : spotifyResp.tts;
+      const persistedUserText = text || `spotify.${explicitSpotifyPayload.data.action}`;
+      void conversationService.persistMessages(effectiveThreadId, persistedUserText, spotifyVoiceText).then(async () => {
+        if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+          summarizationService.startPresummarize(effectiveThreadId);
+        }
+      });
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      app.log.info(
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          action: explicitSpotifyPayload.data.action,
+          status: spotifyResp.status,
+          correlation_id: correlationId || undefined,
+        },
+        'ingest_spotify_explicit_contract_done',
+      );
+
+      return reply.code(200).send(buildSpotifyIngestPayload({
+        threadId: effectiveThreadId,
+        responseText: spotifyVoiceText,
+        spotify: {
+          status: spotifyResp.status,
+          ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
+          ...(spotifyResp.options ? { options: spotifyResp.options } : {}),
+          ...(spotifyResp.error_code ? { error_code: spotifyResp.error_code } : {}),
+        },
+        action: explicitSpotifyPayload.data.action,
+        routingPath: 'explicit_contract',
+        correlationId: correlationId || undefined,
+      }));
+    }
+
     if (!text) {
       return reply.code(400).send({ error: 'invalid_body', message: 'text is required' });
     }
@@ -1201,12 +1125,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
           GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
           GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
           GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
           GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
+          GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
           OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
           OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
           OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
-        }, app.log);
+        }, app.log, { mode: routeKey === 'calendar.create_event' ? 'propose' : 'execute' });
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
@@ -1216,9 +1142,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           threadId: effectiveThreadId,
           responseText: toSingleParagraphPlainText(responseText),
           replyMeta: {
-            kind: 'calendar_direct',
+            kind: 'calendar',
             source: 'calendar_agent',
-            route: routeKey,
+            routeKey,
+            ...(routeKey === 'calendar.create_event' ? { semanticDecision: 'confirmation_required' } : {}),
           },
         };
         if (sseStream !== null) { pushSseResponse(payload); return reply; }
@@ -1235,9 +1162,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           threadId: effectiveThreadId,
           responseText: toSingleParagraphPlainText(responseText),
           replyMeta: {
-            kind: 'calendar_error',
+            kind: 'calendar',
             source: 'calendar_agent',
-            route: routeKey,
+            routeKey,
+            fallbackReason: 'calendar_unavailable',
           },
         };
         if (sseStream !== null) { pushSseResponse(payload); return reply; }
@@ -1819,6 +1747,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
                           GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
                           GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
                           GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
                           GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
                           OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
@@ -2319,6 +2248,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
                 GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
                 GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
+                OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
                 GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
                 GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
                 OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
@@ -2595,7 +2525,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             'content-type': incomingContentType,
             'x-speech-content': speechContent,
           },
-          body,
+          body: bufferToWebBytes(body),
           signal: haController.signal,
         }).finally(() => clearTimeout(haTimeoutId));
         if (!candidateResponse.ok) return null;
@@ -2678,7 +2608,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           'content-type': incomingContentType,
           'x-speech-content': speechContent,
         },
-        body,
+        body: bufferToWebBytes(body),
         signal: sttHaController.signal,
       }).finally(() => clearTimeout(sttHaTimeoutId));
 
@@ -2696,7 +2626,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const raw = await response.text();
-    let parsed: unknown = raw;
+    let parsed: unknown;
     try {
       parsed = raw ? (JSON.parse(raw) as unknown) : {};
     } catch {

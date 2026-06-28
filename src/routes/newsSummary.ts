@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
@@ -60,8 +62,16 @@ type NewsItemsQuery = {
   geoFilter?: string;
   tab?: string;
   sectors?: string;
-  limit?: string;
+  limit?: number;
 };
+
+const queryToken = z.string().trim().min(1).max(80).regex(/^[\p{L}\p{N} .,_:-]+$/u);
+const newsItemsQuerySchema = z.object({
+  geoFilter: queryToken.optional(),
+  tab: queryToken.optional(),
+  sectors: z.string().trim().min(1).max(300).regex(/^[\p{L}\p{N} .,_:-]+$/u).optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+}).strict();
 
 type HelixSummaryResponse = {
   status?: string;
@@ -71,9 +81,11 @@ type HelixSummaryResponse = {
   generatedAt?: string;
 };
 
-function buildHelixHeaders(deps: AppDeps, contentType?: string): Record<string, string> {
+function buildHelixHeaders(deps: AppDeps, input: { contentType?: string; requestId: string; correlationId?: string }): Record<string, string> {
   return {
-    ...(contentType ? { 'content-type': contentType } : {}),
+    ...(input.contentType ? { 'content-type': input.contentType } : {}),
+    'x-request-id': input.requestId,
+    ...(input.correlationId ? { 'x-correlation-id': input.correlationId } : {}),
     ...(deps.env.HELIX_NEWS_API_TOKEN?.trim() ? { 'x-api-token': deps.env.HELIX_NEWS_API_TOKEN.trim() } : {}),
   };
 }
@@ -108,18 +120,24 @@ async function proxyToHelix(url: string, deps: AppDeps, init?: RequestInit): Pro
 
 export function registerNewsSummaryRoute(app: FastifyInstance, deps: AppDeps): void {
   app.get('/v1/news/items', async (req, reply) => {
+    const parsedQuery = newsItemsQuerySchema.safeParse(req.query ?? {});
+    if (!parsedQuery.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsedQuery.error.issues });
+    }
     const params = new URLSearchParams();
-    const query = req.query as NewsItemsQuery;
+    const query: NewsItemsQuery = parsedQuery.data;
     if (query.geoFilter) params.set('geoFilter', query.geoFilter);
     if (query.tab) params.set('tab', query.tab);
     if (query.sectors) params.set('sectors', query.sectors);
-    if (query.limit) params.set('limit', query.limit);
+    if (query.limit) params.set('limit', String(query.limit));
 
     const url = buildHelixUrl(deps, '/v1/news/items', params);
     if (!url) return reply.code(503).send({ error: 'helix_news_not_configured' });
 
     try {
-      const payload = await proxyToHelix(url, deps, { headers: buildHelixHeaders(deps) });
+      const requestId = typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].slice(0, 120) : randomUUID();
+      const correlationId = typeof req.headers['x-correlation-id'] === 'string' ? req.headers['x-correlation-id'].slice(0, 120) : undefined;
+      const payload = await proxyToHelix(url, deps, { headers: buildHelixHeaders(deps, { requestId, correlationId }) });
       return reply.code(200).send(payload);
     } catch (error) {
       app.log.warn({ err: error, query: req.query }, 'helix_news_items_failed');
@@ -140,7 +158,11 @@ export function registerNewsSummaryRoute(app: FastifyInstance, deps: AppDeps): v
     try {
       const payload = await proxyToHelix(url, deps, {
         method: 'POST',
-        headers: buildHelixHeaders(deps, 'application/json'),
+        headers: buildHelixHeaders(deps, {
+          contentType: 'application/json',
+          requestId: typeof req.headers['x-request-id'] === 'string' ? req.headers['x-request-id'].slice(0, 120) : randomUUID(),
+          correlationId: typeof req.headers['x-correlation-id'] === 'string' ? req.headers['x-correlation-id'].slice(0, 120) : undefined,
+        }),
         body: JSON.stringify(parsed.data),
       }) as HelixSummaryResponse;
 

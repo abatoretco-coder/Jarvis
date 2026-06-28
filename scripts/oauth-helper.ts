@@ -59,7 +59,7 @@ async function postForm(url: string, body: URLSearchParams): Promise<Record<stri
     body,
   });
   const text = await resp.text();
-  let data: Record<string, unknown> = {};
+  let data: Record<string, unknown>;
   try {
     data = JSON.parse(text) as Record<string, unknown>;
   } catch {

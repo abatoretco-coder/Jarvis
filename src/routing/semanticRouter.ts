@@ -43,7 +43,7 @@ export async function trySemanticRouter(input: SemanticRouterInput): Promise<Sem
   let embeddingResult: Awaited<ReturnType<typeof getEmbedding>>;
   try {
     embeddingResult = await getEmbedding(userText, embeddingConfig);
-  } catch (err) {
+  } catch {
     return {
       accepted: false,
       decision: 'fallback_llm',
@@ -62,7 +62,7 @@ export async function trySemanticRouter(input: SemanticRouterInput): Promise<Sem
   let scoring: Awaited<ReturnType<typeof scoreRoutes>>;
   try {
     scoring = await scoreRoutes(embeddingResult.vector, routes, embeddingConfig);
-  } catch (err) {
+  } catch {
     return {
       accepted: false,
       decision: 'fallback_llm',

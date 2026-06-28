@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyRequest } from 'fastify';
 
-import { setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { GOOGLE_OAUTH_SCOPES, storeGoogleRefreshToken } from '../google/googleCredentialService';
 import { AppDeps } from '../server';
 
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
@@ -47,6 +47,30 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
     return typeof expiresAt === 'number' && expiresAt > Date.now();
   };
 
+  const isAuthorizedSetupRequest = (req: FastifyRequest): boolean => {
+    if (deps.env.OAUTH_SETUP_ENABLED === true) return true;
+    if (!deps.env.REQUIRE_API_KEY) return false;
+    const configured = new Set([
+      deps.env.API_KEY,
+      ...(deps.env.API_KEYS ? deps.env.API_KEYS.split(',') : []),
+    ].map((value) => value?.trim()).filter((value): value is string => Boolean(value)));
+    const header = req.headers['x-api-key'];
+    const bearer = typeof req.headers.authorization === 'string' && req.headers.authorization.toLowerCase().startsWith('bearer ')
+      ? req.headers.authorization.slice(7).trim()
+      : undefined;
+    const candidate = typeof header === 'string' ? header.trim() : bearer;
+    return Boolean(candidate && configured.has(candidate));
+  };
+
+  app.addHook('preHandler', async (req, reply) => {
+    if (!req.url.startsWith('/v1/oauth/')) return;
+    if (isAuthorizedSetupRequest(req)) return;
+    return reply.code(403).send({
+      error: 'oauth_setup_disabled',
+      message: 'OAuth setup requires an API key or OAUTH_SETUP_ENABLED=true.',
+    });
+  });
+
   /**
    * GET /v1/oauth/google/authorize
    * Returns the Google authorization URL for oneshot Gmail setup.
@@ -65,7 +89,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       client_id: env.GOOGLE_CLIENT_ID,
       redirect_uri: redirectUri,
       response_type: 'code',
-      scope: 'https://mail.google.com/',
+      scope: GOOGLE_OAUTH_SCOPES.join(' '),
       access_type: 'offline',
       prompt: 'consent',
       state,
@@ -144,12 +168,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
       }
 
       // Store the refresh token
-      const storeKey = `mail:gmail:${env.GOOGLE_CLIENT_ID}`;
-      await setStoredRefreshToken(
-        env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-        storeKey,
-        refreshToken,
-      );
+      await storeGoogleRefreshToken(env, refreshToken);
 
       // Also try to verify the token works
       if (accessToken) {
@@ -164,7 +183,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
             const email = userInfo.email as string | undefined;
             return reply.send({
               success: true,
-              message: 'Gmail authorization successful!',
+              message: 'Google authorization successful!',
               email,
               refresh_token_stored: true,
             });
@@ -176,7 +195,7 @@ export function registerOAuthRoutes(app: FastifyInstance, deps: AppDeps): void {
 
       return reply.send({
         success: true,
-        message: 'Gmail authorization successful! Refresh token has been stored.',
+        message: 'Google authorization successful. Refresh token has been stored.',
         refresh_token_stored: true,
       });
     } catch (error) {

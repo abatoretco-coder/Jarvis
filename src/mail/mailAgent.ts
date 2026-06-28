@@ -1,4 +1,5 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { googleRefreshTokenStoreKey } from '../google/googleCredentialService';
 import { cleanMailDetailText } from './mailContentCleaner';
 import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';
 import { buildMailSynthesisUserPrompt } from './prompts/mailSynthesisUserTemplate';
@@ -126,8 +127,8 @@ export function buildMailAccounts(env: MailAccountsEnv): MailAccount[] {
   // Legacy single-account fallback
   const override = env.MAIL_PROVIDER?.trim().toLowerCase();
   if (override && override !== 'gmail') return [];
-  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN) {
-    return [{ label: 'gmail', provider: 'gmail', clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN }];
+  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && (env.GOOGLE_REFRESH_TOKEN || env.OAUTH_REFRESH_TOKEN_STORE_PATH)) {
+    return [{ label: 'gmail', provider: 'gmail', clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, refreshToken: env.GOOGLE_REFRESH_TOKEN ?? '' }];
   }
   return [];
 }
@@ -155,7 +156,7 @@ type MinLogger = {
 
 async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: string): Promise<string> {
   const cacheBase = `${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
-  const storeBase = `mail:${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
+  const storeBase = acc.provider === 'gmail' ? googleRefreshTokenStoreKey(acc.clientId) : `mail:${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
   return refreshGoogleToken({
     GOOGLE_CLIENT_ID:     acc.clientId,
     GOOGLE_CLIENT_SECRET: acc.clientSecret,

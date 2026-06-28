@@ -6,12 +6,15 @@
  * the dashboard agenda section and the calendar conversation agent.
  */
 
+import { resolveGoogleCredentials } from '../google/googleCredentialService';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface CalendarTokenEnv {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
-  GOOGLE_REFRESH_TOKEN: string;
+  GOOGLE_REFRESH_TOKEN?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
 }
 
 export interface GoogleCalendarEventDateTime {
@@ -63,7 +66,9 @@ const GOOGLE_CAL_BASE = 'https://www.googleapis.com/calendar/v3';
 // ─── Token refresh ────────────────────────────────────────────────────────────
 
 export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<string> {
-  const cacheKey = `gcal:${env.GOOGLE_CLIENT_ID}`;
+  const credentials = await resolveGoogleCredentials(env);
+  if (!credentials) throw new Error('calendar_credentials_missing');
+  const cacheKey = `gcal:${credentials.clientId}`;
   const cached = _tokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
 
@@ -71,9 +76,9 @@ export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<strin
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id:     env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: env.GOOGLE_REFRESH_TOKEN,
+      client_id:     credentials.clientId,
+      client_secret: credentials.clientSecret,
+      refresh_token: credentials.refreshToken,
       grant_type:    'refresh_token',
     }),
     signal: AbortSignal.timeout(8_000),
@@ -142,7 +147,7 @@ export async function calendarApiRequest<T>(
 
 /** Returns true when the minimum Google OAuth credentials are present. */
 export function hasCalendarConfig(env: Partial<CalendarTokenEnv>): env is CalendarTokenEnv {
-  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN);
+  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && (env.GOOGLE_REFRESH_TOKEN || env.OAUTH_REFRESH_TOKEN_STORE_PATH));
 }
 
 /**

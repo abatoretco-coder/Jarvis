@@ -109,6 +109,22 @@ function haSpeechResponse(speech: string): Response {
   );
 }
 
+function nonTitleFetchCalls(fetchMock: jest.Mock): unknown[][] {
+  return fetchMock.mock.calls.filter(([, init]) => {
+    const body = typeof (init as RequestInit | undefined)?.body === 'string'
+      ? String((init as RequestInit).body)
+      : '';
+    if (!body) return true;
+    try {
+      const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
+      const systemPrompt = parsed.messages?.[0]?.content ?? '';
+      return !systemPrompt.includes('Donne un titre');
+    } catch {
+      return true;
+    }
+  });
+}
+
 describe('/v1/ingest integration', () => {
   let tempDir: string;
   let app: FastifyInstance;
@@ -215,7 +231,7 @@ describe('/v1/ingest integration', () => {
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('Il fait actuellement');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
-    expect((global.fetch as jest.Mock)).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
   });
 
   it('weather direct: complex query falls back to OpenAI synthesis', async () => {
@@ -269,7 +285,7 @@ describe('/v1/ingest integration', () => {
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('veste imperméable');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
-    expect((global.fetch as jest.Mock)).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(1);
   });
 
   it('semantic activation: allowed E2 weather route bypasses LLM router', async () => {
@@ -542,7 +558,7 @@ describe('/v1/ingest integration', () => {
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('Florence');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 
@@ -599,7 +615,7 @@ describe('/v1/ingest integration', () => {
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('Paris');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
 
   it('tts openai route uses dedicated TTS base URL without HA', async () => {
@@ -723,7 +739,7 @@ describe('/v1/ingest integration', () => {
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('zone à trafic limité');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
 
   it('semantic activation: search E2 failure falls back to LLM router', async () => {
@@ -905,7 +921,7 @@ describe('/v1/ingest integration', () => {
     expect(body).toContain('Je cherche ca, une seconde.');
     expect(body).toContain('zone a trafic limite');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
 
   it('semantic E1 live: search.deep.comparison bypasses LLM router and persists messages', async () => {
@@ -2528,9 +2544,11 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('Je ne trouve pas de minuteur Home Assistant configuré.');
+    expect(payload.responseText).toContain('Minuteur lance.');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(0);
+    const haCalls = calls.filter((call) => call.agent_id !== undefined);
+    expect(haCalls).toHaveLength(1);
+    expect(haCalls[0]?.agent_id).toBe('conversation.jarvis_broker');
   });
 
   it('semantic E1 live executor.timer resolves compatibility mapping without executors key', async () => {
@@ -2584,9 +2602,11 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('Je ne trouve pas de minuteur Home Assistant configuré.');
+    expect(payload.responseText).toContain('Minuteur lance en mode compat.');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(0);
+    const haCalls = calls.filter((call) => call.agent_id !== undefined);
+    expect(haCalls).toHaveLength(1);
+    expect(haCalls[0]?.agent_id).toBe('conversation.jarvis_broker');
   });
 
   it('semantic E1 executor route falls back when executors mapping is missing', async () => {
@@ -2640,8 +2660,9 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.agent_id).toBe('conversation.openai_conversation');
+    const haCalls = calls.filter((call) => call.agent_id !== undefined);
+    expect(haCalls).toHaveLength(1);
+    expect(haCalls[0]?.agent_id).toBe('conversation.openai_conversation');
   });
 
   it('structured spotify uses effective thread id and keeps conversation window active', async () => {
@@ -3070,7 +3091,7 @@ describe('/v1/ingest integration', () => {
           top2Intent: 'executor.note',
           confidence: 0.95,
         },
-        expectedContains: 'Je ne trouve pas de minuteur Home Assistant configuré.',
+        expectedContains: 'Minuteur lance.',
       },
     ];
 
@@ -3139,7 +3160,7 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).toContain('Paris');
     expect(payload.responseText).toContain('22');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
 
   it('returns 404 for an unknown history without creating a phantom thread', async () => {
