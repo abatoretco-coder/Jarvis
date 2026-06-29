@@ -341,6 +341,52 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
+  it('routes a typoed "evenment du jour" delete request with a symbolic event name to Calendar', async () => {
+    const todayEvent = {
+      id: 'event-em',
+      summary: 'E&M',
+      start: { dateTime: '2026-06-29T14:00:00+02:00' },
+      end: { dateTime: '2026-06-29T15:00:00+02:00' },
+    };
+    let searchUrl = '';
+    const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'mail' });
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
+        searchUrl = rawUrl;
+        return googleEvents([todayEvent]);
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-delete-today-symbol',
+        text: "supprime mon evenment du jour E&M s'il te plait je peux plus y aller",
+        clientContext: { channel: 'desktop-delete-today-symbol' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
+    expect(payload.responseText).toContain('confirme agenda cal');
+    expect(payload.responseText).not.toContain('OUT_OF_SCOPE');
+    expect(payload.replyMeta).toMatchObject({
+      kind: 'calendar',
+      routeKey: 'calendar.delete_event',
+      semanticDecision: 'confirmation_required',
+    });
+    expect(decodeURIComponent(searchUrl)).toContain('q=E&M');
+    expect(searchUrl).toContain('timeMin=');
+    expect(searchUrl).toContain('timeMax=');
+    await app.close();
+  });
+
   it('executes a pending delete_event only with the stored proposalId payload', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);

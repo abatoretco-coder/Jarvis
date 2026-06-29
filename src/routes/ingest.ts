@@ -199,7 +199,7 @@ function normalizeIntentText(value: string): string {
 function isLikelyCalendarIntent(text: string): boolean {
   const t = normalizeIntentText(text);
   if (!t) return false;
-  const hasCalendarObject = /\b(agenda|calendrier|evenement|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(t);
+  const hasCalendarObject = /\b(agenda|calendrier|evenements?|evenments?|evenemnts?|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(t);
   if (!hasCalendarObject) return false;
   return /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve|recherche|supprime|supprimer|annule|annuler|efface|effacer|modifie|modifier|change|changer|deplace|deplacer|decale|decaler|retire|retirer|enleve|enlever)\b/.test(t)
     || /\b(planning|prochains? evenements?|qu est ce que j ai)\b/.test(t);

@@ -288,6 +288,79 @@ Exemples :
 `.trim();
 }
 
+function addDaysToIsoDate(isoDate: string, days: number): string {
+  const [yearRaw, monthRaw, dayRaw] = isoDate.split('-');
+  const year = Number.parseInt(yearRaw ?? '', 10);
+  const month = Number.parseInt(monthRaw ?? '', 10);
+  const day = Number.parseInt(dayRaw ?? '', 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return isoDate;
+  const shifted = new Date(Date.UTC(year, month - 1, day + days, 12, 0, 0));
+  return `${shifted.getUTCFullYear().toString().padStart(4, '0')}-${(shifted.getUTCMonth() + 1).toString().padStart(2, '0')}-${shifted.getUTCDate().toString().padStart(2, '0')}`;
+}
+
+function normalizeCalendarIntentText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[â€™']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanEventQuery(value: string): string {
+  return value
+    .replace(/\b(s['’]?il te plai?t|stp|svp|merci)\b.*$/iu, '')
+    .replace(/\b(je ne peux plus y aller|je peux plus y aller|peux plus y aller|je n[’']?y vais pas|j[’']?y vais pas)\b.*$/iu, '')
+    .replace(/^[\s:,\-.]+|[\s:,\-.]+$/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function loosenEventSearchQuery(value: string): string | undefined {
+  const loosened = value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!loosened || loosened.toLowerCase() === value.trim().toLowerCase()) return undefined;
+  return loosened;
+}
+
+function extractTodayDeleteQuery(text: string): string | undefined {
+  const raw = text.trim();
+  const normalized = normalizeCalendarIntentText(text);
+  const hasDeleteVerb = /\b(supprime|supprimer|annule|annuler|efface|effacer)\b/.test(normalized);
+  const hasCalendarObject = /\b(evenements?|evenments?|evenemnts?|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(normalized);
+  const hasTodayMarker = /\b(du jour|aujourd hui|aujourdhui|ce jour)\b/.test(normalized);
+  if (!hasDeleteVerb || !hasCalendarObject || !hasTodayMarker) return undefined;
+
+  const rawPatterns = [
+    /\b(?:du\s+jour|aujourd[’']?hui|aujourdhui|ce\s+jour)\s+(.+)$/iu,
+    /\b(?:evenements?|evenments?|evenemnts?|event|rdv|rendez[-\s]?vous|reunion|meeting)\s+(?:du\s+jour|aujourd[’']?hui|aujourdhui|ce\s+jour)?\s*(.+)$/iu,
+  ];
+  for (const pattern of rawPatterns) {
+    const match = raw.match(pattern);
+    const query = cleanEventQuery(match?.[1] ?? '');
+    if (query) return query;
+  }
+
+  return undefined;
+}
+
+function preplanCalendarAction(text: string, isoDate: string): CalendarAction | undefined {
+  const query = extractTodayDeleteQuery(text);
+  if (!query) return undefined;
+  const nextIsoDate = addDaysToIsoDate(isoDate, 1);
+  return {
+    action: 'delete_event',
+    q: query,
+    timeMin: `${isoDate}T00:00:00`,
+    timeMax: `${nextIsoDate}T00:00:00`,
+  };
+}
+
 async function planCalendarAction(
   text: string,
   env: CalendarAgentEnv,
@@ -295,6 +368,8 @@ async function planCalendarAction(
   const now = new Date();
   const dateStr = formatParisDateTime(now);
   const isoDate = getParisIsoDate(now);
+  const preplanned = preplanCalendarAction(text, isoDate);
+  if (preplanned) return parseCalendarAction(preplanned, env);
 
   const resp = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -466,22 +541,28 @@ export async function prepareCalendarMutationAction(
   const defaultTimeMax = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const candidates: Array<GoogleCalendarEvent & { calendarId: string }> = [];
-  for (const calendarId of calendarIds) {
-    const params = new URLSearchParams({
-      singleEvents: 'true',
-      orderBy: 'startTime',
-      maxResults: '10',
-      showDeleted: 'false',
-      q: action.q,
-    });
-    params.set('timeMin', action.timeMin ?? defaultTimeMin);
-    params.set('timeMax', action.timeMax ?? defaultTimeMax);
-    const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
-      `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
-      token,
-    );
-    candidates.push(...(payload.items ?? []).filter((ev) => ev.status !== 'cancelled').map((ev) => ({ ...ev, calendarId })));
-  }
+  const searchCandidates = async (query: string): Promise<void> => {
+    for (const calendarId of calendarIds) {
+      const params = new URLSearchParams({
+        singleEvents: 'true',
+        orderBy: 'startTime',
+        maxResults: '10',
+        showDeleted: 'false',
+        q: query,
+      });
+      params.set('timeMin', action.timeMin ?? defaultTimeMin);
+      params.set('timeMax', action.timeMax ?? defaultTimeMax);
+      const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
+        `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
+        token,
+      );
+      candidates.push(...(payload.items ?? []).filter((ev) => ev.status !== 'cancelled').map((ev) => ({ ...ev, calendarId })));
+    }
+  };
+
+  await searchCandidates(action.q);
+  const looseQuery = candidates.length === 0 ? loosenEventSearchQuery(action.q) : undefined;
+  if (looseQuery) await searchCandidates(looseQuery);
 
   if (candidates.length === 0) return { status: 'not_found', message: `Je n'ai trouvé aucun événement correspondant à "${action.q}".` };
   if (candidates.length > 1) {
