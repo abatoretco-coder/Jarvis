@@ -106,7 +106,7 @@ type AddChecklistAction        = { action: 'add_checklist_item';       task_titl
 type CompleteChecklistAction   = { action: 'complete_checklist_item';  task_title: string; item_title: string; list_name?: string };
 type DeleteChecklistAction     = { action: 'delete_checklist_item';    task_title: string; item_title: string; list_name?: string };
 
-type TodoAction =
+export type TodoAction =
   | ListTasksAction | AddTaskAction | CompleteAction | DeleteAction | UpdateTaskAction
   | ListListsAction | CreateListAction | DeleteListAction
   | AddChecklistAction | CompleteChecklistAction | DeleteChecklistAction;
@@ -609,6 +609,56 @@ async function planTodoAction(
   return parsed as TodoAction;
 }
 
+export async function planTodoAgentAction(
+  text: string,
+  env: TodoEnv,
+  log?: MinLogger,
+): Promise<TodoAction | { clarification: string }> {
+  if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
+    return { clarification: 'La gestion des taches n est pas configuree.' };
+  }
+  if (!env.OPENAI_API_KEY) return { clarification: 'Je ne peux pas gerer les taches pour l instant, la cle OpenAI est manquante.' };
+  try {
+    let action = await planTodoAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS);
+    if (action.action === 'list_tasks' && !action.period) {
+      const inferred = inferListTasksPeriodFromText(text);
+      if (inferred) {
+        action = { ...action, period: inferred };
+        log?.info({ inferred_period: inferred }, 'todo_agent_period_inferred');
+      }
+    }
+    return action;
+  } catch (err) {
+    log?.warn({ err: String(err) }, 'todo_agent_planner_error');
+    return { clarification: 'Desole, je n ai pas compris cette demande de tache. Tu peux reessayer differemment.' };
+  }
+}
+
+export function formatTodoActionPreview(action: TodoAction): string {
+  switch (action.action) {
+    case 'add_task':
+      return `Tache a ajouter: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}${action.due_date ? `, echeance ${action.due_date}` : ''}.`;
+    case 'complete_task':
+      return `Tache a terminer: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}.`;
+    case 'delete_task':
+      return `Tache a supprimer: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}.`;
+    case 'update_task':
+      return `Tache a modifier: ${action.title}${action.new_title ? ` vers ${action.new_title}` : ''}${action.due_date ? `, echeance ${action.due_date}` : ''}.`;
+    case 'create_list':
+      return `Liste a creer: ${action.name}.`;
+    case 'delete_list':
+      return `Liste a supprimer: ${action.name}.`;
+    case 'add_checklist_item':
+      return `Element checklist a ajouter: ${action.item_title} dans ${action.task_title}.`;
+    case 'complete_checklist_item':
+      return `Element checklist a terminer: ${action.item_title} dans ${action.task_title}.`;
+    case 'delete_checklist_item':
+      return `Element checklist a supprimer: ${action.item_title} dans ${action.task_title}.`;
+    default:
+      return `Action tache ${action.action}.`;
+  }
+}
+
 // ─── TTS formatting helpers ───────────────────────────────────────────────────
 
 const FR_MONTHS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
@@ -993,6 +1043,45 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
  * Returns true for HA_AGENT_MAP keys that should be handled by this todo agent.
  * Mirrors isSearchAgentKey() from search/agents.ts.
  */
+export async function executeTodoAgentAction(
+  action: TodoAction,
+  env: TodoEnv,
+  options?: { userText?: string; log?: MinLogger },
+): Promise<string> {
+  if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
+    return 'La gestion des taches n est pas disponible, les identifiants Microsoft ne sont pas configures.';
+  }
+  if (!env.OPENAI_API_KEY) return 'Je ne peux pas gerer les taches pour l instant, la cle OpenAI est manquante.';
+
+  let token: string;
+  try {
+    token = await refreshMicrosoftToken({
+      MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
+      MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
+      MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
+      MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
+      cacheKey:                `todo:${env.MICROSOFT_CLIENT_ID}`,
+      storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    });
+  } catch (err) {
+    options?.log?.warn({ err: String(err) }, 'todo_agent_token_error');
+    return 'Je ne peux pas acceder a Microsoft To Do pour le moment, le token d authentification a expire ou est invalide.';
+  }
+
+  const rawResult = await executeTodo(action, token);
+  options?.log?.info({ action: action.action, result_len: rawResult.length }, 'todo_agent_done');
+  if (action.action === 'list_tasks') return compactTodoListForFallback(rawResult);
+  return synthesizeTodoReplyWithOpenAi({
+    openAiApiKey: env.OPENAI_API_KEY,
+    openAiBaseUrl: env.OPENAI_BASE_URL,
+    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    timeoutMs: env.OPENAI_TIMEOUT_MS,
+    userText: options?.userText ?? action.action,
+    executorResult: rawResult,
+  });
+}
+
 export function isTodoAgentKey(key: string | undefined): key is string {
   if (!key) return false;
   return key === 'todo' || key.startsWith('todo.');

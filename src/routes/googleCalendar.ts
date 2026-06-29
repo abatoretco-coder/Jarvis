@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 
+import { getGoogleCalendarConfigState } from '../calendar/googleCalendarClient';
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import type { AppDeps } from '../server';
 
@@ -61,8 +63,59 @@ type GoogleTokenPayload = {
 
 const GOOGLE_CALENDAR_BASE = 'https://www.googleapis.com/calendar/v3';
 
-function hasGoogleCalendarConfig(env: AppDeps['env']): boolean {
-  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && (env.GOOGLE_REFRESH_TOKEN || env.OAUTH_REFRESH_TOKEN_STORE_PATH));
+const sendUpdatesSchema = z.enum(['none', 'all', 'externalOnly']).default('none');
+const calendarEventDateTimeSchema = z.object({
+  date: z.string().trim().min(1).optional(),
+  dateTime: z.string().trim().min(1).optional(),
+  timeZone: z.string().trim().min(1).optional(),
+}).strict();
+const writableEventSchema = z.object({
+  summary: z.string().trim().min(1).max(300).optional(),
+  description: z.string().max(2_000).nullable().optional(),
+  location: z.string().max(500).nullable().optional(),
+  start: calendarEventDateTimeSchema.optional(),
+  end: calendarEventDateTimeSchema.optional(),
+  attendees: z.array(z.object({
+    email: z.string().trim().email().optional(),
+    displayName: z.string().trim().max(200).optional(),
+    optional: z.boolean().optional(),
+    responseStatus: z.enum(['needsAction', 'declined', 'tentative', 'accepted']).optional(),
+  }).strict()).max(100).optional(),
+  reminders: z.object({
+    useDefault: z.boolean().optional(),
+    overrides: z.array(z.object({
+      method: z.enum(['email', 'popup']).optional(),
+      minutes: z.coerce.number().int().min(0).max(40320).optional(),
+    }).strict()).max(10).optional(),
+  }).strict().optional(),
+}).strict();
+
+async function ensureCalendarReady(env: AppDeps['env']): Promise<{ ok: true } | { ok: false; error: string }> {
+  const state = await getGoogleCalendarConfigState(env);
+  if (state === 'ready') return { ok: true };
+  return { ok: false, error: state };
+}
+
+function allowedCalendarIds(env: AppDeps['env']): Set<string> {
+  const ids = new Set(
+    String(env.GOOGLE_CALENDAR_CALENDAR_IDS ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+  if (env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID) ids.add(env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID.trim());
+  ids.add('primary');
+  return ids;
+}
+
+function resolveAllowedCalendarId(value: unknown, env: AppDeps['env'], fallback = 'primary'): string | null {
+  const raw = asStringQuery(value, fallback);
+  return allowedCalendarIds(env).has(raw) ? raw : null;
+}
+
+function parseSendUpdates(value: unknown): 'none' | 'all' | 'externalOnly' | null {
+  const parsed = sendUpdatesSchema.safeParse(asStringQuery(value, 'none'));
+  return parsed.success ? parsed.data : null;
 }
 
 async function refreshGoogleAccessToken(env: AppDeps['env']): Promise<string> {
@@ -135,31 +188,10 @@ function asStringQuery(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-function pickWritableEventFields(input: unknown): Record<string, unknown> {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
-  const body = input as Record<string, unknown>;
-  const allowedFields = [
-    'summary',
-    'description',
-    'location',
-    'start',
-    'end',
-    'attendees',
-    'reminders',
-  ] as const;
-
-  const next: Record<string, unknown> = {};
-  for (const key of allowedFields) {
-    if (key in body) next[key] = body[key];
-  }
-  return next;
-}
-
 export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps): void {
   app.get('/v1/calendar/google/calendars', async (_req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     try {
       const token = await refreshGoogleAccessToken(deps.env);
@@ -186,12 +218,13 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.get('/v1/calendar/google/events', async (req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const query = req.query as Record<string, unknown>;
-    const calendarId = encodeURIComponent(asStringQuery(query.calendarId, 'primary'));
+    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
+    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
+    const calendarId = encodeURIComponent(resolvedCalendarId);
     const timeMin = asStringQuery(query.timeMin);
     const timeMax = asStringQuery(query.timeMax);
     const q = asStringQuery(query.q);
@@ -233,16 +266,17 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.get('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
     const eventId = params.eventId?.trim();
     if (!eventId) return reply.code(400).send({ error: 'event_id_required' });
 
     const query = req.query as Record<string, unknown>;
-    const calendarId = encodeURIComponent(asStringQuery(query.calendarId, 'primary'));
+    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
+    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
+    const calendarId = encodeURIComponent(resolvedCalendarId);
 
     try {
       const token = await refreshGoogleAccessToken(deps.env);
@@ -258,14 +292,18 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.post('/v1/calendar/google/events', async (req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const query = req.query as Record<string, unknown>;
-    const calendarId = encodeURIComponent(asStringQuery(query.calendarId, 'primary'));
-    const sendUpdates = asStringQuery(query.sendUpdates, 'none');
-    const body = pickWritableEventFields(req.body);
+    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
+    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
+    const calendarId = encodeURIComponent(resolvedCalendarId);
+    const sendUpdates = parseSendUpdates(query.sendUpdates);
+    if (!sendUpdates) return reply.code(400).send({ error: 'invalid_send_updates' });
+    const parsedBody = writableEventSchema.safeParse(req.body);
+    if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_body', issues: parsedBody.error.issues });
+    const body = parsedBody.data;
     if (!body.start || !body.end) {
       return reply.code(400).send({ error: 'start_and_end_required' });
     }
@@ -285,18 +323,22 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.patch('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
     const eventId = params.eventId?.trim();
     if (!eventId) return reply.code(400).send({ error: 'event_id_required' });
 
     const query = req.query as Record<string, unknown>;
-    const calendarId = encodeURIComponent(asStringQuery(query.calendarId, 'primary'));
-    const sendUpdates = asStringQuery(query.sendUpdates, 'none');
-    const body = pickWritableEventFields(req.body);
+    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
+    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
+    const calendarId = encodeURIComponent(resolvedCalendarId);
+    const sendUpdates = parseSendUpdates(query.sendUpdates);
+    if (!sendUpdates) return reply.code(400).send({ error: 'invalid_send_updates' });
+    const parsedBody = writableEventSchema.safeParse(req.body);
+    if (!parsedBody.success) return reply.code(400).send({ error: 'invalid_body', issues: parsedBody.error.issues });
+    const body = parsedBody.data;
 
     try {
       const token = await refreshGoogleAccessToken(deps.env);
@@ -313,17 +355,19 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.delete('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    if (!hasGoogleCalendarConfig(deps.env)) {
-      return reply.code(503).send({ error: 'google_calendar_not_configured' });
-    }
+    const ready = await ensureCalendarReady(deps.env);
+    if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
     const eventId = params.eventId?.trim();
     if (!eventId) return reply.code(400).send({ error: 'event_id_required' });
 
     const query = req.query as Record<string, unknown>;
-    const calendarId = encodeURIComponent(asStringQuery(query.calendarId, 'primary'));
-    const sendUpdates = asStringQuery(query.sendUpdates, 'none');
+    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
+    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
+    const calendarId = encodeURIComponent(resolvedCalendarId);
+    const sendUpdates = parseSendUpdates(query.sendUpdates);
+    if (!sendUpdates) return reply.code(400).send({ error: 'invalid_send_updates' });
 
     try {
       const token = await refreshGoogleAccessToken(deps.env);

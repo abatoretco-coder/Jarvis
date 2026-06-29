@@ -51,8 +51,17 @@ import {
   type VoiceResponseDomain,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
-import { buildMailAccounts, callMailAgent, isMailAgentKey } from '../mail/mailAgent';
+import {
+  buildMailAccounts,
+  callMailAgent,
+  executeMailAgentAction,
+  formatMailActionPreview,
+  isMailAgentKey,
+  type MailAction,
+  planMailAgentAction,
+} from '../mail/mailAgent';
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
+import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -73,7 +82,14 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
-import { callTodoAgent, isTodoAgentKey } from '../todo/todoAgent';
+import {
+  callTodoAgent,
+  executeTodoAgentAction,
+  formatTodoActionPreview,
+  isTodoAgentKey,
+  planTodoAgentAction,
+  type TodoAction,
+} from '../todo/todoAgent';
 import {
   isClearlyExternalWeather,
   isClearlyLocalWeather,
@@ -562,6 +578,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
+  const pendingMutationRepository = new PendingMutationRepository(db);
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -866,10 +883,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   type PendingMutation =
     | {
         agent: 'calendar';
-        action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event';
+        action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event' | 'disambiguate_event';
         effect: CapabilityEffect;
         preview: string;
-        payload: { plan: CalendarAction };
+        payload: { plan?: CalendarAction; disambiguation?: { action: Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }>; candidates: Array<{ index: number; eventId: string; calendarId: string; title: string; start: string }> } };
         proposalId: string;
         threadId: string;
         clientChannel?: string;
@@ -881,7 +898,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         action: string;
         effect: CapabilityEffect;
         preview: string;
-        payload: { routeKey?: string; text: string };
+        payload: { routeKey?: string; text: string; plan?: MailAction | TodoAction };
         proposalId: string;
         threadId: string;
         clientChannel?: string;
@@ -890,8 +907,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       };
   type PendingCalendarMutation = Extract<PendingMutation, { agent: 'calendar' }>;
   type PendingCalendarAction = PendingCalendarMutation['action'];
+  type ExecutableCalendarAction = Exclude<PendingCalendarAction, 'disambiguate_event'>;
   type PendingCalendarRouteKey = PendingCalendarMutation['routeKey'];
-  const pendingMutations = new Map<string, PendingMutation>();
   const PENDING_MUTATION_TTL_MS = 10 * 60_000;
 
   const buildCalendarEnv = () => ({
@@ -939,36 +956,75 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return `${mutation.preview} Pour confirmer, dis "confirme ${label} ${mutation.proposalId}" ou utilise le bouton de confirmation.`;
   };
 
-  const createPendingMutationProposal = (input: {
+  const createPendingMutationProposal = async (input: {
     threadId: string;
     clientChannel?: string;
     agent: Extract<CapabilityAgent, 'mail' | 'todo'>;
     action: string;
     effect: CapabilityEffect;
-    text: string;
+    payload: { routeKey?: string; text: string; plan?: MailAction | TodoAction };
+    preview?: string;
     routeKey?: string;
-  }): PendingMutation => {
+  }): Promise<PendingMutation> => {
     const prefix = input.agent === 'mail' ? 'mail' : 'todo';
     const proposalId = `${prefix}${randomUUID().slice(0, 8)}`;
-    const mutation: PendingMutation = {
+    const mutation = await pendingMutationRepository.create({
       agent: input.agent,
       action: input.action,
       effect: input.effect,
-      preview: `Cette action ${input.agent}.${input.action} modifie des donnees et attend une confirmation.`,
-      payload: { routeKey: input.routeKey, text: input.text },
+      preview: input.preview ?? `Cette action ${input.agent}.${input.action} modifie des donnees et attend une confirmation.`,
+      payload: input.payload,
       proposalId,
       threadId: input.threadId,
       clientChannel: input.clientChannel,
       expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
       routeKey: input.routeKey,
-    };
-    pendingMutations.set(input.threadId, mutation);
-    return mutation;
+    });
+    return mutation as PendingMutation;
   };
 
-  const isLikelyMailOrTodoMutation = (value: string): boolean => {
-    const normalized = normalizeConfirmationText(value);
-    return /\b(envoie|envoyer|reponds|repondre|transfere|transferer|supprime|supprimer|efface|effacer|corbeille|marque|flag|ajoute|ajouter|cree|creer|complete|termine|terminer|modifie|modifier)\b/u.test(normalized);
+  const planPendingMailOrTodoMutation = async (input: {
+    agent: Extract<CapabilityAgent, 'mail' | 'todo'>;
+    threadId: string;
+    clientChannel?: string;
+    text: string;
+    routeKey?: string;
+  }): Promise<string | null> => {
+    const routeCapability = findCapabilityByRouteKey(input.routeKey ?? '');
+    const planned = input.agent === 'mail'
+      ? await planMailAgentAction(input.text, buildMailEnv(), app.log)
+      : await planTodoAgentAction(input.text, buildTodoEnv(), app.log);
+    if ('clarification' in planned) {
+      if (routeCapability && requiresCapabilityConfirmation(routeCapability)) {
+        const mutation = await createPendingMutationProposal({
+          threadId: input.threadId,
+          clientChannel: input.clientChannel,
+          agent: input.agent,
+          action: routeCapability.action,
+          effect: routeCapability.effect,
+          payload: { routeKey: input.routeKey, text: input.text },
+          routeKey: input.routeKey ?? routeCapability.routeKey,
+        });
+        return buildMutationProposalText(mutation);
+      }
+      return planned.clarification;
+    }
+    const capability = routeCapability ?? findCapabilityByRouteKey(`${input.agent}.${planned.action}`);
+    if (!capability || !requiresCapabilityConfirmation(capability)) return null;
+    const preview = input.agent === 'mail'
+      ? formatMailActionPreview(planned as MailAction)
+      : formatTodoActionPreview(planned as TodoAction);
+    const mutation = await createPendingMutationProposal({
+      threadId: input.threadId,
+      clientChannel: input.clientChannel,
+      agent: input.agent,
+      action: planned.action,
+      effect: capability.effect,
+      preview,
+      payload: { routeKey: input.routeKey, text: input.text, plan: planned },
+      routeKey: input.routeKey ?? capability.routeKey,
+    });
+    return buildMutationProposalText(mutation);
   };
 
   const isCalendarMutationRouteKey = (routeKey: string): routeKey is PendingCalendarRouteKey => (
@@ -978,7 +1034,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     || routeKey === 'calendar.remove_from_event'
   );
 
-  const routeKeyForCalendarMutation = (action: PendingCalendarAction): PendingCalendarRouteKey => {
+  const routeKeyForCalendarMutation = (action: ExecutableCalendarAction): PendingCalendarRouteKey => {
     switch (action) {
       case 'delete_event': return 'calendar.delete_event';
       case 'update_event': return 'calendar.update_event';
@@ -988,9 +1044,70 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
   };
 
-  const effectForCalendarMutation = (action: PendingCalendarAction): CapabilityEffect => (
+  const effectForCalendarMutation = (action: ExecutableCalendarAction): CapabilityEffect => (
     action === 'delete_event' ? 'destructive' : 'write'
   );
+
+  const createPendingCalendarMutation = async (input: {
+    threadId: string;
+    clientChannel?: string;
+    plan: Extract<CalendarAction, { action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event' }>;
+    preview: string;
+  }): Promise<PendingMutation> => {
+    const proposalId = `cal${randomUUID().slice(0, 8)}`;
+    return await pendingMutationRepository.create({
+      agent: 'calendar',
+      action: input.plan.action,
+      effect: effectForCalendarMutation(input.plan.action),
+      preview: input.preview,
+      payload: { plan: input.plan },
+      routeKey: routeKeyForCalendarMutation(input.plan.action),
+      proposalId,
+      threadId: input.threadId,
+      clientChannel: input.clientChannel,
+      expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
+    }) as PendingMutation;
+  };
+
+  const parseCalendarCandidateSelection = (value: string, candidates: Array<{ index: number; start: string }>): number | null => {
+    const normalized = normalizeConfirmationText(value);
+    if (/\b(premier|premiere|1|numero 1)\b/u.test(normalized)) return 1;
+    if (/\b(deuxieme|second|seconde|2|numero 2)\b/u.test(normalized)) return 2;
+    if (/\b(troisieme|3|numero 3)\b/u.test(normalized)) return 3;
+    const hour = normalized.match(/\b(?:celui de |a |de )?(\d{1,2})h\b/u)?.[1];
+    if (hour) {
+      const wanted = Number(hour);
+      const match = candidates.find((candidate) => {
+        const d = new Date(candidate.start);
+        return Number.isFinite(d.getTime()) && d.getHours() === wanted;
+      });
+      return match?.index ?? null;
+    }
+    return null;
+  };
+
+  const createCalendarMutationFromDisambiguation = async (mutation: PendingMutation, selectionText: string, selection?: { candidateIndex?: number; candidateEventId?: string }): Promise<string | null> => {
+    if (mutation.agent !== 'calendar' || mutation.action !== 'disambiguate_event' || !mutation.payload.disambiguation) return null;
+    const selectedIndex = selection?.candidateIndex ?? parseCalendarCandidateSelection(selectionText, mutation.payload.disambiguation.candidates);
+    const candidate = mutation.payload.disambiguation.candidates.find((item) => (
+      selection?.candidateEventId ? item.eventId === selection.candidateEventId : item.index === selectedIndex
+    ));
+    if (!candidate) return mutation.preview;
+    await pendingMutationRepository.cancel(mutation.proposalId, 'disambiguation_selected');
+    const plan = {
+      ...mutation.payload.disambiguation.action,
+      eventId: candidate.eventId,
+      calendarId: candidate.calendarId,
+    };
+    const preview = `Je peux appliquer calendar.${plan.action} sur "${candidate.title}", ${candidate.start}. Calendrier: ${candidate.calendarId}.`;
+    const finalMutation = await createPendingCalendarMutation({
+      threadId: mutation.threadId,
+      clientChannel: mutation.clientChannel,
+      plan,
+      preview,
+    });
+    return buildMutationProposalText(finalMutation);
+  };
 
   const planPendingCalendarMutation = async (threadId: string, inputText: string, channel?: string): Promise<string> => {
     const plan = await planCalendarAgentAction(inputText, buildCalendarEnv());
@@ -1004,26 +1121,29 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       preview = formatCalendarProposal(plan);
     } else {
       const prepared = await prepareCalendarMutationAction(plan, buildCalendarEnv());
+      if (prepared.status === 'ambiguous' && prepared.action && prepared.candidates?.length) {
+        const proposalId = `cal${randomUUID().slice(0, 8)}`;
+        await pendingMutationRepository.create({
+          agent: 'calendar',
+          action: 'disambiguate_event',
+          effect: effectForCalendarMutation(plan.action),
+          preview: prepared.message,
+          payload: { disambiguation: { action: prepared.action, candidates: prepared.candidates } },
+          routeKey: routeKeyForCalendarMutation(plan.action),
+          proposalId,
+          threadId,
+          clientChannel: channel,
+          expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
+        });
+        return `${prepared.message} Tu peux dire "le premier", "le deuxieme", "celui de 18h", ou utiliser le bouton de selection.`;
+      }
       if (prepared.status !== 'ready') return prepared.message;
       preparedPlan = prepared.action;
       preview = prepared.proposal;
     }
 
-    const proposalId = `cal${randomUUID().slice(0, 8)}`;
-    const routeKey = routeKeyForCalendarMutation(preparedPlan.action);
-    pendingMutations.set(threadId, {
-      agent: 'calendar',
-      action: preparedPlan.action,
-      effect: effectForCalendarMutation(preparedPlan.action),
-      preview,
-      payload: { plan: preparedPlan },
-      routeKey,
-      proposalId,
-      threadId,
-      clientChannel: channel,
-      expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
-    });
-    return `${preview} Pour confirmer, dis "confirme agenda ${proposalId}" ou utilise le bouton de confirmation.`;
+    const mutation = await createPendingCalendarMutation({ threadId, clientChannel: channel, plan: preparedPlan, preview });
+    return buildMutationProposalText(mutation);
   };
 
   function recordPerf(key: string, elapsedMs: number): void {
@@ -1042,6 +1162,134 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const p95 = sorted[Math.floor(sorted.length * 0.95)]!;
     return { count: sorted.length, avg, p50, p95 };
   }
+
+  const buildMailEnv = () => ({
+    mailAccounts: buildMailAccounts(deps.env),
+    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+  });
+
+  const buildTodoEnv = () => ({
+    MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
+    MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
+    MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
+    MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
+    OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
+    OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
+    OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
+  });
+
+  const executePendingMutation = async (mutation: PendingMutation): Promise<string> => {
+    if (mutation.agent === 'calendar') {
+      if (!mutation.payload.plan) throw new Error('pending_calendar_missing_plan');
+      return executeCalendarAgentAction(mutation.payload.plan, buildCalendarEnv());
+    }
+    if (mutation.agent === 'mail') {
+      const plan = mutation.payload.plan as MailAction | undefined;
+      if (!plan) throw new Error('pending_mail_missing_plan');
+      return executeMailAgentAction(plan, buildMailEnv(), { userText: mutation.payload.text, log: app.log });
+    }
+    if (mutation.agent === 'todo') {
+      const plan = mutation.payload.plan as TodoAction | undefined;
+      if (!plan) throw new Error('pending_todo_missing_plan');
+      return executeTodoAgentAction(plan, buildTodoEnv(), { userText: mutation.payload.text, log: app.log });
+    }
+    throw new Error('pending_mutation_unknown_agent');
+  };
+
+  const pendingMutationBodySchema = z.object({
+    threadId: z.string().trim().min(1),
+    clientChannel: z.string().trim().min(1).optional(),
+    candidateIndex: z.coerce.number().int().min(1).max(20).optional(),
+    candidateEventId: z.string().trim().min(1).optional(),
+  }).strict();
+
+  const pendingMutationDto = (mutation: PendingMutationRecord | PendingMutation) => ({
+    proposalId: mutation.proposalId,
+    threadId: mutation.threadId,
+    clientChannel: mutation.clientChannel,
+    agent: mutation.agent,
+    action: mutation.action,
+    effect: mutation.effect,
+    routeKey: mutation.routeKey,
+    preview: mutation.preview,
+    status: 'status' in mutation ? mutation.status : 'pending',
+    expiresAtMs: mutation.expiresAtMs,
+    createdAtMs: 'createdAtMs' in mutation ? mutation.createdAtMs : Date.now(),
+    executedAtMs: 'executedAtMs' in mutation ? mutation.executedAtMs : undefined,
+    payload: mutation.payload,
+  });
+
+  const routeClientChannel = (req: { headers: Record<string, unknown> }, bodyChannel?: string): string | undefined => (
+    normalizeClientChannel(bodyChannel) ?? normalizeClientChannel(req.headers['x-client-channel'])
+  );
+
+  app.get('/v1/pending-mutations', async (req, reply) => {
+    const query = z.object({ threadId: z.string().trim().min(1) }).safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
+    await pendingMutationRepository.expirePending();
+    const items = await pendingMutationRepository.listPendingByThread(query.data.threadId);
+    return reply.code(200).send({ status: 'ok', items: items.map(pendingMutationDto) });
+  });
+
+  app.post('/v1/pending-mutations/:proposalId/confirm', async (req, reply) => {
+    const params = z.object({ proposalId: z.string().trim().min(1) }).safeParse(req.params);
+    const body = pendingMutationBodySchema.safeParse(req.body);
+    if (!params.success) return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+    await pendingMutationRepository.expirePending();
+    const mutation = await pendingMutationRepository.findByProposalId(params.data.proposalId) as PendingMutation | null;
+    const channel = routeClientChannel(req, body.data.clientChannel);
+    if (!mutation) return reply.code(404).send({ error: 'pending_mutation_not_found' });
+    if (mutation.threadId !== body.data.threadId || (mutation.clientChannel && mutation.clientChannel !== channel)) {
+      return reply.code(409).send({ error: 'pending_mutation_context_mismatch' });
+    }
+    if (mutation.agent === 'calendar' && mutation.action === 'disambiguate_event') {
+      const responseText = await createCalendarMutationFromDisambiguation(mutation, '', {
+        candidateIndex: body.data.candidateIndex,
+        candidateEventId: body.data.candidateEventId,
+      });
+      const next = await pendingMutationRepository.findActiveByThread(mutation.threadId);
+      if (!responseText || !next || next.proposalId === mutation.proposalId) {
+        return reply.code(400).send({ error: 'calendar_candidate_required', item: pendingMutationDto(mutation) });
+      }
+      return reply.code(200).send({ status: 'pending', responseText, item: pendingMutationDto(next) });
+    }
+    const started = await pendingMutationRepository.tryStartExecution(mutation.proposalId);
+    if (started === 'executed') return reply.code(200).send({ status: 'executed', item: pendingMutationDto(mutation) });
+    if (started === 'executing') return reply.code(409).send({ error: 'pending_mutation_executing' });
+    if (started !== 'started') return reply.code(409).send({ error: 'pending_mutation_not_pending', status: started });
+    try {
+      const responseText = await executePendingMutation(mutation);
+      await pendingMutationRepository.markExecuted(mutation.proposalId);
+      const updated = await pendingMutationRepository.findByProposalId(mutation.proposalId);
+      return reply.code(200).send({ status: 'executed', responseText, item: updated ? pendingMutationDto(updated) : pendingMutationDto(mutation) });
+    } catch (err) {
+      await pendingMutationRepository.markFailed(mutation.proposalId, 'execution_failed');
+      app.log.warn({ proposalId: mutation.proposalId, agent: mutation.agent, action: mutation.action, err }, 'pending_mutation_rest_execute_failed');
+      return reply.code(500).send({ error: 'pending_mutation_execute_failed' });
+    }
+  });
+
+  app.post('/v1/pending-mutations/:proposalId/cancel', async (req, reply) => {
+    const params = z.object({ proposalId: z.string().trim().min(1) }).safeParse(req.params);
+    const body = pendingMutationBodySchema.safeParse(req.body);
+    if (!params.success) return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+    const mutation = await pendingMutationRepository.findByProposalId(params.data.proposalId);
+    const channel = routeClientChannel(req, body.data.clientChannel);
+    if (!mutation) return reply.code(404).send({ error: 'pending_mutation_not_found' });
+    if (mutation.threadId !== body.data.threadId || (mutation.clientChannel && mutation.clientChannel !== channel)) {
+      return reply.code(409).send({ error: 'pending_mutation_context_mismatch' });
+    }
+    const cancelled = await pendingMutationRepository.cancel(params.data.proposalId, 'api_cancel');
+    return reply.code(200).send({ status: cancelled?.status ?? 'cancelled', item: cancelled ? pendingMutationDto(cancelled) : pendingMutationDto(mutation) });
+  });
 
   app.post('/v1/ingest', async (req, reply) => {
     const parsed = ingestSchema.safeParse(req.body);
@@ -1091,12 +1339,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
 
-    const pendingMutation = pendingMutations.get(effectiveThreadId);
-    if (pendingMutation && pendingMutation.expiresAtMs <= Date.now()) {
-      pendingMutations.delete(effectiveThreadId);
-    }
-
-    const activePendingMutation = pendingMutations.get(effectiveThreadId);
+    await pendingMutationRepository.expirePending();
+    const activePendingMutation = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
     const pendingChannelMatches = !activePendingMutation?.clientChannel || activePendingMutation.clientChannel === clientChannel;
     const mentionsKnownProposal = Boolean(activePendingMutation && normalizeConfirmationText(text).includes(normalizeConfirmationText(activePendingMutation.proposalId)));
     const mentionsWrongProposal = /\b(?:cal|mail|todo)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) && !mentionsKnownProposal;
@@ -1108,14 +1352,54 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
+    if (activePendingMutation && text && pendingChannelMatches && activePendingMutation.agent === 'calendar' && activePendingMutation.action === 'disambiguate_event') {
+      const disambiguationText = await createCalendarMutationFromDisambiguation(activePendingMutation, text);
+      if (disambiguationText) {
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: disambiguationText, domain: 'calendar', mode: voiceMode })
+          : disambiguationText;
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        const finalProposal = await pendingMutationRepository.findActiveByThread(effectiveThreadId);
+        const payload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'calendar',
+            source: 'pending_mutation',
+            routeKey: finalProposal?.routeKey ?? activePendingMutation.routeKey,
+            semanticDecision: finalProposal?.proposalId === activePendingMutation.proposalId ? 'clarification_required' : 'confirmation_required',
+            ...(finalProposal ? { proposalId: finalProposal.proposalId } : {}),
+          },
+        };
+        return reply.code(200).send(payload);
+      }
+    }
+
     if (activePendingMutation && text && pendingChannelMatches && (isClearCalendarConfirmation(text, activePendingMutation.proposalId) || isClearCalendarRejection(text))) {
       const confirmed = isClearCalendarConfirmation(text, activePendingMutation.proposalId);
-      pendingMutations.delete(effectiveThreadId);
-      const mutationText = confirmed && activePendingMutation.agent === 'calendar'
-        ? await executeCalendarAgentAction(activePendingMutation.payload.plan, buildCalendarEnv())
-        : confirmed
-          ? 'Cette proposition est confirmee, mais son execution automatique n est pas encore activee pour cet agent.'
-          : 'Ok, je n execute pas cette action.';
+      let mutationText = 'Ok, je n execute pas cette action.';
+      if (confirmed) {
+        const started = await pendingMutationRepository.tryStartExecution(activePendingMutation.proposalId);
+        if (started === 'started') {
+          try {
+            mutationText = await executePendingMutation(activePendingMutation);
+            await pendingMutationRepository.markExecuted(activePendingMutation.proposalId);
+          } catch (err) {
+            mutationText = 'La mutation a echoue pendant l execution. Elle est conservee en etat failed.';
+            await pendingMutationRepository.markFailed(activePendingMutation.proposalId, 'execution_failed');
+            app.log.warn({ threadId: effectiveThreadId, requestId, agent: activePendingMutation.agent, action: activePendingMutation.action, err }, 'pending_mutation_execute_failed');
+          }
+        } else if (started === 'executed') {
+          mutationText = 'Cette proposition a deja ete executee.';
+        } else if (started === 'executing') {
+          mutationText = 'Cette proposition est deja en cours d execution.';
+        } else {
+          mutationText = 'Cette proposition n est plus disponible.';
+        }
+      } else {
+        await pendingMutationRepository.cancel(activePendingMutation.proposalId, 'voice_rejected');
+      }
       const responseDomain = activePendingMutation.agent;
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: mutationText, domain: responseDomain, mode: voiceMode })
@@ -1144,7 +1428,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(200).send(validated.data);
     }
     if (activePendingMutation && text && pendingChannelMatches) {
-      pendingMutations.delete(effectiveThreadId);
+      await pendingMutationRepository.cancelActiveByThread(effectiveThreadId, 'new_intent');
       app.log.info(
         { threadId: effectiveThreadId, requestId, proposalId: activePendingMutation.proposalId, agent: activePendingMutation.agent },
         'pending_mutation_cancelled_by_new_intent',
@@ -1393,8 +1677,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const calendarText = isCalendarMutationRouteKey(routeKey)
           ? await planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
           : await callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
-        const activeCalendarProposal = pendingMutations.get(effectiveThreadId);
-        const hasActiveCalendarProposal = activeCalendarProposal?.agent === 'calendar' && activeCalendarProposal.routeKey === routeKey;
+        const activeCalendarProposal = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+        const hasActiveCalendarProposal = activeCalendarProposal?.agent === 'calendar' && activeCalendarProposal.routeKey === routeKey && activeCalendarProposal.action !== 'disambiguate_event';
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
@@ -1408,7 +1692,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             source: 'calendar_agent',
             routeKey,
             ...(isCalendarMutationRouteKey(routeKey) ? { semanticDecision: hasActiveCalendarProposal ? 'confirmation_required' : 'clarification_required' } : {}),
-            ...(hasActiveCalendarProposal ? { proposalId: activeCalendarProposal.proposalId } : {}),
+            ...(activeCalendarProposal?.agent === 'calendar' ? { proposalId: activeCalendarProposal.proposalId } : {}),
           },
         };
         if (sseStream !== null) { pushSseResponse(payload); return reply; }
@@ -1968,20 +2252,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       'semantic_router_e1_mutation_blocked_pending_required',
                     );
                   }
-                  const blockedMutation = routeCapability
+                  const blockedMutationText = routeCapability
                     && (routeCapability.agent === 'mail' || routeCapability.agent === 'todo')
                     && requiresCapabilityConfirmation(routeCapability)
-                    ? createPendingMutationProposal({
+                    ? await planPendingMailOrTodoMutation({
                       threadId: effectiveThreadId,
                       clientChannel: clientChannel ?? undefined,
                       agent: routeCapability.agent,
-                      action: routeCapability.action,
-                      effect: routeCapability.effect,
                       text: assistantInputText,
                       routeKey,
-                    })
-                    : null;
-                  const blockedMutationText = blockedMutation ? buildMutationProposalText(blockedMutation) : '';
+                    }) ?? ''
+                    : '';
                   const e1Result = blockedMutationText
                     ? routeCapability?.agent === 'mail'
                       ? { kind: 'mail_text' as const, routeKey, data: blockedMutationText }
@@ -2486,19 +2767,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           } else if (isTodoAgent) {
             // Todo agent: LLM planner → Microsoft Graph Tasks — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct');
-            if (isLikelyMailOrTodoMutation(assistantInputText)) {
+            const pendingText = await planPendingMailOrTodoMutation({
+              threadId: effectiveThreadId,
+              clientChannel: clientChannel ?? undefined,
+              agent: 'todo',
+              text: assistantInputText,
+              routeKey: agentEntry?.key,
+            });
+            if (pendingText) {
               tasks.push(Promise.resolve({
                 kind: 'ha_text' as const,
                 agentId: haTarget.agentId,
-                text: buildMutationProposalText(createPendingMutationProposal({
-                  threadId: effectiveThreadId,
-                  clientChannel: clientChannel ?? undefined,
-                  agent: 'todo',
-                  action: 'mutation',
-                  effect: 'write',
-                  text: assistantInputText,
-                  routeKey: agentEntry?.key,
-                })),
+                text: pendingText,
               }));
               continue;
             }
@@ -2526,19 +2806,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           } else if (isMailAgent) {
             // Mail agent: LLM planner → Gmail / Outlook Graph — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct');
-            if (isLikelyMailOrTodoMutation(assistantInputText)) {
+            const pendingText = await planPendingMailOrTodoMutation({
+              threadId: effectiveThreadId,
+              clientChannel: clientChannel ?? undefined,
+              agent: 'mail',
+              text: assistantInputText,
+              routeKey: agentEntry?.key,
+            });
+            if (pendingText) {
               tasks.push(Promise.resolve({
                 kind: 'ha_text' as const,
                 agentId: haTarget.agentId,
-                text: buildMutationProposalText(createPendingMutationProposal({
-                  threadId: effectiveThreadId,
-                  clientChannel: clientChannel ?? undefined,
-                  agent: 'mail',
-                  action: 'mutation',
-                  effect: 'write',
-                  text: assistantInputText,
-                  routeKey: agentEntry?.key,
-                })),
+                text: pendingText,
               }));
               continue;
             }
@@ -2643,6 +2922,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         const taskResults = await Promise.all(tasks);
         const goodResults = taskResults.filter((r): r is SpecializedResult => r !== null);
+        const aggregatedSearchSources = Array.from(new Set(goodResults.flatMap((r) => (
+          r.kind === 'ha_text' ? (r.sources ?? []) : []
+        ))));
+        if (aggregatedSearchSources.length > 0) searchSources = aggregatedSearchSources;
 
         if (goodResults.length > 0) {
           const spotifyRes = goodResults.find(
@@ -2776,7 +3059,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       warmTtsInBackground(toSingleParagraphPlainText(assistantTextVoice));
     }
 
-    const activeProposalForResponse = pendingMutations.get(effectiveThreadId);
+    const activeProposalForResponse = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
     const payload = {
       threadId: effectiveThreadId,
       responseText: toSingleParagraphPlainText(assistantTextVoice),
@@ -2787,7 +3070,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
         ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
         semanticDecision: semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
-          ? (activeProposalForResponse?.agent === 'calendar' && activeProposalForResponse.routeKey === semanticActivatedRouteKey ? 'confirmation_required' : 'clarification_required')
+          ? (activeProposalForResponse?.agent === 'calendar' && activeProposalForResponse.routeKey === semanticActivatedRouteKey && activeProposalForResponse.action !== 'disambiguate_event' ? 'confirmation_required' : 'clarification_required')
           : (semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated')),
         ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain ? {
           proposalId: activeProposalForResponse.proposalId,

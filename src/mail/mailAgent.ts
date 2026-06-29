@@ -39,7 +39,7 @@ type TrashAction      = { action: 'trash_email';       subject?: string; sender?
 type GetEmailAction   = { action: 'get_email';         subject?: string; sender?: string; account?: string };
 type FlagAction       = { action: 'flag_email';        subject?: string; sender?: string; flagged?: boolean; account?: string };
 
-type MailAction = ListInboxAction | SearchAction | SendAction | MarkReadAction |
+export type MailAction = ListInboxAction | SearchAction | SendAction | MarkReadAction |
   MarkUnreadAction | ReplyAction | ForwardAction | TrashAction | GetEmailAction | FlagAction;
 
 // ─── Multi-account types ──────────────────────────────────────────────────────
@@ -468,6 +468,93 @@ async function planMailAction(
   }
 
   return parsed as MailAction;
+}
+
+export async function planMailAgentAction(
+  text: string,
+  env: MailEnv,
+  log?: MinLogger,
+): Promise<MailAction | { clarification: string }> {
+  const accounts = env.mailAccounts?.length ? env.mailAccounts : buildMailAccounts(env);
+  if (accounts.length === 0) return { clarification: 'La gestion des emails n est pas configuree.' };
+  if (!env.OPENAI_API_KEY) return { clarification: 'Agent mail non disponible : cle OpenAI manquante.' };
+  const preclassified = preclassifyMailAction(text);
+  if (preclassified) {
+    if ('clarification' in preclassified) log?.info({ reason: 'preclassified_clarification' }, 'mail_agent_clarification');
+    return preclassified;
+  }
+  return planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, accounts.map((account) => account.label));
+}
+
+export function formatMailActionPreview(action: MailAction): string {
+  switch (action.action) {
+    case 'send_email':
+      return `Email a envoyer a ${action.to}, objet "${action.subject}".`;
+    case 'reply_email':
+      return `Reponse email a envoyer${action.sender ? ` a ${action.sender}` : ''}${action.subject ? ` sur "${action.subject}"` : ''}.`;
+    case 'forward_email':
+      return `Email a transferer a ${action.to}${action.subject ? ` depuis "${action.subject}"` : ''}.`;
+    case 'trash_email':
+      return `Email a mettre a la corbeille${action.sender ? ` de ${action.sender}` : ''}${action.subject ? `, sujet "${action.subject}"` : ''}.`;
+    case 'mark_read':
+      return `Email a marquer comme lu${action.sender ? ` de ${action.sender}` : ''}${action.subject ? `, sujet "${action.subject}"` : ''}.`;
+    case 'mark_unread':
+      return `Email a marquer comme non lu${action.sender ? ` de ${action.sender}` : ''}${action.subject ? `, sujet "${action.subject}"` : ''}.`;
+    case 'flag_email':
+      return `Email a ${action.flagged === false ? 'retirer des importants' : 'marquer important'}${action.sender ? ` de ${action.sender}` : ''}${action.subject ? `, sujet "${action.subject}"` : ''}.`;
+    default:
+      return `Action email ${action.action}.`;
+  }
+}
+
+export async function executeMailAgentAction(
+  action: MailAction,
+  env: MailEnv,
+  options?: { userText?: string; log?: MinLogger },
+): Promise<string> {
+  const accounts = env.mailAccounts?.length ? env.mailAccounts : buildMailAccounts(env);
+  if (accounts.length === 0) return 'La gestion des emails n est pas configuree.';
+  if (!env.OPENAI_API_KEY) return 'Agent mail non disponible : cle OpenAI manquante.';
+
+  if ((action.action === 'list_inbox' || action.action === 'search_emails') && accounts.length > 1 && !action.account) {
+    const results = await Promise.allSettled(
+      accounts.map(async (acc) => {
+        const token = await getAccountTokenWithStore(acc, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
+        const result = await executeGmail(action, token);
+        return accounts.length > 1 ? `[${acc.label}] ${result}` : result;
+      }),
+    );
+    const successful = results
+      .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+      .map(r => r.value);
+    if (successful.length === 0) {
+      options?.log?.warn({ action: action.action }, 'mail_agent_all_accounts_failed');
+      return 'Impossible de recuperer les emails pour le moment.';
+    }
+    const combined = successful.join(' | ');
+    return synthesizeMailReplyWithOpenAi({
+      openAiApiKey: env.OPENAI_API_KEY,
+      openAiBaseUrl: env.OPENAI_BASE_URL,
+      model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      timeoutMs: env.OPENAI_TIMEOUT_MS,
+      userText: options?.userText ?? action.action,
+      executorResult: combined,
+    });
+  }
+
+  const target = action.account
+    ? (accounts.find(a => a.label.toLowerCase() === (action.account as string).toLowerCase()) ?? accounts[0])
+    : accounts[0];
+  const token = await getAccountTokenWithStore(target, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
+  const rawResult = await executeGmail(action, token);
+  return synthesizeMailReplyWithOpenAi({
+    openAiApiKey: env.OPENAI_API_KEY,
+    openAiBaseUrl: env.OPENAI_BASE_URL,
+    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    timeoutMs: env.OPENAI_TIMEOUT_MS,
+    userText: options?.userText ?? action.action,
+    executorResult: rawResult,
+  });
 }
 
 // ─── Gmail executor ───────────────────────────────────────────────────────────

@@ -195,6 +195,66 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
+  it('confirms a pending mutation through REST idempotently', async () => {
+    const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) {
+        return openAiPlan({
+          action: 'create_event',
+          summary: 'RDV garage',
+          start: '2026-07-03T10:00:00',
+          end: '2026-07-03T11:00:00',
+        });
+      }
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
+        expect(init?.method).toBe('POST');
+        return new Response(JSON.stringify({
+          id: 'event-garage',
+          summary: 'RDV garage',
+          start: { dateTime: '2026-07-03T10:00:00+02:00' },
+          end: { dateTime: '2026-07-03T11:00:00+02:00' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-rest-confirm',
+        text: 'Ajoute un RDV garage le 3 juillet a 10h',
+        clientContext: { channel: 'desktop-rest' },
+      },
+    });
+    const proposalId = String((first.json() as { replyMeta?: Record<string, unknown> }).replyMeta?.proposalId);
+
+    const listed = await app.inject({ method: 'GET', url: '/v1/pending-mutations?threadId=thread-calendar-rest-confirm' });
+    expect(listed.statusCode).toBe(200);
+    expect((listed.json() as { items: unknown[] }).items).toHaveLength(1);
+
+    const confirmPayload = { threadId: 'thread-calendar-rest-confirm', clientChannel: 'desktop-rest' };
+    const confirmed = await app.inject({
+      method: 'POST',
+      url: `/v1/pending-mutations/${proposalId}/confirm`,
+      payload: confirmPayload,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect((confirmed.json() as { status: string }).status).toBe('executed');
+
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/v1/pending-mutations/${proposalId}/confirm`,
+      payload: confirmPayload,
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(1);
+    await app.close();
+  });
+
   it('refuses confirmation with a mismatched proposalId', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       expect(String(url)).toContain('/chat/completions');
@@ -242,11 +302,15 @@ describe('calendar ingest confirmation', () => {
   });
 
   it('returns a delete_event proposal instead of OUT_OF_SCOPE for a nearby Calendar delete request', async () => {
+    let searchUrl = '';
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
       if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
-      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) return googleEvents([dentistEvent]);
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
+        searchUrl = rawUrl;
+        return googleEvents([dentistEvent]);
+      }
       throw new Error(`unexpected fetch ${rawUrl}`);
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -272,6 +336,8 @@ describe('calendar ingest confirmation', () => {
       semanticDecision: 'confirmation_required',
     });
     expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('event-dentist') && init?.method === 'DELETE')).toBe(false);
+    expect(searchUrl).toContain('timeMin=');
+    expect(searchUrl).toContain('timeMax=');
     await app.close();
   });
 
@@ -360,6 +426,63 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
+  it('preserves event duration for start-only update_event confirmation', async () => {
+    let patchBody = '';
+    const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) return openAiPlan({
+        action: 'update_event',
+        q: 'reunion',
+        start: '2026-07-01T16:00:00',
+      });
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events?')) return googleEvents([{
+        id: 'event-meeting-start-only',
+        summary: 'Reunion equipe',
+        start: { dateTime: '2026-07-01T14:00:00+02:00' },
+        end: { dateTime: '2026-07-01T15:00:00+02:00' },
+      }]);
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events/event-meeting-start-only') && init?.method !== 'PATCH') {
+        return new Response(JSON.stringify({
+          id: 'event-meeting-start-only',
+          summary: 'Reunion equipe',
+          start: { dateTime: '2026-07-01T14:00:00+02:00' },
+          end: { dateTime: '2026-07-01T15:00:00+02:00' },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events/event-meeting-start-only') && init?.method === 'PATCH') {
+        patchBody = String(init.body);
+        return new Response(JSON.stringify({ id: 'event-meeting-start-only' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-start-only',
+        text: 'deplace la reunion a 16h',
+        clientContext: { channel: 'desktop-start-only' },
+      },
+    });
+    const proposalId = String((first.json() as { replyMeta?: Record<string, unknown> }).replyMeta?.proposalId);
+    await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-start-only',
+        text: `confirme agenda ${proposalId}`,
+        clientContext: { channel: 'desktop-start-only' },
+      },
+    });
+    expect(patchBody).toContain('"end"');
+    expect(patchBody).toContain('17:00:00');
+    await app.close();
+  });
+
   it('returns a remove_from_event proposal for removing a reminder', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
@@ -394,6 +517,60 @@ describe('calendar ingest confirmation', () => {
       routeKey: 'calendar.remove_from_event',
       semanticDecision: 'confirmation_required',
     });
+    await app.close();
+  });
+
+  it('does not patch when removing an absent attendee', async () => {
+    const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) return openAiPlan({
+        action: 'remove_from_event',
+        q: 'garage',
+        field: 'attendee',
+        attendeeEmail: 'absent@example.com',
+      });
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events?')) return googleEvents([{
+        id: 'event-attendee',
+        summary: 'Garage',
+        start: { dateTime: '2026-07-02T09:00:00+02:00' },
+        end: { dateTime: '2026-07-02T10:00:00+02:00' },
+      }]);
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events/event-attendee') && init?.method !== 'PATCH') {
+        return new Response(JSON.stringify({
+          id: 'event-attendee',
+          attendees: [{ email: 'present@example.com' }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events/event-attendee') && init?.method === 'PATCH') {
+        throw new Error('PATCH should not be called');
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-attendee-absent',
+        text: 'retire absent@example.com de l evenement garage',
+        clientContext: { channel: 'desktop-attendee' },
+      },
+    });
+    const proposalId = String((first.json() as { replyMeta?: Record<string, unknown> }).replyMeta?.proposalId);
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-attendee-absent',
+        text: `confirme agenda ${proposalId}`,
+        clientContext: { channel: 'desktop-attendee' },
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { responseText: string }).responseText).toContain('pas trouve');
     await app.close();
   });
 
@@ -438,7 +615,22 @@ describe('calendar ingest confirmation', () => {
       routeKey: 'calendar.update_event',
       semanticDecision: 'clarification_required',
     });
-    expect(payload.replyMeta?.proposalId).toBeUndefined();
+    expect(payload.replyMeta?.proposalId).toMatch(/^cal/);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-ambiguous',
+        text: 'le deuxieme',
+        clientContext: { channel: 'desktop-ambiguous' },
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { replyMeta?: Record<string, unknown> }).replyMeta).toMatchObject({
+      routeKey: 'calendar.update_event',
+      semanticDecision: 'confirmation_required',
+    });
     await app.close();
   });
 });

@@ -376,11 +376,18 @@ type ResolvedCalendarMutationAction = Extract<CalendarAction, { action: 'delete_
   calendarId: string;
 };
 export type CalendarMutationAction = Extract<CalendarAction, { action: 'create_event' }> | ResolvedCalendarMutationAction;
+export type CalendarDisambiguationCandidate = {
+  index: number;
+  eventId: string;
+  calendarId: string;
+  title: string;
+  start: string;
+};
 
 export type CalendarMutationPreparation =
   | { status: 'ready'; action: ResolvedCalendarMutationAction; proposal: string }
   | { status: 'not_found'; message: string }
-  | { status: 'ambiguous'; message: string };
+  | { status: 'ambiguous'; message: string; action?: Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }>; candidates?: CalendarDisambiguationCandidate[] };
 
 function isCalendarMutationAction(action: CalendarAction): action is Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }> {
   return action.action === 'delete_event' || action.action === 'update_event' || action.action === 'remove_from_event';
@@ -389,6 +396,11 @@ function isCalendarMutationAction(action: CalendarAction): action is Extract<Cal
 function formatEventTarget(ev: GoogleCalendarEvent): string {
   const title = ev.summary?.trim() || '(sans titre)';
   return `${title}, ${formatEventDate(resolveEventStart(ev), !ev.start?.dateTime)}`;
+}
+
+function formatLocalDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function buildMutationPatch(action: Extract<CalendarAction, { action: 'update_event' | 'remove_from_event' }>, existing?: GoogleCalendarEvent): Record<string, unknown> {
@@ -410,10 +422,13 @@ function buildMutationPatch(action: Extract<CalendarAction, { action: 'update_ev
       ? { date: action.start }
       : { dateTime: action.start.includes('T') ? action.start : `${action.start}T00:00:00`, timeZone: 'Europe/Paris' };
   }
-  if (action.end) {
+  const endValue = action.end ?? (action.start && existing?.start?.dateTime && existing?.end?.dateTime
+    ? formatLocalDateTime(new Date(new Date(action.start.includes('T') ? action.start : `${action.start}T00:00:00`).getTime() + (new Date(existing.end.dateTime).getTime() - new Date(existing.start.dateTime).getTime())))
+    : undefined);
+  if (endValue) {
     patch['end'] = action.isAllDay
-      ? { date: action.end }
-      : { dateTime: action.end.includes('T') ? action.end : `${action.end}T00:00:00`, timeZone: 'Europe/Paris' };
+      ? { date: endValue }
+      : { dateTime: endValue.includes('T') ? endValue : `${endValue}T00:00:00`, timeZone: 'Europe/Paris' };
   }
   return patch;
 }
@@ -447,6 +462,8 @@ export async function prepareCalendarMutationAction(
   const tokenEnv = env as CalendarTokenEnv;
   const token = await refreshCalendarToken(tokenEnv);
   const calendarIds = action.calendarId ? [action.calendarId] : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
+  const defaultTimeMin = new Date().toISOString();
+  const defaultTimeMax = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const candidates: Array<GoogleCalendarEvent & { calendarId: string }> = [];
   for (const calendarId of calendarIds) {
@@ -457,8 +474,8 @@ export async function prepareCalendarMutationAction(
       showDeleted: 'false',
       q: action.q,
     });
-    if (action.timeMin) params.set('timeMin', action.timeMin);
-    if (action.timeMax) params.set('timeMax', action.timeMax);
+    params.set('timeMin', action.timeMin ?? defaultTimeMin);
+    params.set('timeMax', action.timeMax ?? defaultTimeMax);
     const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
       `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
       token,
@@ -468,7 +485,16 @@ export async function prepareCalendarMutationAction(
 
   if (candidates.length === 0) return { status: 'not_found', message: `Je n'ai trouvé aucun événement correspondant à "${action.q}".` };
   if (candidates.length > 1) {
-    const lines = candidates.slice(0, 5).map((ev, index) => `${index + 1}. ${formatEventTarget(ev)}`);
+    const disambiguationCandidates = candidates.slice(0, 5).map((ev, index) => ({
+      index: index + 1,
+      eventId: ev.id,
+      calendarId: ev.calendarId,
+      title: ev.summary?.trim() || '(sans titre)',
+      start: ev.start?.dateTime ?? ev.start?.date ?? '',
+    }));
+    const lines = disambiguationCandidates.map((ev) => `${ev.index}. ${ev.title}, ${ev.start}`);
+    return { status: 'ambiguous', action, candidates: disambiguationCandidates, message: `J'ai trouve plusieurs evenements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
+    // eslint-disable-next-line no-unreachable
     return { status: 'ambiguous', message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
   }
 
@@ -635,12 +661,16 @@ async function executeCalendarAction(
     case 'remove_from_event': {
       if (!plan.eventId || !plan.calendarId) return 'Je dois d abord identifier un seul événement à modifier.';
       const token = await refreshCalendarToken(tokenEnv);
-      const existing = plan.action === 'remove_from_event'
+      const existing = plan.action === 'remove_from_event' || (plan.action === 'update_event' && Boolean(plan.start) && !plan.end)
         ? await calendarApiRequest<GoogleCalendarEvent>(
           `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}`,
           token,
         )
         : undefined;
+      if (plan.action === 'remove_from_event' && plan.field === 'attendee') {
+        const found = (existing?.attendees ?? []).some((attendee) => attendee.email?.toLowerCase() === plan.attendeeEmail?.toLowerCase());
+        if (!found) return `Je n'ai pas trouve l'invite ${plan.attendeeEmail} sur cet evenement.`;
+      }
       const patch = buildMutationPatch(plan, existing);
       await calendarApiRequest<GoogleCalendarEvent>(
         `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}?sendUpdates=none`,
