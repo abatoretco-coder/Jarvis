@@ -59,7 +59,10 @@ export interface CalendarAgentEnv {
 export type CalendarAction =
   | { action: 'list_upcoming'; calendarId?: string; timeMin: string; timeMax: string; summary?: string }
   | { action: 'search_events'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; maxResults?: number; summary?: string }
-  | { action: 'create_event'; summary: string; start: string; end: string; isAllDay?: boolean; description?: string; location?: string; calendarId?: string };
+  | { action: 'create_event'; summary: string; start: string; end: string; isAllDay?: boolean; description?: string; location?: string; calendarId?: string }
+  | { action: 'delete_event'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; eventId?: string }
+  | { action: 'update_event'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; eventId?: string; summary?: string; start?: string; end?: string; isAllDay?: boolean; description?: string | null; location?: string | null; reminders?: { useDefault?: boolean; overrides?: Array<{ method: 'email' | 'popup'; minutes: number }> } }
+  | { action: 'remove_from_event'; q: string; calendarId?: string; timeMin?: string; timeMax?: string; eventId?: string; field: 'description' | 'location' | 'reminders' | 'attendee'; attendeeEmail?: string };
 
 export type CalendarAgentMode = 'execute' | 'propose';
 
@@ -67,6 +70,8 @@ const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u);
 const localDateTimeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/u);
 const localTemporalSchema = z.union([localDateSchema, localDateTimeSchema]);
 const optionalCalendarIdSchema = z.string().trim().min(1).max(256).optional();
+const eventQuerySchema = z.string().trim().min(1).max(200);
+const eventIdSchema = z.string().trim().min(1).max(256).optional();
 
 const calendarActionSchema = z.discriminatedUnion('action', [
   z.object({
@@ -95,6 +100,45 @@ const calendarActionSchema = z.discriminatedUnion('action', [
     location: z.string().trim().max(500).optional(),
     calendarId: optionalCalendarIdSchema,
   }).strict(),
+  z.object({
+    action: z.literal('delete_event'),
+    q: eventQuerySchema,
+    eventId: eventIdSchema,
+    calendarId: optionalCalendarIdSchema,
+    timeMin: localTemporalSchema.optional(),
+    timeMax: localTemporalSchema.optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('update_event'),
+    q: eventQuerySchema,
+    eventId: eventIdSchema,
+    calendarId: optionalCalendarIdSchema,
+    timeMin: localTemporalSchema.optional(),
+    timeMax: localTemporalSchema.optional(),
+    summary: z.string().trim().min(1).max(300).optional(),
+    start: localTemporalSchema.optional(),
+    end: localTemporalSchema.optional(),
+    isAllDay: z.boolean().optional(),
+    description: z.union([z.string().trim().max(2_000), z.null()]).optional(),
+    location: z.union([z.string().trim().max(500), z.null()]).optional(),
+    reminders: z.object({
+      useDefault: z.boolean().optional(),
+      overrides: z.array(z.object({
+        method: z.enum(['email', 'popup']),
+        minutes: z.coerce.number().int().min(0).max(40320),
+      }).strict()).max(10).optional(),
+    }).strict().optional(),
+  }).strict(),
+  z.object({
+    action: z.literal('remove_from_event'),
+    q: eventQuerySchema,
+    eventId: eventIdSchema,
+    calendarId: optionalCalendarIdSchema,
+    timeMin: localTemporalSchema.optional(),
+    timeMax: localTemporalSchema.optional(),
+    field: z.enum(['description', 'location', 'reminders', 'attendee']),
+    attendeeEmail: z.string().trim().email().optional(),
+  }).strict(),
 ]).superRefine((action, ctx) => {
   if ('timeMin' in action && action.timeMin && 'timeMax' in action && action.timeMax) {
     const start = Date.parse(action.timeMin);
@@ -103,9 +147,18 @@ const calendarActionSchema = z.discriminatedUnion('action', [
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timeMax must be after timeMin', path: ['timeMax'] });
     }
   }
-  if (action.action !== 'create_event') return;
-  const startIsDate = localDateSchema.safeParse(action.start).success;
-  const endIsDate = localDateSchema.safeParse(action.end).success;
+  if (action.action === 'remove_from_event' && action.field === 'attendee' && !action.attendeeEmail) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'attendeeEmail is required when removing an attendee', path: ['attendeeEmail'] });
+  }
+  if (action.action !== 'create_event' && action.action !== 'update_event') return;
+  if (action.action === 'update_event' && !action.summary && action.start === undefined && action.end === undefined && action.description === undefined && action.location === undefined && action.reminders === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'update_event requires at least one changed field', path: ['action'] });
+  }
+  const startValue = action.start;
+  const endValue = action.end;
+  if (startValue === undefined || endValue === undefined) return;
+  const startIsDate = localDateSchema.safeParse(startValue).success;
+  const endIsDate = localDateSchema.safeParse(endValue).success;
   const isAllDay = action.isAllDay ?? (startIsDate && endIsDate);
   if (isAllDay && (!startIsDate || !endIsDate)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'all-day events must use YYYY-MM-DD start/end', path: ['isAllDay'] });
@@ -113,8 +166,8 @@ const calendarActionSchema = z.discriminatedUnion('action', [
   if (!isAllDay && (startIsDate || endIsDate)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timed events must use local date-time start/end', path: ['start'] });
   }
-  const start = Date.parse(action.start);
-  const end = Date.parse(action.end);
+  const start = Date.parse(startValue);
+  const end = Date.parse(endValue);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'end must be after start', path: ['end'] });
   }
@@ -158,7 +211,7 @@ Date ISO du jour : ${isoDate}.
 Analyse la commande en français et retourne un JSON correspondant à UNE seule action calendrier.
 
 Champ obligatoire "action" parmi :
-  list_upcoming | search_events | create_event
+  list_upcoming | search_events | create_event | delete_event | update_event | remove_from_event
 
 Champs selon l'action :
 
@@ -183,6 +236,24 @@ Champs selon l'action :
     location (string, optionnel)
     calendarId (string, optionnel)
 
+  delete_event :
+    q (string, obligatoire) — mots-clés pour retrouver l'événement cible
+    timeMin/timeMax (string, optionnels) — fenêtre de recherche si une date est indiquée
+    calendarId (string, optionnel)
+
+  update_event :
+    q (string, obligatoire) — mots-clés pour retrouver l'événement cible
+    timeMin/timeMax (string, optionnels) — fenêtre de recherche si une date est indiquée
+    summary/start/end/description/location/reminders — uniquement les champs à modifier
+    Pour supprimer description ou location : mettre null.
+    Pour déplacer à une heure : fournir start et end si possible, sinon start seul.
+
+  remove_from_event :
+    q (string, obligatoire) — mots-clés pour retrouver l'événement cible
+    field parmi description | location | reminders | attendee
+    attendeeEmail requis si field="attendee"
+    timeMin/timeMax/calendarId optionnels
+
 Règles de résolution temporelle relative :
   - "demain" = le lendemain du jour actuel, de 00:00 à 23:59:59
   - "après-demain" = jour + 2
@@ -206,6 +277,14 @@ Exemples :
     → {"action":"create_event","summary":"RDV dentiste","start":"2026-05-29T15:00:00","end":"2026-05-29T16:00:00"}
   "Ajoute journée télétravail lundi"
     → {"action":"create_event","summary":"Télétravail","start":"2026-05-25","end":"2026-05-26","isAllDay":true}
+  "Supprime mon rendez-vous dentiste demain"
+    → {"action":"delete_event","q":"dentiste","timeMin":"2026-05-23T00:00:00","timeMax":"2026-05-24T00:00:00"}
+  "Déplace la réunion à 16h"
+    → {"action":"update_event","q":"réunion","start":"2026-05-22T16:00:00","end":"2026-05-22T17:00:00"}
+  "Supprime la description de l'événement garage"
+    → {"action":"remove_from_event","q":"garage","field":"description"}
+  "Retire le rappel de l'événement garage"
+    → {"action":"remove_from_event","q":"garage","field":"reminders"}
 `.trim();
 }
 
@@ -290,6 +369,120 @@ function resolveCreateCalendarId(plan: CalendarAction, env: CalendarAgentEnv): s
     return env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID.trim();
   }
   return 'primary';
+}
+
+type ResolvedCalendarMutationAction = Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }> & {
+  eventId: string;
+  calendarId: string;
+};
+export type CalendarMutationAction = Extract<CalendarAction, { action: 'create_event' }> | ResolvedCalendarMutationAction;
+
+export type CalendarMutationPreparation =
+  | { status: 'ready'; action: ResolvedCalendarMutationAction; proposal: string }
+  | { status: 'not_found'; message: string }
+  | { status: 'ambiguous'; message: string };
+
+function isCalendarMutationAction(action: CalendarAction): action is Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }> {
+  return action.action === 'delete_event' || action.action === 'update_event' || action.action === 'remove_from_event';
+}
+
+function formatEventTarget(ev: GoogleCalendarEvent): string {
+  const title = ev.summary?.trim() || '(sans titre)';
+  return `${title}, ${formatEventDate(resolveEventStart(ev), !ev.start?.dateTime)}`;
+}
+
+function buildMutationPatch(action: Extract<CalendarAction, { action: 'update_event' | 'remove_from_event' }>, existing?: GoogleCalendarEvent): Record<string, unknown> {
+  if (action.action === 'remove_from_event') {
+    if (action.field === 'description') return { description: null };
+    if (action.field === 'location') return { location: null };
+    if (action.field === 'reminders') return { reminders: { useDefault: false, overrides: [] } };
+    const attendees = (existing?.attendees ?? []).filter((attendee) => attendee.email?.toLowerCase() !== action.attendeeEmail?.toLowerCase());
+    return { attendees };
+  }
+
+  const patch: Record<string, unknown> = {};
+  if (action.summary) patch['summary'] = action.summary;
+  if (action.description !== undefined) patch['description'] = action.description;
+  if (action.location !== undefined) patch['location'] = action.location;
+  if (action.reminders) patch['reminders'] = action.reminders;
+  if (action.start) {
+    patch['start'] = action.isAllDay
+      ? { date: action.start }
+      : { dateTime: action.start.includes('T') ? action.start : `${action.start}T00:00:00`, timeZone: 'Europe/Paris' };
+  }
+  if (action.end) {
+    patch['end'] = action.isAllDay
+      ? { date: action.end }
+      : { dateTime: action.end.includes('T') ? action.end : `${action.end}T00:00:00`, timeZone: 'Europe/Paris' };
+  }
+  return patch;
+}
+
+function describeCalendarMutation(action: CalendarAction, ev: GoogleCalendarEvent): string {
+  const target = formatEventTarget(ev);
+  if (action.action === 'delete_event') return `Je peux supprimer l'événement ${target}.`;
+  if (action.action === 'remove_from_event') {
+    const label = action.field === 'attendee' ? `l'invité ${action.attendeeEmail}` : action.field;
+    return `Je peux retirer ${label} de l'événement ${target}.`;
+  }
+  const changes: string[] = [];
+  if (action.action === 'update_event') {
+    if (action.summary) changes.push(`titre: ${action.summary}`);
+    if (action.start) changes.push(`début: ${action.start}`);
+    if (action.end) changes.push(`fin: ${action.end}`);
+    if (action.location !== undefined) changes.push(action.location === null ? 'lieu supprimé' : `lieu: ${action.location}`);
+    if (action.description !== undefined) changes.push(action.description === null ? 'description supprimée' : 'description modifiée');
+    if (action.reminders) changes.push('rappels modifiés');
+  }
+  return `Je peux modifier l'événement ${target}${changes.length > 0 ? ` (${changes.join(', ')})` : ''}.`;
+}
+
+export async function prepareCalendarMutationAction(
+  action: CalendarAction,
+  env: CalendarAgentEnv,
+): Promise<CalendarMutationPreparation> {
+  if (!isCalendarMutationAction(action)) return { status: 'not_found', message: 'Action calendrier non mutationnelle.' };
+  const configState = await getGoogleCalendarConfigState(env);
+  if (configState !== 'ready') return { status: 'not_found', message: 'Connecte Google via OAuth pour activer le calendrier.' };
+  const tokenEnv = env as CalendarTokenEnv;
+  const token = await refreshCalendarToken(tokenEnv);
+  const calendarIds = action.calendarId ? [action.calendarId] : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
+
+  const candidates: Array<GoogleCalendarEvent & { calendarId: string }> = [];
+  for (const calendarId of calendarIds) {
+    const params = new URLSearchParams({
+      singleEvents: 'true',
+      orderBy: 'startTime',
+      maxResults: '10',
+      showDeleted: 'false',
+      q: action.q,
+    });
+    if (action.timeMin) params.set('timeMin', action.timeMin);
+    if (action.timeMax) params.set('timeMax', action.timeMax);
+    const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
+      `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
+      token,
+    );
+    candidates.push(...(payload.items ?? []).filter((ev) => ev.status !== 'cancelled').map((ev) => ({ ...ev, calendarId })));
+  }
+
+  if (candidates.length === 0) return { status: 'not_found', message: `Je n'ai trouvé aucun événement correspondant à "${action.q}".` };
+  if (candidates.length > 1) {
+    const lines = candidates.slice(0, 5).map((ev, index) => `${index + 1}. ${formatEventTarget(ev)}`);
+    return { status: 'ambiguous', message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
+  }
+
+  const event = candidates[0]!;
+  const resolved: ResolvedCalendarMutationAction = { ...action, eventId: event.id, calendarId: event.calendarId };
+  return {
+    status: 'ready',
+    action: resolved,
+    proposal: `${describeCalendarMutation(action, event)} Action: calendar.${action.action}. Calendrier: ${event.calendarId}.`,
+  };
+}
+
+export function isCalendarMutation(action: CalendarAction): action is CalendarMutationAction {
+  return action.action === 'create_event' || isCalendarMutationAction(action);
 }
 
 export function formatCalendarProposal(plan: CalendarAction): string {
@@ -427,6 +620,36 @@ async function executeCalendarAction(
       return `C'est ajoute dans ${agendaLabel} : ${title}, ${dateStr}${isAllDay ? ', toute la journee' : ''}.`;
     }
 
+    case 'delete_event': {
+      if (!plan.eventId || !plan.calendarId) return 'Je dois d abord identifier un seul événement à supprimer.';
+      const token = await refreshCalendarToken(tokenEnv);
+      await calendarApiRequest<undefined>(
+        `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}?sendUpdates=none`,
+        token,
+        { method: 'DELETE' },
+      );
+      return `C'est fait, l'événement "${plan.q}" est supprimé.`;
+    }
+
+    case 'update_event':
+    case 'remove_from_event': {
+      if (!plan.eventId || !plan.calendarId) return 'Je dois d abord identifier un seul événement à modifier.';
+      const token = await refreshCalendarToken(tokenEnv);
+      const existing = plan.action === 'remove_from_event'
+        ? await calendarApiRequest<GoogleCalendarEvent>(
+          `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}`,
+          token,
+        )
+        : undefined;
+      const patch = buildMutationPatch(plan, existing);
+      await calendarApiRequest<GoogleCalendarEvent>(
+        `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}?sendUpdates=none`,
+        token,
+        { method: 'PATCH', body: patch },
+      );
+      return `C'est fait, l'événement "${plan.q}" est modifié.`;
+    }
+
     default:
       return 'Action calendrier non reconnue.';
   }
@@ -466,8 +689,10 @@ export async function callCalendarAgent(
 
   log.info({ action: plan.action }, 'calendar_agent_plan');
 
-  if (options.mode === 'propose' && plan.action === 'create_event') {
-    return formatCalendarProposal(plan);
+  if (options.mode === 'propose' && isCalendarMutation(plan)) {
+    if (plan.action === 'create_event') return formatCalendarProposal(plan);
+    const prepared = await prepareCalendarMutationAction(plan, env);
+    return prepared.status === 'ready' ? prepared.proposal : prepared.message;
   }
 
   return executeCalendarAction(plan, env);

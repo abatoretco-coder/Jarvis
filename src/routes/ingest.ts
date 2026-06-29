@@ -10,7 +10,9 @@ import {
   executeCalendarAgentAction,
   formatCalendarProposal,
   isCalendarAgentKey,
+  isCalendarMutation,
   planCalendarAgentAction,
+  prepareCalendarMutationAction,
 } from '../calendar/calendarAgent';
 import {
   type CapabilityAgent,
@@ -183,12 +185,21 @@ function isLikelyCalendarIntent(text: string): boolean {
   if (!t) return false;
   const hasCalendarObject = /\b(agenda|calendrier|evenement|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(t);
   if (!hasCalendarObject) return false;
-  return /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve)\b/.test(t)
+  return /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve|recherche|supprime|supprimer|annule|annuler|efface|effacer|modifie|modifier|change|changer|deplace|deplacer|decale|decaler|retire|retirer|enleve|enlever)\b/.test(t)
     || /\b(planning|prochains? evenements?|qu est ce que j ai)\b/.test(t);
 }
 
 function inferCalendarRouteKey(text: string): string {
   const t = normalizeIntentText(text);
+  if (/\b(retire|retirer|enleve|enlever)\b/.test(t) || /\b(supprime|supprimer|efface|effacer)\b.*\b(description|lieu|rappel|rappels|invite|invites|participant|participants)\b/.test(t)) {
+    return 'calendar.remove_from_event';
+  }
+  if (/\b(supprime|supprimer|annule|annuler|efface|effacer)\b/.test(t)) {
+    return 'calendar.delete_event';
+  }
+  if (/\b(modifie|modifier|change|changer|deplace|deplacer|decale|decaler)\b/.test(t)) {
+    return 'calendar.update_event';
+  }
   if (/\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve)\b/.test(t)) {
     return 'calendar.create_event';
   }
@@ -855,7 +866,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   type PendingMutation =
     | {
         agent: 'calendar';
-        action: 'create_event';
+        action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event';
         effect: CapabilityEffect;
         preview: string;
         payload: { plan: CalendarAction };
@@ -863,7 +874,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         threadId: string;
         clientChannel?: string;
         expiresAtMs: number;
-        routeKey: 'calendar.create_event';
+        routeKey: 'calendar.create_event' | 'calendar.delete_event' | 'calendar.update_event' | 'calendar.remove_from_event';
       }
     | {
         agent: Extract<CapabilityAgent, 'mail' | 'todo'>;
@@ -877,6 +888,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         expiresAtMs: number;
         routeKey?: string;
       };
+  type PendingCalendarMutation = Extract<PendingMutation, { agent: 'calendar' }>;
+  type PendingCalendarAction = PendingCalendarMutation['action'];
+  type PendingCalendarRouteKey = PendingCalendarMutation['routeKey'];
   const pendingMutations = new Map<string, PendingMutation>();
   const PENDING_MUTATION_TTL_MS = 10 * 60_000;
 
@@ -907,7 +921,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const normalized = normalizeConfirmationText(value);
     const normalizedProposal = proposalId ? normalizeConfirmationText(proposalId) : '';
     return Boolean(normalizedProposal && normalized.includes(normalizedProposal))
-      || /^(confirme|je confirme|oui|ok|valide|cree|ajoute).*(agenda|calendrier|evenement|rdv)/u.test(normalized)
+      || /^(confirme|je confirme|valide|cree|ajoute).*(agenda|calendrier|evenement|rdv)/u.test(normalized)
       || /^(confirme|valide|cree|ajoute) (l'|le |cet |cette )?(evenement|rdv)/u.test(normalized);
   };
 
@@ -957,20 +971,53 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return /\b(envoie|envoyer|reponds|repondre|transfere|transferer|supprime|supprimer|efface|effacer|corbeille|marque|flag|ajoute|ajouter|cree|creer|complete|termine|terminer|modifie|modifier)\b/u.test(normalized);
   };
 
-  const planPendingCalendarCreate = async (threadId: string, inputText: string, channel?: string): Promise<string> => {
+  const isCalendarMutationRouteKey = (routeKey: string): routeKey is PendingCalendarRouteKey => (
+    routeKey === 'calendar.create_event'
+    || routeKey === 'calendar.delete_event'
+    || routeKey === 'calendar.update_event'
+    || routeKey === 'calendar.remove_from_event'
+  );
+
+  const routeKeyForCalendarMutation = (action: PendingCalendarAction): PendingCalendarRouteKey => {
+    switch (action) {
+      case 'delete_event': return 'calendar.delete_event';
+      case 'update_event': return 'calendar.update_event';
+      case 'remove_from_event': return 'calendar.remove_from_event';
+      case 'create_event':
+      default: return 'calendar.create_event';
+    }
+  };
+
+  const effectForCalendarMutation = (action: PendingCalendarAction): CapabilityEffect => (
+    action === 'delete_event' ? 'destructive' : 'write'
+  );
+
+  const planPendingCalendarMutation = async (threadId: string, inputText: string, channel?: string): Promise<string> => {
     const plan = await planCalendarAgentAction(inputText, buildCalendarEnv());
-    if (plan.action !== 'create_event') {
+    if (!isCalendarMutation(plan)) {
       return executeCalendarAgentAction(plan, buildCalendarEnv());
     }
+
+    let preparedPlan = plan;
+    let preview: string;
+    if (plan.action === 'create_event') {
+      preview = formatCalendarProposal(plan);
+    } else {
+      const prepared = await prepareCalendarMutationAction(plan, buildCalendarEnv());
+      if (prepared.status !== 'ready') return prepared.message;
+      preparedPlan = prepared.action;
+      preview = prepared.proposal;
+    }
+
     const proposalId = `cal${randomUUID().slice(0, 8)}`;
-    const preview = formatCalendarProposal(plan);
+    const routeKey = routeKeyForCalendarMutation(preparedPlan.action);
     pendingMutations.set(threadId, {
       agent: 'calendar',
-      action: 'create_event',
-      effect: 'write',
+      action: preparedPlan.action,
+      effect: effectForCalendarMutation(preparedPlan.action),
       preview,
-      payload: { plan },
-      routeKey: 'calendar.create_event',
+      payload: { plan: preparedPlan },
+      routeKey,
       proposalId,
       threadId,
       clientChannel: channel,
@@ -1343,9 +1390,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
       try {
         app.log.info({ threadId: effectiveThreadId, requestId, route: routeKey }, 'calendar_intent_fast_path');
-        const calendarText = routeKey === 'calendar.create_event'
-          ? await planPendingCalendarCreate(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
+        const calendarText = isCalendarMutationRouteKey(routeKey)
+          ? await planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
           : await callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
+        const activeCalendarProposal = pendingMutations.get(effectiveThreadId);
+        const hasActiveCalendarProposal = activeCalendarProposal?.agent === 'calendar' && activeCalendarProposal.routeKey === routeKey;
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
@@ -1358,8 +1407,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             kind: 'calendar',
             source: 'calendar_agent',
             routeKey,
-            ...(routeKey === 'calendar.create_event' ? { semanticDecision: 'confirmation_required' } : {}),
-            ...(routeKey === 'calendar.create_event' ? { proposalId: pendingMutations.get(effectiveThreadId)?.proposalId } : {}),
+            ...(isCalendarMutationRouteKey(routeKey) ? { semanticDecision: hasActiveCalendarProposal ? 'confirmation_required' : 'clarification_required' } : {}),
+            ...(hasActiveCalendarProposal ? { proposalId: activeCalendarProposal.proposalId } : {}),
           },
         };
         if (sseStream !== null) { pushSseResponse(payload); return reply; }
@@ -1988,8 +2037,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         }, app.log);
                       },
                       callCalendarAgent: async () => {
-                        if (routeKey === 'calendar.create_event') {
-                          return planPendingCalendarCreate(effectiveThreadId, assistantInputText, clientChannel ?? undefined);
+                        if (isCalendarMutationRouteKey(routeKey)) {
+                          return planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined);
                         }
                         return callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
                       },
@@ -2515,7 +2564,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             // Calendar agent: LLM planner → Google Calendar API — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct');
             tasks.push(
-              planPendingCalendarCreate(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
+              planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
                 .then((txt): SpecializedResult | null => {
                   app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct_done');
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
@@ -2737,8 +2786,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         kind: responseDomain,
         source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
         ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
-        semanticDecision: semanticActivatedRouteKey === 'calendar.create_event'
-          ? 'confirmation_required'
+        semanticDecision: semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
+          ? (activeProposalForResponse?.agent === 'calendar' && activeProposalForResponse.routeKey === semanticActivatedRouteKey ? 'confirmation_required' : 'clarification_required')
           : (semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated')),
         ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain ? {
           proposalId: activeProposalForResponse.proposalId,

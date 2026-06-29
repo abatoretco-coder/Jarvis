@@ -1693,6 +1693,7 @@ describe('/v1/ingest integration', () => {
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('Pour confirmer');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });

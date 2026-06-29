@@ -42,6 +42,10 @@ export interface GoogleCalendarEvent {
   }>;
   eventType?: string;
   htmlLink?: string;
+  reminders?: {
+    useDefault?: boolean;
+    overrides?: Array<{ method?: 'email' | 'popup'; minutes?: number }>;
+  };
 }
 
 export type GoogleConfigState = 'missing_client' | 'missing_refresh_token' | 'ready';

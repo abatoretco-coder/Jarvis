@@ -10,6 +10,21 @@ describe('capability registry', () => {
     expect(capability ? requiresCapabilityConfirmation(capability) : false).toBe(true);
   });
 
+  it('marks calendar delete/update/remove as confirmable mutations', () => {
+    const expected = [
+      ['calendar.delete_event', 'destructive'],
+      ['calendar.update_event', 'write'],
+      ['calendar.remove_from_event', 'write'],
+    ] as const;
+
+    for (const [routeKey, effect] of expected) {
+      const capability = findCapabilityByRouteKey(routeKey);
+      expect(capability?.agent).toBe('calendar');
+      expect(capability?.effect).toBe(effect);
+      expect(capability ? requiresCapabilityConfirmation(capability) : false).toBe(true);
+    }
+  });
+
   it('keeps Spotify route keys available without confirmation', () => {
     const capability = findCapabilityByRouteKey('spotify.pause');
     expect(capability?.agent).toBe('spotify');

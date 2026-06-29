@@ -142,26 +142,10 @@ function pickWritableEventFields(input: unknown): Record<string, unknown> {
     'summary',
     'description',
     'location',
-    'colorId',
     'start',
     'end',
-    'endTimeUnspecified',
-    'recurrence',
-    'transparency',
-    'visibility',
     'attendees',
-    'attendeesOmitted',
-    'guestsCanInviteOthers',
-    'guestsCanModify',
-    'guestsCanSeeOtherGuests',
     'reminders',
-    'conferenceData',
-    'source',
-    'extendedProperties',
-    'eventType',
-    'focusTimeProperties',
-    'outOfOfficeProperties',
-    'workingLocationProperties',
   ] as const;
 
   const next: Record<string, unknown> = {};
@@ -289,7 +273,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     try {
       const token = await refreshGoogleAccessToken(deps.env);
       const item = await googleCalendarRequest<GoogleCalendarEvent>(
-        `/calendars/${calendarId}/events?conferenceDataVersion=1&sendUpdates=${encodeURIComponent(sendUpdates)}`,
+        `/calendars/${calendarId}/events?sendUpdates=${encodeURIComponent(sendUpdates)}`,
         token,
         { method: 'POST', body },
       );
@@ -317,7 +301,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     try {
       const token = await refreshGoogleAccessToken(deps.env);
       const item = await googleCalendarRequest<GoogleCalendarEvent>(
-        `/calendars/${calendarId}/events/${encodeURIComponent(eventId)}?conferenceDataVersion=1&sendUpdates=${encodeURIComponent(sendUpdates)}`,
+        `/calendars/${calendarId}/events/${encodeURIComponent(eventId)}?sendUpdates=${encodeURIComponent(sendUpdates)}`,
         token,
         { method: 'PATCH', body },
       );
