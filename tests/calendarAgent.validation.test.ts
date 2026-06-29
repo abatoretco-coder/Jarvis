@@ -22,7 +22,8 @@ describe('calendar action validation', () => {
 
     expect(action.action).toBe('create_event');
     expect(action.calendarId).toBe('primary');
-    expect(formatCalendarProposal(action)).toContain('Confirme dans ce fil');
+    expect(formatCalendarProposal(action)).toContain('Je peux ajouter');
+    expect(formatCalendarProposal(action)).not.toContain('confirme agenda');
   });
 
   it('rejects non-allowlisted calendar ids', () => {

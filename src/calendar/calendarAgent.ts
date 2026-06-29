@@ -585,7 +585,7 @@ export async function prepareCalendarMutationAction(
   return {
     status: 'ready',
     action: resolved,
-    proposal: `${describeCalendarMutation(action, event)} Action: calendar.${action.action}. Calendrier: ${event.calendarId}.`,
+    proposal: describeCalendarMutation(action, event),
   };
 }
 
@@ -599,7 +599,7 @@ export function formatCalendarProposal(plan: CalendarAction): string {
     ? `le ${plan.start}`
     : `du ${plan.start.replace('T', ' à ')} au ${plan.end.replace('T', ' à ')}`;
   const place = plan.location ? `, lieu : ${plan.location}` : '';
-  return `Je peux ajouter "${plan.summary}" dans ton agenda ${when}${place}. Confirme dans ce fil si tu veux que je le crée.`;
+  return `Je peux ajouter "${plan.summary}" dans ton agenda ${when}${place}.`;
 }
 
 function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): string {

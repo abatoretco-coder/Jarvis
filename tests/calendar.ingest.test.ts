@@ -107,8 +107,9 @@ describe('calendar ingest confirmation', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
-    expect(payload.responseText).toContain('Confirme dans ce fil');
-    expect(payload.responseText).toContain('confirme agenda cal');
+    expect(payload.responseText).toContain('Tu confirmes');
+    expect(payload.responseText).not.toContain('confirme agenda cal');
+    expect(payload.replyMeta?.proposalId).toMatch(/^cal/);
     expect(payload.replyMeta).toMatchObject({
       kind: 'calendar',
       routeKey: 'calendar.create_event',
@@ -328,7 +329,9 @@ describe('calendar ingest confirmation', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
-    expect(payload.responseText).toContain('confirme agenda cal');
+    expect(payload.responseText).toContain('Tu confirmes');
+    expect(payload.responseText).not.toContain('Calendrier:');
+    expect(payload.replyMeta?.proposalId).toMatch(/^cal/);
     expect(payload.responseText).not.toContain('OUT_OF_SCOPE');
     expect(payload.replyMeta).toMatchObject({
       kind: 'calendar',
@@ -374,7 +377,9 @@ describe('calendar ingest confirmation', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
-    expect(payload.responseText).toContain('confirme agenda cal');
+    expect(payload.responseText).toContain('Tu confirmes');
+    expect(payload.responseText).not.toContain('confirme agenda cal');
+    expect(payload.replyMeta?.proposalId).toMatch(/^cal/);
     expect(payload.responseText).not.toContain('OUT_OF_SCOPE');
     expect(payload.replyMeta).toMatchObject({
       kind: 'calendar',
@@ -388,7 +393,7 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
-  it('executes a pending delete_event only with the stored proposalId payload', async () => {
+  it('executes a pending delete_event from a plain same-thread confirmation', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
       if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
@@ -420,7 +425,7 @@ describe('calendar ingest confirmation', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-calendar-delete-confirm',
-        text: `confirme agenda ${proposalId}`,
+        text: 'je confirme',
         clientContext: { channel: 'desktop-delete-confirm' },
       },
     });
@@ -559,7 +564,9 @@ describe('calendar ingest confirmation', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
-    expect(payload.responseText).toContain('confirme agenda cal');
+    expect(payload.responseText).toContain('Tu confirmes');
+    expect(payload.responseText).not.toContain('confirme agenda cal');
+    expect(payload.replyMeta?.proposalId).toMatch(/^cal/);
     expect(payload.replyMeta).toMatchObject({
       routeKey: 'calendar.remove_from_event',
       semanticDecision: 'confirmation_required',

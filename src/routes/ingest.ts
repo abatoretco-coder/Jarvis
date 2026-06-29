@@ -942,18 +942,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       || /^(confirme|valide|cree|ajoute) (l'|le |cet |cette )?(evenement|rdv)/u.test(normalized);
   };
 
+  const isClearMutationConfirmation = (value: string, mutation: PendingMutation): boolean => {
+    const normalized = normalizeConfirmationText(value);
+    if (isClearCalendarConfirmation(value, mutation.proposalId)) return true;
+    if (/^(je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
+    if (/^(oui|ok|d accord|vas y|c est bon)( je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
+    if (/^(valide|je valide|tu peux|vas y|c est bon)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv)?$/u.test(normalized)) return true;
+    if (mutation.agent === 'calendar' && /^(supprime|annule|modifie|retire)( l evenement| le rdv| ca)?$/u.test(normalized)) return true;
+    return false;
+  };
+
+  const isLikelyMutationConfirmationAttempt = (value: string): boolean => {
+    const normalized = normalizeConfirmationText(value);
+    return /\b(confirm|confirme|confirmation|valide|oui|ok|vas y|c est bon)\b/u.test(normalized);
+  };
+
   const isClearCalendarRejection = (value: string): boolean => {
     const normalized = normalizeConfirmationText(value);
     return /^(non|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien)( merci)?$/u.test(normalized);
   };
 
   const buildMutationProposalText = (mutation: PendingMutation): string => {
-    const label = mutation.agent === 'calendar'
-      ? 'agenda'
-      : mutation.agent === 'mail'
-        ? 'email'
-        : 'tache';
-    return `${mutation.preview} Pour confirmer, dis "confirme ${label} ${mutation.proposalId}" ou utilise le bouton de confirmation.`;
+    return `${mutation.preview} Tu confirmes ?`;
   };
 
   const createPendingMutationProposal = async (input: {
@@ -1099,7 +1109,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       eventId: candidate.eventId,
       calendarId: candidate.calendarId,
     };
-    const preview = `Je peux appliquer calendar.${plan.action} sur "${candidate.title}", ${candidate.start}. Calendrier: ${candidate.calendarId}.`;
+    const preview = `Je peux appliquer cette modification sur "${candidate.title}", ${candidate.start}.`;
     const finalMutation = await createPendingCalendarMutation({
       threadId: mutation.threadId,
       clientChannel: mutation.clientChannel,
@@ -1376,8 +1386,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    if (activePendingMutation && text && pendingChannelMatches && (isClearCalendarConfirmation(text, activePendingMutation.proposalId) || isClearCalendarRejection(text))) {
-      const confirmed = isClearCalendarConfirmation(text, activePendingMutation.proposalId);
+    if (activePendingMutation && text && pendingChannelMatches && activePendingMutation.action !== 'disambiguate_event' && (isClearMutationConfirmation(text, activePendingMutation) || isClearCalendarRejection(text))) {
+      const confirmed = isClearMutationConfirmation(text, activePendingMutation);
       let mutationText = 'Ok, je n execute pas cette action.';
       if (confirmed) {
         const started = await pendingMutationRepository.tryStartExecution(activePendingMutation.proposalId);
@@ -1426,6 +1436,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         'pending_mutation_confirmation_resolved',
       );
       return reply.code(200).send(validated.data);
+    }
+    if (activePendingMutation && text && pendingChannelMatches && isLikelyMutationConfirmationAttempt(text)) {
+      const clarification = activePendingMutation.action === 'disambiguate_event'
+        ? 'Je dois d abord savoir quel evenement choisir. Dis par exemple "le premier" ou "celui de 18h".'
+        : 'Je n ai pas bien compris la confirmation. Dis simplement "je confirme", ou utilise le bouton de confirmation.';
+      await conversationService.persistMessages(effectiveThreadId, text, clarification);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText: clarification,
+        replyMeta: {
+          kind: activePendingMutation.agent,
+          source: 'pending_mutation',
+          routeKey: activePendingMutation.routeKey,
+          semanticDecision: 'clarification_required',
+          proposalId: activePendingMutation.proposalId,
+        },
+      });
     }
     if (activePendingMutation && text && pendingChannelMatches) {
       await pendingMutationRepository.cancelActiveByThread(effectiveThreadId, 'new_intent');
