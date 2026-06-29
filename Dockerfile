@@ -4,6 +4,7 @@ FROM node:20-alpine AS base
 WORKDIR /app
 
 FROM base AS deps
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json* ./
 RUN npm ci
 
@@ -14,6 +15,7 @@ RUN npm run build
 
 FROM base AS prod-deps
 ENV NODE_ENV=production
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
