@@ -393,7 +393,7 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
-  it('executes a pending delete_event from a plain same-thread confirmation', async () => {
+  it('executes a pending delete_event from a short affirmative answer', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
       if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
@@ -425,7 +425,7 @@ describe('calendar ingest confirmation', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-calendar-delete-confirm',
-        text: 'je confirme',
+        text: 'oui',
         clientContext: { channel: 'desktop-delete-confirm' },
       },
     });
@@ -436,6 +436,46 @@ describe('calendar ingest confirmation', () => {
       semanticDecision: 'confirmed',
     });
     expect(fetchMock.mock.calls.filter(([url, init]) => String(url).includes('event-dentist') && init?.method === 'DELETE')).toHaveLength(1);
+    await app.close();
+  });
+
+  it('cancels a pending delete_event from a short negative answer', async () => {
+    const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events?')) return googleEvents([dentistEvent]);
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-delete-cancel',
+        text: 'annule l evenement dentiste',
+        clientContext: { channel: 'desktop-delete-cancel' },
+      },
+    });
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-delete-cancel',
+        text: 'non',
+        clientContext: { channel: 'desktop-delete-cancel' },
+      },
+    });
+
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { replyMeta?: Record<string, unknown> }).replyMeta).toMatchObject({
+      routeKey: 'calendar.delete_event',
+      semanticDecision: 'cancelled',
+    });
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).includes('event-dentist') && init?.method === 'DELETE')).toBe(false);
     await app.close();
   });
 

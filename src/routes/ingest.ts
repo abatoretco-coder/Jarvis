@@ -946,8 +946,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const normalized = normalizeConfirmationText(value);
     if (isClearCalendarConfirmation(value, mutation.proposalId)) return true;
     if (/^(je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
-    if (/^(oui|ok|d accord|vas y|c est bon)( je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
-    if (/^(valide|je valide|tu peux|vas y|c est bon)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv)?$/u.test(normalized)) return true;
+    if (/^(oui|ouais|yep|yes|ok|d accord|vas y|c est bon|parfait|allez|go)( merci)?$/u.test(normalized)) return true;
+    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
+    if (/^(valide|je valide|tu peux|vas y|c est bon|fais le|lance|execute)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv| ca)?$/u.test(normalized)) return true;
     if (mutation.agent === 'calendar' && /^(supprime|annule|modifie|retire)( l evenement| le rdv| ca)?$/u.test(normalized)) return true;
     return false;
   };
@@ -959,7 +960,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
   const isClearCalendarRejection = (value: string): boolean => {
     const normalized = normalizeConfirmationText(value);
-    return /^(non|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien)( merci)?$/u.test(normalized);
+    return /^(non|nope|nan|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien|surtout pas)( merci)?$/u.test(normalized);
   };
 
   const buildMutationProposalText = (mutation: PendingMutation): string => {
