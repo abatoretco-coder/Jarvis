@@ -18,10 +18,15 @@ export type SearchAgentCallParams = {
   log?: { info: (obj: Record<string, unknown>, msg: string) => void };
 };
 
+export type SearchAgentResponse = string | {
+  text: string;
+  sources?: string[];
+};
+
 export type DispatchAcceptedSearchE2RouteInput = {
   route: SemanticRouteDefinition;
   text: string;
-  callSearchAgent: (agentKey: string, params: SearchAgentCallParams) => Promise<string>;
+  callSearchAgent: (agentKey: string, params: SearchAgentCallParams) => Promise<SearchAgentResponse>;
   searchCallParams: Omit<SearchAgentCallParams, 'text'>;
   liveRouteKeys?: Set<string>;
 };
@@ -30,6 +35,7 @@ export type DispatchAcceptedSearchE2RouteResult = {
   routeKey: string;
   domain: 'search.news' | 'search.web';
   responseText: string;
+  sources?: string[];
 };
 
 export async function dispatchAcceptedSearchE2Route(
@@ -44,12 +50,14 @@ export async function dispatchAcceptedSearchE2Route(
   if (domain !== 'search.news' && domain !== 'search.web') return null;
 
   try {
-    const responseText = await input.callSearchAgent(domain, {
+    const response = await input.callSearchAgent(domain, {
       ...input.searchCallParams,
       text: input.text,
     });
+    const responseText = typeof response === 'string' ? response : response.text;
+    const sources = typeof response === 'string' ? [] : response.sources ?? [];
     if (!responseText.trim()) return null;
-    return { routeKey, domain, responseText };
+    return { routeKey, domain, responseText, ...(sources.length > 0 ? { sources } : {}) };
   } catch {
     return null;
   }

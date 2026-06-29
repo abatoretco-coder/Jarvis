@@ -161,4 +161,50 @@ describe('calendar ingest confirmation', () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(1);
     await app.close();
   });
+
+  it('refuses confirmation with a mismatched proposalId', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      expect(String(url)).toContain('/chat/completions');
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          action: 'create_event',
+          summary: 'Garage',
+          start: '2026-07-02T09:00:00',
+          end: '2026-07-02T10:00:00',
+        }) } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = Fastify({ logger: false });
+    registerIngestRoute(app, {
+      env: env(join(mkdtempSync(join(tmpdir(), 'jarvis-calendar-ingest-')), 'conversation.sqlite')),
+      spotifyWebApi: { isConfigured: () => false } as AppDeps['spotifyWebApi'],
+    } as AppDeps);
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-wrong-proposal',
+        text: 'Ajoute un rdv garage demain matin',
+        clientContext: { channel: 'desktop-wrong-proposal' },
+      },
+    });
+
+    const wrong = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-wrong-proposal',
+        text: 'confirme agenda caldeadbeef',
+        clientContext: { channel: 'desktop-wrong-proposal' },
+      },
+    });
+
+    expect(wrong.statusCode).toBe(409);
+    expect(wrong.json()).toMatchObject({ error: 'proposal_id_mismatch' });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/calendar/v3/calendars/primary/events'))).toHaveLength(0);
+    await app.close();
+  });
 });

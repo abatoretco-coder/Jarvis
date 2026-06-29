@@ -687,7 +687,7 @@ describe('/v1/ingest integration', () => {
   });
 
   it('semantic activation: definition E2 live bypasses LLM router', async () => {
-    const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules.';
+    const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules. Source: https://example.com/ztl';
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,
       decision: 'accepted_e2',
@@ -736,8 +736,10 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { responseText: string };
+    const payload = res.json() as { responseText: string; sources?: string[] };
     expect(payload.responseText).toContain('zone à trafic limité');
+    expect(payload.responseText).not.toContain('https://example.com/ztl');
+    expect(payload.sources).toEqual(['https://example.com/ztl']);
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
