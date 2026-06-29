@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { formatCalendarProposal, parseCalendarAction } from '../src/calendar/calendarAgent';
+import { toGoogleCalendarTimeBoundary } from '../src/calendar/googleCalendarClient';
 
 const env = {
   GOOGLE_CALENDAR_CALENDAR_IDS: 'primary,famille@example.com',
@@ -39,5 +40,11 @@ describe('calendar action validation', () => {
       start: '2026-07-01T15:00:00',
       end: '2026-07-01T14:00:00',
     }, env)).toThrow(/end/);
+  });
+
+  it('converts Paris local boundaries to RFC3339 UTC for Google Calendar queries', () => {
+    expect(toGoogleCalendarTimeBoundary('2026-06-29T00:00:00')).toBe('2026-06-28T22:00:00.000Z');
+    expect(toGoogleCalendarTimeBoundary('2026-12-29T00:00:00')).toBe('2026-12-28T23:00:00.000Z');
+    expect(toGoogleCalendarTimeBoundary('2026-06-29T00:00:00Z')).toBe('2026-06-29T00:00:00Z');
   });
 });

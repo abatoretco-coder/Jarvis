@@ -68,6 +68,8 @@ const KEEPALIVE_DAYS = 30;
 const KEEPALIVE_TICK_MS = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
 
 const GOOGLE_CAL_BASE = 'https://www.googleapis.com/calendar/v3';
+const RFC3339_ZONE_SUFFIX_RE = /(?:Z|[+-]\d{2}:\d{2})$/u;
+const LOCAL_TEMPORAL_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/u;
 
 // ─── Token refresh ────────────────────────────────────────────────────────────
 
@@ -150,6 +152,60 @@ export async function calendarApiRequest<T>(
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
+
+function getParisDateTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const value = (type: string): number => {
+    const raw = parts.find((part) => part.type === type)?.value;
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    if (!Number.isFinite(parsed)) throw new Error(`invalid_paris_datetime_part:${type}`);
+    return parsed;
+  };
+  return {
+    year: value('year'),
+    month: value('month'),
+    day: value('day'),
+    hour: value('hour'),
+    minute: value('minute'),
+    second: value('second'),
+  };
+}
+
+function utcDateFromParisLocalDateTime(year: number, month: number, day: number, hour: number, minute: number, second: number): Date {
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  for (let index = 0; index < 3; index += 1) {
+    const paris = getParisDateTimeParts(new Date(utcMs));
+    const desiredAsUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+    const actualAsUtc = Date.UTC(paris.year, paris.month - 1, paris.day, paris.hour, paris.minute, paris.second);
+    const delta = desiredAsUtc - actualAsUtc;
+    if (delta === 0) break;
+    utcMs += delta;
+  }
+  return new Date(utcMs);
+}
+
+export function toGoogleCalendarTimeBoundary(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || RFC3339_ZONE_SUFFIX_RE.test(trimmed)) return trimmed;
+  const match = trimmed.match(LOCAL_TEMPORAL_RE);
+  if (!match) return trimmed;
+  const year = Number.parseInt(match[1]!, 10);
+  const month = Number.parseInt(match[2]!, 10);
+  const day = Number.parseInt(match[3]!, 10);
+  const hour = Number.parseInt(match[4] ?? '0', 10);
+  const minute = Number.parseInt(match[5] ?? '0', 10);
+  const second = Number.parseInt(match[6] ?? '0', 10);
+  return utcDateFromParisLocalDateTime(year, month, day, hour, minute, second).toISOString();
+}
 
 /** Returns true when the minimum Google OAuth credentials are present. */
 export function hasCalendarConfig(env: Partial<CalendarTokenEnv>): env is CalendarTokenEnv {
@@ -246,8 +302,8 @@ export async function fetchUpcomingEventsMultiCalendarDetailed(
         singleEvents:  'true',
         orderBy:       'startTime',
         maxResults:    String(maxPerCalendar),
-        timeMin,
-        timeMax,
+        timeMin:       toGoogleCalendarTimeBoundary(timeMin),
+        timeMax:       toGoogleCalendarTimeBoundary(timeMax),
         showDeleted:   'false',
       });
       return calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(

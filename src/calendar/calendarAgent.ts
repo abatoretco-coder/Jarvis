@@ -25,6 +25,7 @@ import {
   refreshCalendarToken,
   resolveEventEnd,
   resolveEventStart,
+  toGoogleCalendarTimeBoundary,
 } from './googleCalendarClient';
 
 // ─── Key detection ────────────────────────────────────────────────────────────
@@ -550,8 +551,8 @@ export async function prepareCalendarMutationAction(
         showDeleted: 'false',
         q: query,
       });
-      params.set('timeMin', action.timeMin ?? defaultTimeMin);
-      params.set('timeMax', action.timeMax ?? defaultTimeMax);
+      params.set('timeMin', toGoogleCalendarTimeBoundary(action.timeMin ?? defaultTimeMin));
+      params.set('timeMax', toGoogleCalendarTimeBoundary(action.timeMax ?? defaultTimeMax));
       const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
         `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
         token,
@@ -669,8 +670,8 @@ async function executeCalendarAction(
             showDeleted:  'false',
             q:            plan.q,
           });
-          if (plan.timeMin) params.set('timeMin', plan.timeMin);
-          if (plan.timeMax) params.set('timeMax', plan.timeMax);
+          if (plan.timeMin) params.set('timeMin', toGoogleCalendarTimeBoundary(plan.timeMin));
+          if (plan.timeMax) params.set('timeMax', toGoogleCalendarTimeBoundary(plan.timeMax));
           return calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
             `/calendars/${encodeURIComponent(id)}/events?${params.toString()}`,
             token,

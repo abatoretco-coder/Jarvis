@@ -384,6 +384,7 @@ describe('calendar ingest confirmation', () => {
     expect(decodeURIComponent(searchUrl)).toContain('q=E&M');
     expect(searchUrl).toContain('timeMin=');
     expect(searchUrl).toContain('timeMax=');
+    expect(decodeURIComponent(searchUrl)).toContain('timeMin=2026-06-28T22:00:00.000Z');
     await app.close();
   });
 
