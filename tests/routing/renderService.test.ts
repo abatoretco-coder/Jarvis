@@ -1,7 +1,7 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it, jest } from '@jest/globals';
 
 import { SPOTIFY_PAUSE_RESPONSES } from '../../src/routing/deterministic/spotifyResponses';
-import { renderSingleExecutionResult } from '../../src/routing/render/renderService';
+import { renderMultipleExecutionResults, renderSingleExecutionResult } from '../../src/routing/render/renderService';
 import type { ActionExecutionResult } from '../../src/routing/render/types';
 
 function makeResult(overrides: Partial<ActionExecutionResult> = {}): ActionExecutionResult {
@@ -14,7 +14,7 @@ function makeResult(overrides: Partial<ActionExecutionResult> = {}): ActionExecu
   };
 }
 
-describe('renderSingleExecutionResult', () => {
+describe('renderService', () => {
   it('renders deterministic static response for spotify.pause', async () => {
     const text = await renderSingleExecutionResult(
       makeResult({ domain: 'spotify', actionKey: 'spotify.pause' }),
@@ -86,4 +86,40 @@ describe('renderSingleExecutionResult', () => {
 
     expect(text.toLowerCase()).toContain('précision');
   });
+
+  it('renders multiple execution results with deterministic fallback when LLM deps are missing', async () => {
+    const text = await renderMultipleExecutionResults([
+      makeResult({ domain: 'search', actionKey: 'search.web.quick_lookup', rawText: 'Resultat search.' }),
+      makeResult({ domain: 'spotify', actionKey: 'spotify.now_playing', facts: { data: { track_name: 'Aerodynamic', artist_name: 'Daft Punk' } } }),
+    ], { timeoutMs: 1000 });
+
+    expect(text).toContain('Resultat search.');
+    expect(text).toContain('Aerodynamic');
+    expect(text).toContain('Daft Punk');
+  });
+
+  it('uses LLM multi synthesis when configured', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'Synthese courte.' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+
+    try {
+      const text = await renderMultipleExecutionResults([
+        makeResult({ domain: 'search', actionKey: 'search.web.quick_lookup', rawText: 'Resultat search.' }),
+        makeResult({ domain: 'todo', actionKey: 'todo.list_tasks', rawText: 'Deux taches.' }),
+      ], {
+        timeoutMs: 1000,
+        openAiApiKey: 'test-key',
+        openAiBaseUrl: 'https://api.openai.test/v1',
+        openAiModel: 'gpt-test',
+      });
+
+      expect(text).toBe('Synthese courte.');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });
+

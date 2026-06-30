@@ -173,3 +173,60 @@ export async function renderSingleExecutionResult(result: ActionExecutionResult,
   // Last fallback if no source text is available
   return clamp('Action effectuée.', policy.maxChars);
 }
+
+export async function renderMultipleExecutionResults(results: ActionExecutionResult[], deps: RenderDeps): Promise<string> {
+  const usable = results.filter((result) => result.status !== 'out_of_scope');
+  if (usable.length === 0) return 'Je n ai pas trouve de resultat exploitable.';
+  if (usable.length === 1) return renderSingleExecutionResult(usable[0]!, deps);
+
+  if (deps.openAiApiKey && deps.openAiBaseUrl && deps.openAiModel) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), deps.timeoutMs);
+    try {
+      const summaries = await Promise.all(usable.map(async (result) => ({
+        domain: result.domain,
+        actionKey: result.actionKey,
+        status: result.status,
+        text: await renderSingleExecutionResult(result, { ...deps, openAiApiKey: undefined }),
+      })));
+      const response = await fetch(`${deps.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${deps.openAiApiKey}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: deps.openAiModel,
+          temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
+          max_tokens: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
+          messages: [
+            {
+              role: 'system',
+              content: 'Tu combines plusieurs resultats d actions Jarvis en une reponse courte, factuelle, en francais. N invente rien.',
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({ results: summaries }),
+            },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        const raw = await response.json() as Record<string, unknown>;
+        const choices = Array.isArray(raw.choices) ? raw.choices : [];
+        const first = choices[0] as Record<string, unknown> | undefined;
+        const msg = first && typeof first.message === 'object' ? first.message as Record<string, unknown> : undefined;
+        const text = typeof msg?.content === 'string' ? normalizeText(msg.content) : '';
+        if (text) return clamp(text, 700);
+      }
+    } catch (err) {
+      deps.log?.warn({ err, count: usable.length }, 'render_policy_multi_synthesis_failed');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  const rendered = await Promise.all(usable.map((result) => renderSingleExecutionResult(result, deps)));
+  return clamp(rendered.filter(Boolean).join(' '), 700);
+}

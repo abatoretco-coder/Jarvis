@@ -1043,7 +1043,7 @@ async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']
 
   const lines = availableItems.slice(0, 8).map((item) => {
     const receivedAt = item.receivedAt > 0 ? formatDateForLine(new Date(item.receivedAt)) : 'date inconnue';
-    return `[${item.accountLabel}] ${receivedAt} — ${item.from} — ${item.subject}`;
+    return `[${item.accountLabel}] ${receivedAt} - ${item.from} - ${item.subject}`;
   });
 
   const summary = `${availableItems.length} email${availableItems.length > 1 ? 's' : ''} concatene${availableItems.length > 1 ? 's' : ''} depuis ${accounts.length} boite${accounts.length > 1 ? 's' : ''} connectee${accounts.length > 1 ? 's' : ''}${failures.length > 0 ? `, ${failures.length} indisponible${failures.length > 1 ? 's' : ''}` : ''}.`;
@@ -1108,8 +1108,117 @@ function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null 
   };
 }
 
+type DashboardGeoLocation = {
+  latitude: number;
+  longitude: number;
+  accuracyM?: number;
+};
+
+type OpenMeteoForecastPayload = {
+  current: {
+    time: string;
+    temperature_2m: number;
+    apparent_temperature: number;
+    weather_code: number;
+    relative_humidity_2m: number;
+    wind_speed_10m: number;
+    wind_direction_10m: number;
+    precipitation: number;
+  };
+  daily: {
+    time: string[];
+    weather_code: number[];
+    temperature_2m_max: number[];
+    temperature_2m_min: number[];
+    precipitation_sum: number[];
+    wind_speed_10m_max: number[];
+  };
+  hourly: {
+    time: string[];
+    temperature_2m: number[];
+    precipitation_probability: number[];
+    weather_code: number[];
+  };
+};
+
+function parseCoordinate(raw: unknown, min: number, max: number): number | undefined {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) return undefined;
+  return parsed;
+}
+
+function parseDashboardGeoLocation(query: Record<string, unknown>): DashboardGeoLocation | null {
+  const latitude = parseCoordinate(query.latitude, -90, 90);
+  const longitude = parseCoordinate(query.longitude, -180, 180);
+  if (latitude === undefined || longitude === undefined) return null;
+  const accuracyM = parseCoordinate(query.accuracyM, 0, 1_000_000);
+  return accuracyM === undefined
+    ? { latitude, longitude }
+    : { latitude, longitude, accuracyM };
+}
+
+function weatherCacheKeyForLocation(location: DashboardGeoLocation | null): string {
+  if (!location) return 'ha';
+  return `geo:${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
+}
+
+async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}`
+    + '&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation'
+    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max'
+    + '&hourly=temperature_2m,precipitation_probability,weather_code'
+    + '&timezone=auto&forecast_days=7',
+    {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    },
+  );
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`open_meteo_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+
+  const payload = await response.json() as OpenMeteoForecastPayload;
+  const currentHour = payload.current.time.slice(0, 13);
+  const hourly = payload.hourly.time
+    .map((time, index) => ({
+      time,
+      temp: payload.hourly.temperature_2m[index] ?? payload.current.temperature_2m,
+      precipProb: payload.hourly.precipitation_probability[index] ?? 0,
+      code: payload.hourly.weather_code[index] ?? payload.current.weather_code,
+    }))
+    .filter((item) => item.time.slice(0, 13) >= currentHour)
+    .slice(0, 12);
+
+  const daily = payload.daily.time.map((date, index) => ({
+    date,
+    code: payload.daily.weather_code[index] ?? payload.current.weather_code,
+    max: payload.daily.temperature_2m_max[index] ?? payload.current.temperature_2m,
+    min: payload.daily.temperature_2m_min[index] ?? payload.current.temperature_2m,
+    precipSum: payload.daily.precipitation_sum[index] ?? 0,
+    windMax: payload.daily.wind_speed_10m_max[index] ?? payload.current.wind_speed_10m,
+  }));
+
+  return {
+    location: 'Ici',
+    temp: payload.current.temperature_2m,
+    feelsLike: payload.current.apparent_temperature,
+    tempMax: daily[0]?.max ?? payload.current.temperature_2m,
+    tempMin: daily[0]?.min ?? payload.current.temperature_2m,
+    conditionCode: payload.current.weather_code,
+    humidity: payload.current.relative_humidity_2m,
+    windSpeed: payload.current.wind_speed_10m,
+    windDir: payload.current.wind_direction_10m,
+    precipitation: payload.current.precipitation,
+    daily,
+    hourly,
+  };
+}
+
 export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): void {
-  let dashboardCache: { payload: Record<string, unknown>; fetchedAt: number } | undefined;
+  const dashboardCache = new Map<string, { payload: Record<string, unknown>; fetchedAt: number }>();
   const dashboardCacheTtlMs = 2 * 60 * 1000;
   app.get('/v1/mail/messages', async (req, reply) => {
     try {
@@ -1368,11 +1477,15 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     return patchTodoTaskStatus(req, reply, body.taskId);
   });
 
-  app.get('/v1/dashboard', async (_req, reply) => {
-    if (dashboardCache && Date.now() - dashboardCache.fetchedAt < dashboardCacheTtlMs) {
+  app.get('/v1/dashboard', async (req, reply) => {
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const deviceLocation = parseDashboardGeoLocation(query);
+    const cacheKey = weatherCacheKeyForLocation(deviceLocation);
+    const cached = dashboardCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < dashboardCacheTtlMs) {
       return reply.code(200).send({
-        ...dashboardCache.payload,
-        cache: { hit: true, fetchedAt: new Date(dashboardCache.fetchedAt).toISOString() },
+        ...cached.payload,
+        cache: { hit: true, fetchedAt: new Date(cached.fetchedAt).toISOString() },
       });
     }
     const haStatesPromise = deps.ha
@@ -1406,7 +1519,14 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     const [haStates, mailSection, tasksSection, googleAgenda] = await Promise.all([
       haStatesPromise, mailPromise, todoPromise, agendaPromise,
     ]);
-    const weather = buildWeatherPayload(haStates);
+    let weather = buildWeatherPayload(haStates);
+    if (deviceLocation) {
+      try {
+        weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
+      } catch (error) {
+        app.log.warn({ error, hasDeviceLocation: true }, 'dashboard_geo_weather_failed');
+      }
+    }
     const agenda = googleAgenda;
 
     const payload = {
@@ -1420,10 +1540,12 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         links: LOCAL_LINKS,
       },
     };
-    dashboardCache = { payload, fetchedAt: Date.now() };
+    const fetchedAt = Date.now();
+    dashboardCache.set(cacheKey, { payload, fetchedAt });
     return reply.code(200).send({
       ...payload,
-      cache: { hit: false, fetchedAt: new Date(dashboardCache.fetchedAt).toISOString() },
+      cache: { hit: false, fetchedAt: new Date(fetchedAt).toISOString() },
     });
   });
 }
+

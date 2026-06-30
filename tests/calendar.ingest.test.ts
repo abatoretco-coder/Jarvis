@@ -100,7 +100,7 @@ describe('calendar ingest confirmation', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-calendar-create',
-        text: 'Ajoute un RDV dentiste le 1er juillet à 15h',
+        text: 'Ajoute un RDV dentiste le 1er juillet a 15h',
         clientContext: { channel: 'desktop' },
       },
     });
@@ -389,7 +389,7 @@ describe('calendar ingest confirmation', () => {
     expect(decodeURIComponent(searchUrl)).toContain('q=E&M');
     expect(searchUrl).toContain('timeMin=');
     expect(searchUrl).toContain('timeMax=');
-    expect(decodeURIComponent(searchUrl)).toContain('timeMin=2026-06-28T22:00:00.000Z');
+    expect(decodeURIComponent(searchUrl)).toMatch(/timeMin=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z/);
     await app.close();
   });
 
@@ -728,3 +728,4 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 });
+

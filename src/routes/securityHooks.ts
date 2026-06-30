@@ -52,7 +52,7 @@ export function registerSecurityHooks(app: FastifyInstance, env: Env): void {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
-    reply.header('permissions-policy', 'camera=(), geolocation=(), microphone=()');
+    reply.header('permissions-policy', 'camera=(), microphone=()');
     reply.header('cache-control', 'no-store');
     return payload;
   });
