@@ -70,7 +70,7 @@ const newsItemsQuerySchema = z.object({
   geoFilter: queryToken.optional(),
   tab: queryToken.optional(),
   sectors: z.string().trim().min(1).max(300).regex(/^[\p{L}\p{N} .,_:-]+$/u).optional(),
-  limit: z.coerce.number().int().min(1).max(50).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 }).strict();
 
 type HelixSummaryResponse = {

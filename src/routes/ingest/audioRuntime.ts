@@ -15,6 +15,9 @@ export type OpenAiTtsRuntimeConfig = {
   speed: number;
 };
 
+const DEFAULT_OPENAI_TTS_INSTRUCTIONS =
+  'Parle en francais naturel, chaleureux et fluide. Voix conversationnelle, peu robotique, avec une intonation souple et des pauses legeres. Evite le ton monotone, saccade, trop rapide ou sur-articule. Garde un style simple, clair et en tutoiement.';
+
 export function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string[] {
   const filters: string[] = [];
   if (opts.pitchSemitones !== 0) {
@@ -76,7 +79,7 @@ export function resolveOpenAiTtsRuntimeConfig(env: Env): OpenAiTtsRuntimeConfig 
     model: env.OPENAI_TTS_MODEL.trim(),
     voice: env.OPENAI_TTS_VOICE.trim(),
     format: env.OPENAI_TTS_FORMAT,
-    instructions: env.OPENAI_TTS_INSTRUCTIONS?.trim(),
+    instructions: env.OPENAI_TTS_INSTRUCTIONS?.trim() || DEFAULT_OPENAI_TTS_INSTRUCTIONS,
     speed: env.TTS_SPEED,
   };
 }

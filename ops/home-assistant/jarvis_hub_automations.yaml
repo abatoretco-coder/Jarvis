@@ -1,0 +1,55 @@
+- id: jarvis_hub_voice_led_state
+  alias: Jarvis Hub Voice LED State
+  description: "Drive HUB Salon LED ring from Assist satellite states: listening, processing, responding, idle."
+  mode: restart
+  trigger:
+    - platform: state
+      entity_id: assist_satellite.home_assistant_voice_0a79e5_satellite_assist
+  action:
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.to_state.state in ['listening', 'listening_for_command'] }}"
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.home_assistant_voice_0a79e5_led_ring
+              data:
+                rgb_color: [0, 120, 255]
+                brightness: 160
+                transition: 0
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.to_state.state in ['processing'] }}"
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.home_assistant_voice_0a79e5_led_ring
+              data:
+                rgb_color: [255, 170, 0]
+                brightness: 150
+                transition: 0
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.to_state.state in ['responding'] }}"
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.home_assistant_voice_0a79e5_led_ring
+              data:
+                rgb_color: [120, 80, 255]
+                brightness: 130
+                transition: 0
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.to_state.state in ['idle'] }}"
+          sequence:
+            - delay: "00:00:01"
+            - condition: state
+              entity_id: assist_satellite.home_assistant_voice_0a79e5_satellite_assist
+              state: "idle"
+            - service: light.turn_off
+              target:
+                entity_id: light.home_assistant_voice_0a79e5_led_ring
+              data:
+                transition: 0

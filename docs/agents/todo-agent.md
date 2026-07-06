@@ -22,7 +22,13 @@ Task management through Microsoft To Do / Graph APIs.
 2. Domain set to todo for voice formatting.
 3. May be synthesized with other agent responses in multi-target requests.
 
+## Proactive Context Cache
+1. Keep today, overdue, next tasks, important tasks and list names warm.
+2. Use fresh snapshots for "tasks today", "overdue" and "next task" questions.
+3. Mutations can use cached task candidates, but creation/update/delete/complete still execute only after the normal action path and required confirmations.
+
 ## Main References
 - src/todo/todoAgent.ts
 - src/routes/ingest.ts
 - src/routing/e1RouteDispatcher.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

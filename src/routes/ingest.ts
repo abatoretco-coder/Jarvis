@@ -20,6 +20,7 @@ import {
   findCapabilityByRouteKey,
   requiresCapabilityConfirmation,
 } from '../capabilities/capabilityRegistry';
+import type { ProactiveContextDomain } from '../context/ProactiveContextCache';
 import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
@@ -49,6 +50,7 @@ import {
   resolveVoiceResponseMode,
   sanitizeResponseAttribution,
   type VoiceResponseDomain,
+  type VoiceResponseMode,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
 import {
@@ -82,6 +84,7 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { formatParisTime } from '../time/parisTime';
 import {
   callTodoAgent,
   executeTodoAgentAction,
@@ -97,15 +100,13 @@ import {
 } from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
-import { buildWeatherSnapshotFromStates, type WeatherSnapshot } from '../weather/weatherSnapshot';
+import { buildWeatherSnapshotFromStates, type HaStateLike, type WeatherSnapshot } from '../weather/weatherSnapshot';
 import {
   audioExtensionFromContentType,
   bufferToWebBytes,
   buildFfmpegFilters,
-  hasHaTtsConfig,
   pipeStreamThroughFfmpeg,
   resolveOpenAiTtsRuntimeConfig,
-  resolveRequestedTtsMode,
   type TtsRouteMode,
 } from './ingest/audioRuntime';
 import {
@@ -140,6 +141,11 @@ const responseSchema = z.object({
   responseText: z.string().min(1),
   usedSummaryVersion: z.string().min(1).optional(),
   sources: z.array(z.string().url()).optional(),
+  voiceAudio: z.object({
+    contentType: z.string().min(1),
+    base64Audio: z.string().min(1),
+    source: z.enum(['inline_warm_cache', 'inline_warm_inflight']).optional(),
+  }).optional(),
   replyMeta: z.object({
     kind: z.string().min(1),
     source: z.string().min(1),
@@ -148,6 +154,13 @@ const responseSchema = z.object({
     fallbackReason: z.string().min(1).optional(),
     proposalId: z.string().min(1).optional(),
     pendingAction: z.string().min(1).optional(),
+    contextCache: z.object({
+      hit: z.boolean(),
+      stale: z.boolean(),
+      fetchedAt: z.string().min(1),
+      domain: z.string().min(1),
+      questionKey: z.string().min(1).optional(),
+    }).optional(),
   }).optional(),
 });
 
@@ -451,15 +464,6 @@ function sanitizeSearchAgentContent(raw: string): string {
 }
 
 
-function isElevenLabsEngine(engineId: string): boolean {
-  return /elevenlabs/i.test(engineId);
-}
-
-function shouldFallbackFromElevenLabs(status: number, bodyText: string): boolean {
-  if (status === 429 || status >= 500) return true;
-  return /(quota|capacity|limit|credit|insufficient|exceed|plan)/i.test(bodyText);
-}
-
 async function transcribeWithOpenAi(params: {
   env: AppDeps['env'];
   body: Buffer;
@@ -512,8 +516,6 @@ async function transcribeWithOpenAi(params: {
   return { text, model };
 }
 
-
-
 function toEntityStates(input: unknown): EntityStateLike[] {
   if (!Array.isArray(input)) return [];
 
@@ -562,6 +564,215 @@ function getContextualFallbackAck(text: string): string {
     return 'Je reflechis, laisse-moi un instant.';
   }
   return 'Je regarde, un instant.';
+}
+
+type PreparedContextMatch = {
+  domain: ProactiveContextDomain;
+  questionKeys: string[];
+  voiceDomain: VoiceResponseDomain;
+};
+
+const PROACTIVE_CONTEXT_ACTION_RE = /\b(mets?|met|joue|lance|pause|arrete|arrête|reprends?|suivant|precedent|pr[eé]c[eé]dent|ajoute|cree|cr[eé]e|supprime|efface|envoie|r[eé]ponds?|archive|marque|coche|d[eé]cale|modifie|ouvre|ferme|allume|eteins|[eé]teins|baisse|augmente|r[eé]gle)\b/iu;
+
+function inferPreparedContextMatch(text: string): PreparedContextMatch | null {
+  const normalized = text.toLocaleLowerCase('fr-FR');
+
+  if (/\b(brief du jour|briefing du jour|brief matinal|brief du matin|resume ma journee|résume ma journée|programme de la journee|programme de la journée)\b/iu.test(normalized)) {
+    return { domain: 'daily_brief', questionKeys: ['daily_brief.today'], voiceDomain: 'general' };
+  }
+
+  if (PROACTIVE_CONTEXT_ACTION_RE.test(normalized)) return null;
+
+  if (/\b(nas|serveur|stockage|disque|memoire|m[eé]moire|ram|cpu)\b/iu.test(normalized)) {
+    if (/\b(temp[eé]rature|chaud|thermal)\b/iu.test(normalized)) {
+      return { domain: 'nas', questionKeys: ['nas.thermal', 'nas.health'], voiceDomain: 'general' };
+    }
+    if (/\b(place|stockage|disque|volume)\b/iu.test(normalized)) {
+      return { domain: 'nas', questionKeys: ['nas.storage', 'nas.health'], voiceDomain: 'general' };
+    }
+    return { domain: 'nas', questionKeys: ['nas.health'], voiceDomain: 'general' };
+  }
+
+  if (/\b(actu|actus|actualit[eé]|news|quoi de neuf|nouvelles)\b/iu.test(normalized)) {
+    return { domain: 'news', questionKeys: ['news.headlines'], voiceDomain: 'search' };
+  }
+
+  if (/\b(spotify|musique|titre|morceau|chanson|joue|lecture|appareil)\b/iu.test(normalized)) {
+    if (/\b(appareil|device|enceinte|t[eé]l[eé]phone|ordi|ordinateur)\b/iu.test(normalized)) {
+      return { domain: 'spotify', questionKeys: ['spotify.active_device', 'spotify.list_devices'], voiceDomain: 'spotify' };
+    }
+    if (/\b(pause|lecture)\b/iu.test(normalized)) {
+      return { domain: 'spotify', questionKeys: ['spotify.playback_state', 'spotify.now_playing'], voiceDomain: 'spotify' };
+    }
+    return { domain: 'spotify', questionKeys: ['spotify.now_playing'], voiceDomain: 'spotify' };
+  }
+
+  if (/\b(mail|mails|email|emails|courriel|boite|boîte|inbox)\b/iu.test(normalized)) {
+    if (/\b(dernier|r[eé]cent|resume|résume)\b/iu.test(normalized)) {
+      return { domain: 'mail', questionKeys: ['mail.latest_summary', 'mail.unread_summary'], voiceDomain: 'mail' };
+    }
+    if (/\b(important|urgent|r[eé]pondre|repondre)\b/iu.test(normalized)) {
+      return { domain: 'mail', questionKeys: ['mail.important_summary', 'mail.waiting_reply', 'mail.unread_summary'], voiceDomain: 'mail' };
+    }
+    return { domain: 'mail', questionKeys: ['mail.unread_summary', 'mail.latest_summary'], voiceDomain: 'mail' };
+  }
+
+  if (/\b(t[aâ]che|taches|todo|to-do|liste)\b/iu.test(normalized)) {
+    if (/\b(retard|overdue)\b/iu.test(normalized)) {
+      return { domain: 'todo', questionKeys: ['todo.overdue', 'todo.today'], voiceDomain: 'todo' };
+    }
+    if (/\b(prochaine|suivante|next)\b/iu.test(normalized)) {
+      return { domain: 'todo', questionKeys: ['todo.next', 'todo.today'], voiceDomain: 'todo' };
+    }
+    return { domain: 'todo', questionKeys: ['todo.today', 'todo.overdue', 'todo.next'], voiceDomain: 'todo' };
+  }
+
+  if (/\b(agenda|calendrier|rdv|rendez-vous|rendez vous|planning|libre|dispo|disponible)\b/iu.test(normalized)) {
+    if (/\b(demain)\b/iu.test(normalized)) {
+      return { domain: 'calendar', questionKeys: ['calendar.tomorrow', 'calendar.next_event'], voiceDomain: 'calendar' };
+    }
+    if (/\b(libre|dispo|disponible)\b/iu.test(normalized)) {
+      return { domain: 'calendar', questionKeys: ['calendar.free_busy', 'calendar.today'], voiceDomain: 'calendar' };
+    }
+    return { domain: 'calendar', questionKeys: ['calendar.next_event', 'calendar.today'], voiceDomain: 'calendar' };
+  }
+
+  if (/\b(m[eé]t[eé]o|temps|temp[eé]rature|degr[eé]|pluie|pleut|humidit[eé]|dehors)\b/iu.test(normalized)) {
+    if (isClearlyExternalWeather(normalized)) return null;
+    if (/\b(demain)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.tomorrow', 'weather.weekly_trend'], voiceDomain: 'weather' };
+    }
+    if (/\b(semaine|tendance|prochains jours|prochains jours)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.weekly_trend', 'weather.tomorrow'], voiceDomain: 'weather' };
+    }
+    if (/\b(max|maxi|maximale|plus chaud)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.today_high', 'weather.today_outfit'], voiceDomain: 'weather' };
+    }
+    if (/\b(min|mini|minimale|plus froid)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.today_low', 'weather.today_outfit'], voiceDomain: 'weather' };
+    }
+    if (/\b([01]?\d|2[0-3])\s*h\b|\bce matin\b|\bcet apres-midi\b|\bcet après-midi\b|\bce soir\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.today_by_hour', 'weather.conditions'], voiceDomain: 'weather' };
+    }
+    if (/\b(habill|m'habille|m habille|porter|veste|manteau)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.today_outfit', 'weather.today_high', 'weather.today_low'], voiceDomain: 'weather' };
+    }
+    if (/\b(humidit[eé]|humide)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.humidity', 'weather.conditions'], voiceDomain: 'weather' };
+    }
+    if (/\b(pluie|pleut|pleuvoir|averse)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.precipitation', 'weather.conditions'], voiceDomain: 'weather' };
+    }
+    if (/\b(temp[eé]rature|degr[eé]|combien|fait)\b/iu.test(normalized)) {
+      return { domain: 'weather', questionKeys: ['weather.temperature', 'weather.conditions'], voiceDomain: 'weather' };
+    }
+    return { domain: 'weather', questionKeys: ['weather.conditions', 'weather.temperature'], voiceDomain: 'weather' };
+  }
+
+  if (/\b(minuteur|timer|lumi[eè]re|lampe|volet|maison)\b/iu.test(normalized)) {
+    if (/\b(minuteur|timer)\b/iu.test(normalized)) {
+      return { domain: 'home', questionKeys: ['executor.timer_state'], voiceDomain: 'executor' };
+    }
+    if (/\b(lumi[eè]re|lampe)\b/iu.test(normalized)) {
+      return { domain: 'home', questionKeys: ['executor.light_state'], voiceDomain: 'executor' };
+    }
+  }
+
+  return null;
+}
+
+function buildPreparedContextUnavailableResponse(domain: ProactiveContextDomain): string | null {
+  if (domain !== 'daily_brief') return null;
+  return 'Je n ai pas encore de brief du jour fiable pret. Le cache de contexte est indisponible, donc je prefere ne pas inventer.';
+}
+
+function prepareContextAnswerForVoice(domain: ProactiveContextDomain, answerText: string): string {
+  if (domain !== 'daily_brief') return answerText;
+  return answerText.replace(/^Brief du jour\.\s+/iu, 'Brief du jour: ');
+}
+
+function formatPreparedContextVoiceResponse(
+  match: PreparedContextMatch,
+  answerText: string,
+  voiceMode: VoiceResponseMode,
+): string {
+  if (match.domain === 'daily_brief') {
+    return toSingleParagraphPlainText(sanitizeResponseAttribution(answerText, match.voiceDomain));
+  }
+  return formatVoiceResponse({
+    text: answerText,
+    domain: match.voiceDomain,
+    mode: voiceMode,
+  });
+}
+
+function isLocalTimeQuery(text: string): boolean {
+  const normalized = normalizeIntentText(text);
+  if (!normalized) return false;
+  if (/\b(meteo|temps qu il fait|quel temps|temperature|degre|pluie|pleut)\b/u.test(normalized)) return false;
+  return /\b(quelle heure|il est quelle heure|donne moi l heure|tu as l heure|heure actuelle|heure est il|heure est-il)\b/u.test(normalized)
+    || /^l heure[ ?!]*$/u.test(normalized);
+}
+
+function isSalonLightCommand(text: string): boolean {
+  const normalized = normalizeIntentText(text);
+  return /\b(allume|eteins|active|desactive|ouvre|ferme|mets|met)\b/u.test(normalized)
+    && /\b(lumiere|lumieres|lampe|lampes)\b/u.test(normalized)
+    && /\b(salon|sejour|living)\b/u.test(normalized);
+}
+
+function isDailyRecapRequest(text: string): boolean {
+  const normalized = normalizeIntentText(text);
+  return /\b(resume|resumes|recap|recapitule|bilan)\b/u.test(normalized)
+    && /\b(ma|notre|la|cette|aujourd hui|aujourdhui)\b/u.test(normalized)
+    && /\b(journee|jour|aujourd hui|aujourdhui)\b/u.test(normalized);
+}
+
+function inferSimpleSpotifyControl(text: string, options: { voiceHub?: boolean } = {}): z.infer<typeof spotifyActionSchema> | null {
+  const normalized = normalizeIntentText(text).replace(/[^\p{L}\p{N}\s-]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  const hasMusicNoun = /\b(musique|spotify|piste|titre|morceau|chanson|track|lecture)\b/u.test(normalized);
+  if (options.voiceHub && /^(la |le |titre |piste |morceau |chanson )?(suivante?|next|skip)$/u.test(normalized)) {
+    return 'next';
+  }
+  if (options.voiceHub && /^(la |le |titre |piste |morceau |chanson )?(precedente?|previous|retour)$/u.test(normalized)) {
+    return 'previous';
+  }
+  if (/\b(piste|titre|morceau|chanson|track)\s+(suivante?|d apres|apres)\b/u.test(normalized)
+    || /\b(suivante?|next|skip)\b/u.test(normalized) && hasMusicNoun) {
+    return 'next';
+  }
+  if (/\b(piste|titre|morceau|chanson|track)\s+(precedente?|d avant|avant)\b/u.test(normalized)
+    || /\b(precedente?|previous|retour)\b/u.test(normalized) && hasMusicNoun) {
+    return 'previous';
+  }
+  if (/\b(pause|mets en pause|arrete|stop)\b/u.test(normalized) && hasMusicNoun) {
+    return 'pause';
+  }
+  if (/\b(reprends|relance|continue|play|lecture)\b/u.test(normalized) && hasMusicNoun) {
+    return 'play';
+  }
+  return null;
+}
+
+function hasRealSalonLight(states: EntityStateLike[]): boolean {
+  return states.some((state) => {
+    if (!state.entity_id.startsWith('light.')) return false;
+    const friendlyName = typeof state.attributes?.friendly_name === 'string' ? state.attributes.friendly_name : '';
+    const haystack = normalizeIntentText(`${state.entity_id} ${friendlyName}`);
+    if (haystack.includes('led ring') || haystack.includes('home assistant voice') || haystack.includes('hub salon')) return false;
+    return /\b(salon|sejour|living)\b/u.test(haystack);
+  });
+}
+
+function findPreparedContextAnswer(
+  answers: Array<{ questionKey: string; answerText: string }>,
+  questionKeys: string[],
+): { questionKey: string; answerText: string } | null {
+  for (const key of questionKeys) {
+    const found = answers.find((answer) => answer.questionKey === key && answer.answerText.trim());
+    if (found) return found;
+  }
+  return null;
 }
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
@@ -708,63 +919,50 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
   }
 
-  let ttsProviderCache: { providers: Set<string>; at: number } | null = null;
-  let ttsProviderRefreshPromise: Promise<void> | null = null;
-  const TTS_PROVIDER_CACHE_TTL_MS = runtimeCfg.ttsProviderCacheTtlMs;
-
-  const refreshTtsProviderCache = (): Promise<void> => {
-    if (!deps.ha) return Promise.resolve();
-    if (ttsProviderRefreshPromise) return ttsProviderRefreshPromise;
-    ttsProviderRefreshPromise = deps.ha.getStates()
-      .then((statesRaw) => {
-        const providers = new Set(
-          toEntityStates(statesRaw)
-            .map((item) => item.entity_id)
-            .filter((entityId) => entityId.startsWith('tts.'))
-        );
-        ttsProviderCache = { providers, at: Date.now() };
-      })
-      .catch((err) => {
-        app.log.warn({ err }, 'tts_provider_discovery_failed');
-      })
-      .finally(() => {
-        ttsProviderRefreshPromise = null;
-      });
-    return ttsProviderRefreshPromise;
-  };
-
-  // ─── TTS circuit breaker ─────────────────────────────────────────────────
-  const ttsCb = new Map<string, { failures: number; openUntil: number }>();
-  const CB_THRESHOLD = runtimeCfg.ttsCircuitBreakerThreshold;
-  const CB_OPEN_MS = runtimeCfg.ttsCircuitBreakerOpenMs;
-
-  function isTtsCbOpen(engineId: string): boolean {
-    const state = ttsCb.get(engineId);
-    if (!state) return false;
-    if (Date.now() > state.openUntil) { ttsCb.delete(engineId); return false; }
-    return state.failures >= CB_THRESHOLD;
-  }
-
-  function recordTtsFailure(engineId: string): void {
-    const state = ttsCb.get(engineId) ?? { failures: 0, openUntil: 0 };
-    state.failures += 1;
-    if (state.failures >= CB_THRESHOLD) state.openUntil = Date.now() + CB_OPEN_MS;
-    ttsCb.set(engineId, state);
-  }
-
-  function recordTtsSuccess(engineId: string): void {
-    ttsCb.delete(engineId);
-  }
-
   // ─── TTS pre-warm cache (populated by ingest, consumed by /v1/tts) ────────
   const TTS_WARM_TTL_MS = 30_000;
+  const INLINE_TTS_WAIT_MS = 350;
   type TtsWarmEntry = { bytes: Buffer; contentType: string; at: number };
   const ttsWarmCache = new Map<string, TtsWarmEntry>();
   const ttsWarmInFlight = new Map<string, Promise<TtsWarmEntry | null>>();
 
-  /** Fire-and-forget: generates TTS audio for `text` using the primary engine
-   *  and stores it in `ttsWarmCache` so the Desktop's subsequent /v1/tts call
-   *  returns immediately without waiting for HA/OpenAI. */
+  async function resolveInlineVoiceAudio(text: string): Promise<{
+    contentType: string;
+    base64Audio: string;
+    source: 'inline_warm_cache' | 'inline_warm_inflight';
+  } | null> {
+    const key = text.trim().slice(0, 512);
+    const warmHit = ttsWarmCache.get(key);
+    if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
+      return {
+        contentType: warmHit.contentType,
+        base64Audio: warmHit.bytes.toString('base64'),
+        source: 'inline_warm_cache',
+      };
+    }
+
+    const warmPending = ttsWarmInFlight.get(key);
+    if (!warmPending) return null;
+
+    try {
+      const entry = await Promise.race([
+        warmPending,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), INLINE_TTS_WAIT_MS)),
+      ]);
+      if (!entry) return null;
+      return {
+        contentType: entry.contentType,
+        base64Audio: entry.bytes.toString('base64'),
+        source: 'inline_warm_inflight',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fire-and-forget: generates OpenAI TTS audio for `text` and stores it in
+   *  `ttsWarmCache` so the Desktop's subsequent /v1/tts call returns
+   *  immediately without another provider round trip. */
   function warmTtsInBackground(text: string): void {
     const key = text.trim().slice(0, 512);
     const existing = ttsWarmCache.get(key);
@@ -772,94 +970,39 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (ttsWarmInFlight.has(key)) return;
 
     const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
-    const useDedicatedOpenAiTts =
-      Boolean(openAiTtsCfg)
-      && typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
-      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
-
-    if (!useDedicatedOpenAiTts && (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN)) return;
+    if (!openAiTtsCfg) return;
 
     const work = (async (): Promise<TtsWarmEntry | null> => {
       try {
-        if (useDedicatedOpenAiTts && openAiTtsCfg) {
-          const response = await Promise.race([
-            fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
-              method: 'POST',
-              headers: {
-                authorization: `Bearer ${openAiTtsCfg.apiKey}`,
-                'content-type': 'application/json',
-              },
-              body: JSON.stringify({
-                model: openAiTtsCfg.model,
-                voice: openAiTtsCfg.voice,
-                input: text,
-                response_format: openAiTtsCfg.format,
-                speed: openAiTtsCfg.speed,
-                ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
-              }),
-            }),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_openai_timeout')), openAiTtsCfg.timeoutMs)),
-          ]);
-          if (!response.ok) return null;
-
-          const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-          const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: false }, true);
-          const openAiBody = response.body;
-          const bytes = openAiFilters.length > 0 && openAiBody
-            ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
-            : Buffer.from(await response.arrayBuffer());
-
-          const entry: TtsWarmEntry = { bytes, contentType, at: Date.now() };
-          ttsWarmCache.set(key, entry);
-          if (ttsWarmCache.size > 40) {
-            const now = Date.now();
-            for (const [k, v] of ttsWarmCache) { if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k); }
-          }
-          app.log.info({ text_chars: text.length }, 'tts_warm_cached');
-          return entry;
-        }
-
-        const haBase = deps.env.HA_BASE_URL!.replace(/\/$/, '');
-        const engineId = deps.env.HA_TTS_ENTITY_ID?.trim() || 'tts.elevenlabs_text_to_speech';
-        if (isTtsCbOpen(engineId)) return null;
-
-        // Step 1: get TTS URL (HA caches by text, so this is cheap on repeat)
-        const urlRes = await Promise.race([
-          fetch(`${haBase}/api/tts_get_url`, {
+        const response = await Promise.race([
+          fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
             method: 'POST',
-            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ engine_id: engineId, message: text, cache: true }),
+            headers: {
+              authorization: `Bearer ${openAiTtsCfg.apiKey}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: openAiTtsCfg.model,
+              voice: openAiTtsCfg.voice,
+              input: text,
+              response_format: openAiTtsCfg.format,
+              speed: openAiTtsCfg.speed,
+              ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
+            }),
           }),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_url_timeout')), deps.env.HA_TIMEOUT_MS)),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_openai_timeout')), openAiTtsCfg.timeoutMs)),
         ]);
-        if (!urlRes.ok) { recordTtsFailure(engineId); return null; }
+        if (!response.ok) return null;
 
-        const urlPayload = (await urlRes.json()) as { path?: string; url?: string };
-        const audioUrl = typeof urlPayload.path === 'string' ? `${haBase}${urlPayload.path}` : urlPayload.url;
-        if (!audioUrl) return null;
+        const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
+        const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: false }, true);
+        const openAiBody = response.body;
+        const bytes = openAiFilters.length > 0 && openAiBody
+          ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
+          : Buffer.from(await response.arrayBuffer());
 
-        // Step 2: fetch audio bytes
-        const audioRes = await Promise.race([
-          fetch(audioUrl, { headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` } }),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_audio_timeout')), deps.env.HA_TIMEOUT_MS)),
-        ]);
-        if (!audioRes.ok) { recordTtsFailure(engineId); return null; }
-
-        const contentType = audioRes.headers.get('content-type') ?? 'audio/mpeg';
-        const haFilters = buildFfmpegFilters({
-          speed: deps.env.TTS_SPEED,
-          pitchSemitones: deps.env.TTS_PITCH_SEMITONES,
-          clarity: deps.env.TTS_CLARITY,
-        });
-        const body = audioRes.body;
-        const bytes = haFilters.length > 0 && body
-          ? await pipeStreamThroughFfmpeg(body, haFilters)
-          : Buffer.from(await audioRes.arrayBuffer());
-
-        recordTtsSuccess(engineId);
         const entry: TtsWarmEntry = { bytes, contentType, at: Date.now() };
         ttsWarmCache.set(key, entry);
-        // Simple GC: prune stale entries when cache grows
         if (ttsWarmCache.size > 40) {
           const now = Date.now();
           for (const [k, v] of ttsWarmCache) { if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k); }
@@ -948,6 +1091,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (/^(je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
     if (/^(oui|ouais|yep|yes|ok|d accord|vas y|c est bon|parfait|allez|go)( merci)?$/u.test(normalized)) return true;
     if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
+    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?\b/u.test(normalized)) return true;
+    if (/^(je )?confirm(?:e|er|r)?\b.*\b(ajoute|cree|valide|execute|lance|supprime|modifie|envoie)\b/u.test(normalized)) return true;
     if (/^(valide|je valide|tu peux|vas y|c est bon|fais le|lance|execute)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv| ca)?$/u.test(normalized)) return true;
     if (mutation.agent === 'calendar' && /^(supprime|annule|modifie|retire)( l evenement| le rdv| ca)?$/u.test(normalized)) return true;
     return false;
@@ -1318,6 +1463,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
+    const supportsInlineVoiceAudio = parsed.data.clientContext?.['supportsInlineVoiceAudio'] === true
+      || parsed.data.clientContext?.['supportsInlineVoiceAudio'] === 'true';
     const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
     const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
@@ -1475,6 +1622,109 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         'ingest_voice_hub_truncated_guard',
       );
       return reply.code(200).send({ threadId: effectiveThreadId, responseText: clarification });
+    }
+
+    const preparedContextMatch = inferPreparedContextMatch(assistantInputText);
+    if (preparedContextMatch && deps.contextCache) {
+      try {
+        let contextResult = await deps.contextCache.get(preparedContextMatch.domain);
+        let preparedAnswer = contextResult
+          ? findPreparedContextAnswer(contextResult.snapshot.preparedAnswers, preparedContextMatch.questionKeys)
+          : null;
+        if (!contextResult || !preparedAnswer || contextResult.stale) {
+          const refreshedContextResult = await deps.contextCache.get(preparedContextMatch.domain, { force: true });
+          const refreshedPreparedAnswer = refreshedContextResult
+            ? findPreparedContextAnswer(refreshedContextResult.snapshot.preparedAnswers, preparedContextMatch.questionKeys)
+            : null;
+          if (refreshedContextResult && refreshedPreparedAnswer) {
+            contextResult = refreshedContextResult;
+            preparedAnswer = refreshedPreparedAnswer;
+          }
+        }
+        if (contextResult && preparedAnswer) {
+          const answerText = prepareContextAnswerForVoice(preparedContextMatch.domain, preparedAnswer.answerText);
+          const responseText = voiceEnabled
+            ? formatPreparedContextVoiceResponse(preparedContextMatch, answerText, voiceMode)
+            : answerText;
+          await conversationService.persistMessages(effectiveThreadId, text, responseText);
+          await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+          const payload = {
+            threadId: effectiveThreadId,
+            responseText: toSingleParagraphPlainText(responseText),
+            replyMeta: {
+              kind: preparedContextMatch.voiceDomain,
+              source: 'proactive_context_cache',
+              routeKey: `${preparedContextMatch.domain}.${preparedAnswer.questionKey}`,
+              semanticDecision: 'not_activated',
+              contextCache: {
+                hit: true,
+                stale: contextResult.stale,
+                fetchedAt: contextResult.fetchedAt,
+                domain: preparedContextMatch.domain,
+                questionKey: preparedAnswer.questionKey,
+              },
+            },
+          };
+          const validated = responseSchema.safeParse(payload);
+          if (!validated.success) {
+            return reply.code(500).send({ error: 'response_validation_failed' });
+          }
+          app.log.info(
+            {
+              threadId: effectiveThreadId,
+              requestId,
+              domain: preparedContextMatch.domain,
+              questionKey: preparedAnswer.questionKey,
+              elapsed_ms: Date.now() - t0,
+            },
+            'ingest_prepared_context_cache_hit',
+          );
+          return reply.code(200).send(validated.data);
+        }
+      } catch (err) {
+        app.log.warn(
+          { threadId: effectiveThreadId, requestId, domain: preparedContextMatch.domain, err },
+          'ingest_prepared_context_cache_failed',
+        );
+      }
+      const unavailableText = buildPreparedContextUnavailableResponse(preparedContextMatch.domain);
+      if (unavailableText) {
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({
+              text: unavailableText,
+              domain: preparedContextMatch.voiceDomain,
+              mode: voiceMode,
+            })
+          : unavailableText;
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        recordPerf('ingest', Date.now() - t0);
+        const payload = {
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: preparedContextMatch.voiceDomain,
+            source: 'proactive_context_cache',
+            routeKey: `${preparedContextMatch.domain}.unavailable`,
+            semanticDecision: 'not_activated',
+            fallbackReason: 'prepared_context_unavailable',
+          },
+        };
+        const validated = responseSchema.safeParse(payload);
+        if (!validated.success) {
+          return reply.code(500).send({ error: 'response_validation_failed' });
+        }
+        app.log.info(
+          {
+            threadId: effectiveThreadId,
+            requestId,
+            domain: preparedContextMatch.domain,
+            elapsed_ms: Date.now() - t0,
+          },
+          'ingest_prepared_context_unavailable',
+        );
+        return reply.code(200).send(validated.data);
+      }
     }
 
     if (voiceEnabled && isLastMailSummaryRequest(text)) {
@@ -1671,6 +1921,155 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`);
       sseStream?.push(null);
     };
+
+    if (isLocalTimeQuery(assistantInputText)) {
+      const localTimeText = `Il est ${formatParisTime()}.`;
+      const responseText = voiceEnabled
+        ? formatVoiceResponse({ text: localTimeText, domain: 'general', mode: voiceMode })
+        : localTimeText;
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      recordPerf('ingest', Date.now() - t0);
+      app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_local_time_fast_path');
+      const payload = {
+        threadId: effectiveThreadId,
+        responseText: toSingleParagraphPlainText(responseText),
+        replyMeta: {
+          kind: 'time',
+          source: 'local_paris_time',
+        },
+      };
+      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      return reply.code(200).send(payload);
+    }
+
+    if (deps.ha && isVoiceHubChannel && isLikelyLocalWeatherQuery(assistantInputText)) {
+      try {
+        const rawStates = await deps.ha.getStates();
+        const haStates: HaStateLike[] = Array.isArray(rawStates)
+          ? rawStates.filter((item): item is HaStateLike => item !== null && typeof item === 'object' && 'entity_id' in item && typeof (item as { entity_id?: unknown }).entity_id === 'string')
+          : [];
+        const weather = buildWeatherSnapshotFromStates(haStates);
+        if (weather) {
+          const deterministicWeatherText = synthesizeDeterministicWeatherReply({
+            userText: assistantInputText,
+            weather,
+            log: app.log,
+          });
+          if (deterministicWeatherText) {
+            const responseText = voiceEnabled
+              ? formatVoiceResponse({ text: deterministicWeatherText, domain: 'weather', mode: voiceMode })
+              : deterministicWeatherText;
+            await conversationService.persistMessages(effectiveThreadId, text, responseText);
+            await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+            recordPerf('ingest', Date.now() - t0);
+            app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_local_weather_fast_path');
+            const payload = {
+              threadId: effectiveThreadId,
+              responseText: toSingleParagraphPlainText(responseText),
+              replyMeta: {
+                kind: 'weather',
+                source: 'local_weather_snapshot',
+              },
+            };
+            if (sseStream !== null) { pushSseResponse(payload); return reply; }
+            return reply.code(200).send(payload);
+          }
+        }
+      } catch (err) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'ingest_local_weather_fast_path_failed');
+      }
+    }
+
+    if (deps.ha && isVoiceHubChannel && isSalonLightCommand(assistantInputText)) {
+      try {
+        const states = toEntityStates(await deps.ha.getStates());
+        if (!hasRealSalonLight(states)) {
+          const responseText = 'Je ne trouve pas de lumière du salon exposée dans Home Assistant.';
+          await conversationService.persistMessages(effectiveThreadId, text, responseText);
+          await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+          recordPerf('ingest', Date.now() - t0);
+          app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_salon_light_missing_fast_path');
+          const payload = {
+            threadId: effectiveThreadId,
+            responseText,
+            replyMeta: {
+              kind: 'executor',
+              source: 'ha_entity_index',
+              fallbackReason: 'missing_salon_light',
+            },
+          };
+          if (sseStream !== null) { pushSseResponse(payload); return reply; }
+          return reply.code(200).send(payload);
+        }
+      } catch (err) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'ingest_salon_light_missing_fast_path_failed');
+      }
+    }
+
+    if (isVoiceHubChannel && isDailyRecapRequest(assistantInputText)) {
+      const responseText = 'Je n’ai pas encore de journal fiable de ta journée. Je peux te résumer l’agenda, les tâches ou les mails si tu me précises quoi regarder.';
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      recordPerf('ingest', Date.now() - t0);
+      app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_daily_recap_fast_path');
+      const payload = {
+        threadId: effectiveThreadId,
+        responseText: toSingleParagraphPlainText(responseText),
+        replyMeta: {
+          kind: 'general',
+          source: 'voice_hub_fast_path',
+          fallbackReason: 'missing_daily_journal',
+        },
+      };
+      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      return reply.code(200).send(payload);
+    }
+
+    const simpleSpotifyAction = inferSimpleSpotifyControl(assistantInputText, { voiceHub: isVoiceHubChannel });
+    if (simpleSpotifyAction && deps.spotifyWebApi.isConfigured()) {
+      const spotifyPayload = ingestSpotifyRequestSchema.parse({
+        threadId: effectiveThreadId,
+        domain: 'spotify',
+        action: simpleSpotifyAction,
+        slots: {},
+        context: {},
+        text,
+        correlation_id: correlationId || undefined,
+        user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+      });
+      const spotifyResp = await executeSpotifyCapability({
+        request: spotifyPayload,
+        spotifyWebApi: deps.spotifyWebApi,
+        env: deps.env,
+        log: app.log,
+      });
+      const responseText = voiceEnabled
+        ? formatVoiceResponse({ text: spotifyResp.tts, domain: 'spotify', mode: voiceMode })
+        : spotifyResp.tts;
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      recordPerf('ingest', Date.now() - t0);
+      app.log.info(
+        { threadId: effectiveThreadId, requestId, action: simpleSpotifyAction, status: spotifyResp.status, elapsed_ms: Date.now() - t0 },
+        'ingest_spotify_simple_control_fast_path',
+      );
+      const payload = buildSpotifyIngestPayload({
+        threadId: effectiveThreadId,
+        responseText,
+        spotify: {
+          status: spotifyResp.status,
+          ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
+          ...(spotifyResp.options ? { options: spotifyResp.options } : {}),
+          ...(spotifyResp.error_code ? { error_code: spotifyResp.error_code } : {}),
+        },
+        action: simpleSpotifyAction,
+        routingPath: 'router_direct',
+        correlationId: correlationId || undefined,
+      });
+      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      return reply.code(200).send(payload);
+    }
 
     if (deps.nasStatus?.isConfigured() && isNasStatusQuery(assistantInputText)) {
       pushSseAck(getContextualFallbackAck(assistantInputText));
@@ -3067,6 +3466,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           mode: voiceMode,
         })
       : assistantTextForClient;
+    const hasDedicatedTtsRuntime = typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
+      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
+    const shouldPrepareTts = voiceEnabled || (hasDedicatedTtsRuntime && Boolean(clientChannel?.startsWith('desktop')));
+    const shouldInlineVoiceAudio = hasDedicatedTtsRuntime
+      && (supportsInlineVoiceAudio || Boolean(clientChannel?.startsWith('desktop')));
 
     if (responseDomain === 'mail') {
       const parsedMail = extractMailStateFromReply(assistantText);
@@ -3082,18 +3486,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     });
 
-    // Pre-warm TTS: start audio generation in background so the Desktop's
-    // subsequent /v1/tts call hits the cache instead of waiting for HA/OpenAI.
-    if (voiceEnabled) {
+    // Pre-warm TTS in background so voice clients can display text immediately
+    // while a subsequent /v1/tts call can hit warm cache/in-flight audio.
+    if (shouldPrepareTts) {
       warmTtsInBackground(toSingleParagraphPlainText(assistantTextVoice));
     }
 
     const activeProposalForResponse = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+    const voiceAudio = shouldInlineVoiceAudio
+      ? await resolveInlineVoiceAudio(toSingleParagraphPlainText(assistantTextVoice))
+      : null;
+
     const payload = {
       threadId: effectiveThreadId,
       responseText: toSingleParagraphPlainText(assistantTextVoice),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
       ...(searchSources.length > 0 ? { sources: searchSources } : {}),
+      ...(voiceAudio ? { voiceAudio } : {}),
       replyMeta: {
         kind: responseDomain,
         source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
@@ -3344,25 +3753,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
     }
 
-    const mode = resolveRequestedTtsMode(defaultMode, parsed.data.provider);
-    const haEnabled = mode !== 'openai' && hasHaTtsConfig(deps.env);
+    const mode = defaultMode === 'ha'
+      ? 'ha'
+      : defaultMode === 'openai'
+        ? 'openai'
+        : (parsed.data.provider === 'ha' ? 'ha' : (parsed.data.provider === 'openai' ? 'openai' : 'auto'));
     const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
-    const preferOpenAiInAuto =
-      mode === 'auto' &&
-      Boolean(openAiTtsCfg) &&
-      typeof deps.env.OPENAI_TTS_BASE_URL === 'string' &&
-      deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
+    if (mode === 'ha') {
+      return reply.code(410).send({ error: 'ha_tts_disabled', provider: 'openai_only' });
+    }
 
-    if (!haEnabled && !openAiTtsCfg) {
+    if (!openAiTtsCfg) {
       return reply.code(503).send({ error: 'tts_not_configured', provider: mode });
-    }
-
-    if (mode === 'ha' && !haEnabled) {
-      return reply.code(503).send({ error: 'ha_not_configured' });
-    }
-
-    if (mode === 'openai' && !openAiTtsCfg) {
-      return reply.code(503).send({ error: 'openai_tts_not_configured' });
     }
 
     const text = toSingleParagraphPlainText(parsed.data.text);
@@ -3391,182 +3793,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
       }
     }
-
-    const configuredEntity = deps.env.HA_TTS_ENTITY_ID?.trim();
-    const primaryEngineId = configuredEntity && configuredEntity.length > 0
-      ? configuredEntity
-      : 'tts.elevenlabs_text_to_speech';
-    const fallbackFromEnv = (deps.env.HA_TTS_FALLBACK_ENTITY_IDS ?? '')
-      .split(',')
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    let candidateEngineIds = uniqueNonEmpty([primaryEngineId, ...fallbackFromEnv]);
-    const haBaseUrl = deps.env.HA_BASE_URL?.replace(/\/$/, '') ?? '';
-
-    if (haEnabled && deps.ha) {
-      const nowMs = Date.now();
-      const hasFreshProviderCache = Boolean(ttsProviderCache) && nowMs - ttsProviderCache!.at <= TTS_PROVIDER_CACHE_TTL_MS;
-
-      if (hasFreshProviderCache) {
-        const discoveredProviders = Array.from(ttsProviderCache!.providers.values());
-        const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
-        if (availableCandidates.length > 0) {
-          // Keep configured priority, then try other discovered HA TTS providers.
-          candidateEngineIds = uniqueNonEmpty([...availableCandidates, ...discoveredProviders]);
-        } else if (discoveredProviders.length > 0) {
-          // Configured provider seems invalid/unavailable: try discovered providers instead.
-          candidateEngineIds = discoveredProviders;
-        }
-      } else {
-        if (mode === 'ha') {
-          await refreshTtsProviderCache();
-          if (ttsProviderCache?.providers?.size) {
-            const discoveredProviders = Array.from(ttsProviderCache.providers.values());
-            const availableCandidates = candidateEngineIds.filter((engineId) => ttsProviderCache!.providers.has(engineId));
-            candidateEngineIds = availableCandidates.length > 0
-              ? uniqueNonEmpty([...availableCandidates, ...discoveredProviders])
-              : discoveredProviders;
-          }
-        } else {
-          void refreshTtsProviderCache();
-        }
-      }
-    }
-
-    // ── Parallel race: ElevenLabs (HA TTS) vs OpenAI TTS ────────────────────
-    // Both are launched simultaneously. First success wins; the loser is aborted.
     type TtsWin = { bytes: Buffer; contentType: string; engineId: string; via: string };
-    const attempts: Array<{ engineId: string; stage: 'tts_get_url' | 'audio_proxy'; status: number; message?: string }> = [];
 
-    const haAbort = new AbortController();
-    const openAiAbort = new AbortController();
-
-    // Abortable sleep: exits immediately when signal fires (so the losing coroutine doesn't linger)
-    const sleepOrAbort = (ms: number, signal: AbortSignal): Promise<void> =>
-      new Promise<void>((resolve, reject) => {
-        if (signal.aborted) { reject(new Error('aborted')); return; }
-        const t = setTimeout(resolve, ms);
-        signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
-      });
-
-    // ── HA TTS coroutine ──────────────────────────────────────────────────────
-    const doHaTts = async (): Promise<TtsWin> => {
-      if (!haEnabled) throw new Error('ha_not_configured');
-      for (let index = 0; index < candidateEngineIds.length; index += 1) {
-        if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
-        const engineId = candidateEngineIds[index]!;
-
-        if (isTtsCbOpen(engineId)) {
-          app.log.warn({ engineId }, 'tts_circuit_open_skipping');
-          attempts.push({ engineId, stage: 'tts_get_url', status: 0, message: 'circuit_open' });
-          continue;
-        }
-
-        // Step 1 – get URL
-        const urlCtrl = new AbortController();
-        const urlTimeout = setTimeout(() => urlCtrl.abort(), deps.env.HA_TIMEOUT_MS);
-        const onHaAbortUrl = () => urlCtrl.abort();
-        haAbort.signal.addEventListener('abort', onHaAbortUrl, { once: true });
-        let ttsUrlResponse: Response;
-        try {
-          ttsUrlResponse = await fetch(`${haBaseUrl}/api/tts_get_url`, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${deps.env.HA_TOKEN}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ engine_id: engineId, message: text, cache: true }),
-            signal: urlCtrl.signal,
-          });
-        } finally {
-          clearTimeout(urlTimeout);
-          haAbort.signal.removeEventListener('abort', onHaAbortUrl);
-        }
-
-        if (!ttsUrlResponse.ok) {
-          const errorBody = await ttsUrlResponse.text();
-          attempts.push({ engineId, stage: 'tts_get_url', status: ttsUrlResponse.status, message: errorBody.slice(0, 300) });
-          recordTtsFailure(engineId);
-          app.log.warn(
-            { engineId, stage: 'tts_get_url', status: ttsUrlResponse.status, body: errorBody.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
-            'tts_ha_engine_failed'
-          );
-          const hasNext = index < candidateEngineIds.length - 1;
-          const shouldTryNext = hasNext && (isElevenLabsEngine(engineId)
-            ? shouldFallbackFromElevenLabs(ttsUrlResponse.status, errorBody)
-            : ttsUrlResponse.status === 404 || ttsUrlResponse.status === 429 || ttsUrlResponse.status >= 500);
-          if (!shouldTryNext) break;
-          continue;
-        }
-
-        const ttsPayload = (await ttsUrlResponse.json()) as { path?: string; url?: string };
-        const proxyUrl = typeof ttsPayload.path === 'string' && ttsPayload.path.length > 0
-          ? `${haBaseUrl}${ttsPayload.path}` : ttsPayload.url;
-
-        if (!proxyUrl) {
-          attempts.push({ engineId, stage: 'audio_proxy', status: 502, message: 'invalid_tts_response' });
-          if (index < candidateEngineIds.length - 1) continue;
-          break;
-        }
-
-        // Step 2 – fetch audio bytes (single attempt — OpenAI races in parallel so retries are pointless here)
-        const proxyDelays = [0];
-        let upstream: Response;
-        for (let proxyAttempt = 0; proxyAttempt < proxyDelays.length; proxyAttempt += 1) {
-          if (proxyDelays[proxyAttempt]! > 0) await sleepOrAbort(proxyDelays[proxyAttempt]!, haAbort.signal);
-          if (haAbort.signal.aborted) throw new Error('ha_tts_aborted');
-          const proxyCtrl = new AbortController();
-          const proxyTimeout = setTimeout(() => proxyCtrl.abort(), deps.env.HA_TIMEOUT_MS);
-          const onHaAbortProxy = () => proxyCtrl.abort();
-          haAbort.signal.addEventListener('abort', onHaAbortProxy, { once: true });
-          try {
-            upstream = await fetch(proxyUrl, {
-              method: 'GET',
-              headers: { authorization: `Bearer ${deps.env.HA_TOKEN}` },
-              signal: proxyCtrl.signal,
-            });
-          } finally {
-            clearTimeout(proxyTimeout);
-            haAbort.signal.removeEventListener('abort', onHaAbortProxy);
-          }
-          if (upstream.ok || upstream.status !== 500) break;
-          if (proxyAttempt < proxyDelays.length - 1) {
-            app.log.warn({ engineId, stage: 'audio_proxy', status: 500, proxyAttempt, voice_turn_id: voiceTurnId || undefined }, 'tts_ha_proxy_500_retrying');
-          }
-        }
-
-        if (!upstream!.ok) {
-          const errorText = await upstream!.text();
-          attempts.push({ engineId, stage: 'audio_proxy', status: upstream!.status, message: errorText.slice(0, 300) });
-          recordTtsFailure(engineId);
-          app.log.warn(
-            { engineId, stage: 'audio_proxy', status: upstream!.status, body: errorText.slice(0, 300), voice_turn_id: voiceTurnId || undefined },
-            'tts_ha_engine_failed'
-          );
-          const hasNext = index < candidateEngineIds.length - 1;
-          const shouldTryNext = hasNext && (isElevenLabsEngine(engineId)
-            ? shouldFallbackFromElevenLabs(upstream!.status, errorText)
-            : upstream!.status === 404 || upstream!.status === 429 || upstream!.status >= 500);
-          if (!shouldTryNext) break;
-          continue;
-        }
-
-        const contentType = upstream!.headers.get('content-type') ?? 'audio/mpeg';
-        const haFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: deps.env.TTS_PITCH_SEMITONES, clarity: deps.env.TTS_CLARITY });
-        const body = upstream!.body;
-        const bytes = haFilters.length > 0 && body
-          ? await pipeStreamThroughFfmpeg(body, haFilters)
-          : Buffer.from(await upstream!.arrayBuffer());
-        recordTtsSuccess(engineId);
-        return { bytes, contentType, engineId, via: `ha:${engineId}` };
-      }
-      throw new Error('ha_tts_all_failed');
-    };
-
-    // ── OpenAI TTS coroutine ──────────────────────────────────────────────────
+    // OpenAI-only TTS coroutine
     const doOpenAiTts = async (): Promise<TtsWin> => {
       if (!openAiTtsCfg) throw new Error('openai_tts_not_configured');
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), openAiTtsCfg.timeoutMs);
-      const onExternal = () => controller.abort();
-      openAiAbort.signal.addEventListener('abort', onExternal, { once: true });
       const response = await fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
         method: 'POST',
         headers: { authorization: `Bearer ${openAiTtsCfg.apiKey}`, 'content-type': 'application/json' },
@@ -3582,7 +3815,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         signal: controller.signal,
       }).finally(() => {
         clearTimeout(timeoutId);
-        openAiAbort.signal.removeEventListener('abort', onExternal);
       });
       if (!response.ok) {
         const errBody = await response.text();
@@ -3600,45 +3832,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     };
 
     // ── Race: ElevenLabs vs OpenAI — first success wins, loser aborted ────────
-    // Cache hit ElevenLabs → OpenAI aborted at ~0ms cost.
-    // ElevenLabs quota/500 retries → OpenAI wins after ~1s, ElevenLabs sleep interrupted via haAbort.
     let winner: TtsWin;
     try {
-      const activePromises: Promise<TtsWin>[] = [];
-      if (mode !== 'openai' && !preferOpenAiInAuto) {
-        const haPromise = doHaTts().then((v) => { openAiAbort.abort('race_winner_ha'); return v; });
-        activePromises.push(haPromise);
-      }
-      if (mode !== 'ha' && openAiTtsCfg) {
-        const openAiPromise = doOpenAiTts().then((v) => { haAbort.abort('race_winner_openai'); return v; });
-        activePromises.push(openAiPromise);
-      }
-      winner = await new Promise<TtsWin>((resolve, reject) => {
-        let remaining = activePromises.length;
-        const onFail = () => { remaining -= 1; if (remaining === 0) reject(new Error('tts_all_failed')); };
-        for (const p of activePromises) p.then(resolve, onFail);
-      });
-    } catch {
-      if (mode === 'ha' && openAiTtsCfg) {
-        try {
-          winner = await doOpenAiTts();
-          app.log.warn(
-            { attempts, via: winner.via, voice_turn_id: voiceTurnId || undefined },
-            'tts_ha_fallback_openai'
-          );
-          recordPerf('tts', Date.now() - t0);
-          app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-          return reply
-            .code(200)
-            .header('content-type', winner.contentType)
-            .header('x-tts-provider', `${winner.via}:ha_fallback`)
-            .send(winner.bytes);
-        } catch {
-          // keep existing failure response below
-        }
-      }
-      app.log.warn({ attempts, voice_turn_id: voiceTurnId || undefined }, 'tts_all_failed');
-      return reply.code(502).send({ error: 'tts_failed_all_candidates', attempts });
+      winner = await doOpenAiTts();
+    } catch (err) {
+      app.log.warn({ err, voice_turn_id: voiceTurnId || undefined }, 'tts_openai_failed');
+      return reply.code(502).send({ error: 'tts_openai_failed' });
     }
 
     recordPerf('tts', Date.now() - t0);
@@ -3738,14 +3937,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     for (const key of keys) {
       stats[key] = computePercentiles(key);
     }
-    const cbState: Record<string, { failures: number; openUntil: string | null }> = {};
-    for (const [engineId, state] of ttsCb.entries()) {
-      cbState[engineId] = {
-        failures: state.failures,
-        openUntil: state.openUntil > 0 ? new Date(state.openUntil).toISOString() : null,
-      };
-    }
-    return reply.code(200).send({ latency_ms: stats, tts_circuit_breaker: cbState });
+    return reply.code(200).send({ latency_ms: stats, tts_circuit_breaker: {} });
   });
 
 }

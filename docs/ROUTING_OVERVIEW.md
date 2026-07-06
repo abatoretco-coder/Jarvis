@@ -84,7 +84,21 @@ References:
 - src/routes/ingest.ts
 - src/conversation/orchestratorRouter.ts
 
-## 5. Response Metadata
+## 5. Proactive Context Cache
+
+Warm context is allowed to accelerate specialized agents, but it must not change routing priority.
+
+Rules:
+- The router still chooses the domain first.
+- Warm snapshots can answer read-only questions or enrich synthesis.
+- Freshness-sensitive requests can force a live refresh.
+- Mutations may use cached context only to resolve candidates; confirmation guardrails still apply.
+- General HA remains fallback only, not a pre-warmed parallel path.
+
+Reference:
+- docs/PROACTIVE_CONTEXT_CACHE.md
+
+## 6. Response Metadata
 
 ## Spotify payload shape
 - replyMeta.kind=spotify
@@ -100,7 +114,7 @@ References:
 Reference:
 - src/routes/ingest.ts
 
-## 6. Key Guardrails
+## 7. Key Guardrails
 
 1. No hidden fallback chains between unrelated domains.
 2. Search agents bypass Home Assistant by design.

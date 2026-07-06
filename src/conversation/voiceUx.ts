@@ -22,12 +22,27 @@ function compact(text: string): string {
 function stripWebSourceLabel(text: string): string {
   return text
     .replace(/(?:^|\s)source\s*:\s*(?:synth[eè]se\s+)?web\.?/giu, ' ')
+    .replace(/(?:^|\s)(?:sources?|r[eÃ©]f[eÃ©]rences?)\s*:\s*(?:https?:\/\/\S+|www\.\S+)(?:\s*,?\s*(?:https?:\/\/\S+|www\.\S+))*\.?/giu, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function stripOralNoise(text: string): string {
+  return Array.from(text)
+    .filter((char) => {
+      const codepoint = char.codePointAt(0) ?? 0;
+      const isEmoji = (codepoint >= 0x1F000 && codepoint <= 0x1FAFF)
+        || (codepoint >= 0x2300 && codepoint <= 0x27BF);
+      return codepoint !== 0xFE0F && !isEmoji;
+    })
+    .join('')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
 export function sanitizeResponseAttribution(text: string, domain: VoiceResponseDomain): string {
-  return domain === 'search' ? text : stripWebSourceLabel(text);
+  void domain;
+  return stripOralNoise(stripWebSourceLabel(text));
 }
 
 function splitSentences(text: string): string[] {
@@ -41,6 +56,26 @@ function capSentences(text: string, maxSentences: number): string {
   const list = splitSentences(text);
   if (list.length <= maxSentences) return compact(text);
   return compact(list.slice(0, maxSentences).join(' '));
+}
+
+function normalizeTutoiement(text: string): string {
+  return text
+    .replace(/\b[Pp]ouvez-vous\b/g, 'Tu peux')
+    .replace(/\b[Vv]oulez-vous\b/g, 'Tu veux')
+    .replace(/\b[Ss]ouhaitez-vous\b/g, 'Tu veux')
+    .replace(/\b[Dd]ites-moi\b/g, 'Dis-moi')
+    .replace(/\b[Vv]ous pouvez\b/g, 'Tu peux')
+    .replace(/\b[Vv]ous voulez\b/g, 'Tu veux')
+    .replace(/\b[Vv]ous souhaitez\b/g, 'Tu veux')
+    .replace(/\b[Vv]ous avez\b/g, 'Tu as')
+    .replace(/\b[Vv]ous etes\b/g, 'Tu es')
+    .replace(/\b[Vv]ous êtes\b/g, 'Tu es')
+    .replace(/\b[Jj]e peux vous aider\b/g, "Je peux t'aider")
+    .replace(/\b[Jj]e peux vous\b/g, 'Je peux te')
+    .replace(/\bsi Tu veux\b/g, 'si tu veux')
+    .replace(/\b[Pp]our vous\b/g, 'Pour toi')
+    .replace(/\b[Aa]vec vous\b/g, 'Avec toi')
+    .replace(/\b[Cc]hez vous\b/g, 'Chez toi');
 }
 
 export function isVoiceRequest(input: { voiceTurnId?: string; clientChannel?: string | null }): boolean {
@@ -152,13 +187,13 @@ function formatSearchOral(text: string, mode: VoiceResponseMode): string {
   const sourced = /\bsource\s*:\s*(?:synth[eè]se\s+)?web\b/iu.test(capped)
     ? capped
     : `${capped} Source : web.`;
-  return mode === 'detailed' ? sourced : `${sourced} Je peux detailler si tu veux.`;
+  void sourced;
+  return mode === 'detailed' ? capped : `${capped} Je peux detailler si tu veux.`;
 }
 
 function formatTodoOral(text: string, mode: VoiceResponseMode): string {
   if (mode === 'short') return firstSentence(text);
-  const capped = capSentences(text, mode === 'detailed' ? 4 : 2);
-  return `${capped} Tu veux que je te lise la prochaine echeance ?`;
+  return capSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
 export function formatVoiceResponse(input: {
@@ -188,5 +223,5 @@ export function formatVoiceResponse(input: {
       break;
   }
 
-  return compact(body);
+  return compact(normalizeTutoiement(body));
 }

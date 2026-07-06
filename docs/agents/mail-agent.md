@@ -24,8 +24,14 @@ Email actions across Gmail and Outlook accounts (list, read, send, reply, flag, 
 2. Domain set to mail for voice formatting.
 3. Mail state is persisted for voice follow-up summary behavior.
 
+## Proactive Context Cache
+1. Keep unread count, latest message metadata, important/unread summary and last-read thread summary warm.
+2. Use fresh snapshots for inbox count, latest-mail and "needs reply" questions.
+3. Never send, reply, archive, delete or mark messages from a proactive refresh; cached context can only help resolve candidates before normal confirmation/execution.
+
 ## Main References
 - src/mail/mailAgent.ts
 - src/routes/ingest.ts
 - src/routing/e1RouteDispatcher.ts
 - src/conversation/voiceUx.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

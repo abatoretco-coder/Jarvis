@@ -257,10 +257,10 @@ export function resolveEventEnd(ev: GoogleCalendarEvent): Date {
 /** Format a Date for display (fr-FR short). */
 export function formatEventDate(date: Date, isAllDay: boolean): string {
   if (isAllDay) {
-    return date.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' });
+    return date.toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: '2-digit' });
   }
   return date.toLocaleString('fr-FR', {
-    weekday: 'short',
+    weekday: 'long',
     day: '2-digit',
     month: '2-digit',
     hour: '2-digit',

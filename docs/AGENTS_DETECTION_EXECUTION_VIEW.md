@@ -256,7 +256,32 @@ Voix
 - Formatage final depend du domaine: mail, todo, search, executor, weather, spotify, general.
 - Reference: [src/conversation/voiceUx.ts](src/conversation/voiceUx.ts)
 
-## 10) Ce que tu peux decider maintenant facilement
+## 10) Cache proactif de contexte
+
+Objectif
+- Garder a chaud des snapshots courts pour les questions frequentes, sans refaire chaque recherche au moment de la demande.
+- Ne jamais changer la priorite du router: le cache nourrit l agent choisi, il ne choisit pas l agent.
+
+Agents proposes a garder chauds
+- Spotify: lecture courante, device actif, devices, playlists.
+- Mail: nombre de non lus, derniers mails, mails importants, derniers fils lus.
+- Todo: taches du jour, retard, prochaines taches, listes.
+- Calendar: prochains evenements, aujourd hui/demain, free/busy.
+- Weather: snapshot HA local et reponses deterministes simples.
+- Executors/Home: etat des entites volatiles utiles, timers, lights, covers.
+- NAS/System: sante, disque, memoire, temperatures.
+- News/Search: seulement pour surfaces dashboard/news ou abonnement explicite.
+
+Regles
+- Read-only uniquement.
+- Les actions write/destructive restent derriere confirmations.
+- Les questions "maintenant", "dernier", "nouveau" peuvent forcer un refresh live si le snapshot est trop vieux.
+- General HA reste fallback, pas agent prechauffe.
+
+Source de verite
+- [docs/PROACTIVE_CONTEXT_CACHE.md](docs/PROACTIVE_CONTEXT_CACHE.md)
+
+## 11) Ce que tu peux decider maintenant facilement
 
 1. Pour chaque agent, tu peux choisir si on veut:
 - plus de determinisme,

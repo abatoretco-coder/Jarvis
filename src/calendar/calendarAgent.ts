@@ -352,13 +352,46 @@ function extractTodayDeleteQuery(text: string): string | undefined {
 
 function preplanCalendarAction(text: string, isoDate: string): CalendarAction | undefined {
   const query = extractTodayDeleteQuery(text);
-  if (!query) return undefined;
-  const nextIsoDate = addDaysToIsoDate(isoDate, 1);
+  if (query) {
+    const nextIsoDate = addDaysToIsoDate(isoDate, 1);
+    return {
+      action: 'delete_event',
+      q: query,
+      timeMin: `${isoDate}T00:00:00`,
+      timeMax: `${nextIsoDate}T00:00:00`,
+    };
+  }
+  return preplanSimpleCalendarRead(text, isoDate);
+}
+
+function preplanSimpleCalendarRead(text: string, isoDate: string): CalendarAction | undefined {
+  const normalized = normalizeCalendarIntentText(text);
+  const asksCalendar = /\b(agenda|calendrier|planning|rdv|rendez vous|rendez-vous|evenements?|event|reunions?|meeting)\b/u.test(normalized)
+    || /\b(j ai quoi|qu est ce que j ai|quoi de prevu|quoi aujourd hui|quoi demain)\b/u.test(normalized);
+  if (!asksCalendar) return undefined;
+  if (/\b(ajoute|cree|creer|supprime|annule|decale|modifie|change|invite|retire)\b/u.test(normalized)) return undefined;
+
+  let startOffset = 0;
+  let endOffset = 1;
+  if (/\b(apres demain|apres-demain)\b/u.test(normalized)) {
+    startOffset = 2;
+    endOffset = 3;
+  } else if (/\b(demain)\b/u.test(normalized)) {
+    startOffset = 1;
+    endOffset = 2;
+  } else if (/\b(semaine|7 jours|sept jours)\b/u.test(normalized)) {
+    startOffset = 0;
+    endOffset = 7;
+  } else if (!/\b(aujourd hui|aujourdhui|ce jour|journee|jour|matin|soir|ce soir|maintenant)\b/u.test(normalized)) {
+    return undefined;
+  }
+
+  const startIsoDate = addDaysToIsoDate(isoDate, startOffset);
+  const endIsoDate = addDaysToIsoDate(isoDate, endOffset);
   return {
-    action: 'delete_event',
-    q: query,
-    timeMin: `${isoDate}T00:00:00`,
-    timeMax: `${nextIsoDate}T00:00:00`,
+    action: 'list_upcoming',
+    timeMin: `${startIsoDate}T00:00:00`,
+    timeMax: `${endIsoDate}T00:00:00`,
   };
 }
 
@@ -371,6 +404,8 @@ async function planCalendarAction(
   const isoDate = getParisIsoDate(now);
   const preplanned = preplanCalendarAction(text, isoDate);
   if (preplanned) return parseCalendarAction(preplanned, env);
+  const simpleRead = preplanSimpleCalendarRead(text, isoDate);
+  if (simpleRead) return parseCalendarAction(simpleRead, env);
 
   const resp = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -792,6 +827,17 @@ export async function callCalendarAgent(
     return 'Le calendrier Google n\'est pas configuré. Connecte Google via OAuth ou ajoute les identifiants Google côté serveur.';
   }
   if (configState === 'missing_refresh_token') return 'Connecte Google via OAuth pour activer le calendrier.';
+
+  const preplanned = preplanCalendarAction(text, getParisIsoDate(new Date()));
+  if (preplanned) {
+    log.info({ action: preplanned.action, source: 'deterministic' }, 'calendar_agent_plan');
+    if (options.mode === 'propose' && isCalendarMutation(preplanned)) {
+      if (preplanned.action === 'create_event') return formatCalendarProposal(preplanned);
+      const prepared = await prepareCalendarMutationAction(preplanned, env);
+      return prepared.status === 'ready' ? prepared.proposal : prepared.message;
+    }
+    return executeCalendarAction(preplanned, env);
+  }
 
   if (!env.OPENAI_API_KEY?.trim()) {
     throw new Error('calendar_agent_openai_key_missing');

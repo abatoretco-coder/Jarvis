@@ -296,7 +296,7 @@ describe('Weather Routing & Deterministic Responses', () => {
         weather: snapshot,
       });
 
-      expect(response).toMatch(/À \w+ il est partiel-nuageux \(\d+°C\)/);
+      expect(response).toMatch(/À \w+, le temps est .*?, \d+°C\./);
     });
 
     it('should return null for non-deterministic questions', () => {

@@ -26,7 +26,7 @@ export class AsyncSnapshotCache<T> {
     }
 
     if (this.entry && age <= this.options.staleMs) {
-      void this.refresh();
+      void this.refresh().catch(() => undefined);
       return { value: this.entry.value, cached: true, stale: true, fetchedAt: this.entry.fetchedAt };
     }
 
@@ -36,6 +36,14 @@ export class AsyncSnapshotCache<T> {
 
   invalidate(): void {
     this.entry = undefined;
+  }
+
+  peek(): { value: T; fetchedAt: number } | undefined {
+    return this.entry;
+  }
+
+  getOptions(): SnapshotCacheOptions {
+    return this.options;
   }
 
   private refresh(): Promise<T> {

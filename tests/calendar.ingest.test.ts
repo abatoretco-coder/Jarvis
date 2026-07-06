@@ -120,6 +120,46 @@ describe('calendar ingest confirmation', () => {
     await app.close();
   });
 
+  it('lists today agenda deterministically without OpenAI planner', async () => {
+    const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('/chat/completions')) return openAiPlan({ title: 'Agenda' });
+      if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
+      if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
+        return googleEvents([{
+          id: 'event-standup',
+          summary: 'Standup',
+          start: { dateTime: '2026-07-04T09:30:00+02:00' },
+          end: { dateTime: '2026-07-04T10:00:00+02:00' },
+        }]);
+      }
+      throw new Error(`unexpected_fetch:${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const app = calendarApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-calendar-today',
+        text: 'Qu est ce que j ai aujourd hui dans mon agenda ?',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: Record<string, unknown> };
+    expect(payload.responseText).toContain('Standup');
+    expect(payload.replyMeta).toMatchObject({
+      kind: 'calendar',
+      routeKey: 'calendar.list_upcoming',
+    });
+    const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/chat/completions'));
+    expect(chatCalls.every(([, init]) => !String((init as RequestInit | undefined)?.body ?? '').includes('list_upcoming'))).toBe(true);
+    await app.close();
+  });
+
   it('executes a pending create_event only after same-thread confirmation', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);

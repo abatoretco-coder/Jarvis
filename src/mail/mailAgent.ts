@@ -1,6 +1,7 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
 import { googleRefreshTokenStoreKey } from '../google/googleCredentialService';
 import { cleanMailDetailText } from './mailContentCleaner';
+import { qualifyMail, shouldMentionMail } from './mailQualification';
 import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';
 import { buildMailSynthesisUserPrompt } from './prompts/mailSynthesisUserTemplate';
 
@@ -606,6 +607,21 @@ function gmailHeader(msg: GmailMessage, name: string): string {
   return decodeMimeHeader(raw);
 }
 
+function formatQualifiedGmailSummary(msg: GmailMessage): string | null {
+  const from = gmailHeader(msg, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
+  const subject = gmailHeader(msg, 'Subject') || '(sans objet)';
+  const qualification = qualifyMail({
+    from,
+    subject,
+    snippet: msg.snippet,
+    listId: gmailHeader(msg, 'List-ID') || undefined,
+    autoSubmitted: gmailHeader(msg, 'Auto-Submitted') || undefined,
+  });
+  if (!shouldMentionMail(qualification, 'mail_question')) return null;
+  const label = qualification.category === 'action' ? 'Action' : 'Info';
+  return `${label} - ${from} : ${subject}`;
+}
+
 async function gmailGet<T>(path: string, token: string): Promise<T> {
   const resp = await fetch(`${GMAIL_BASE}${path}`, {
     headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
@@ -667,17 +683,14 @@ async function findGmailMessages(token: string, q: string, max = 5): Promise<Gma
 async function summarizeGmailMatches(token: string, refs: GmailMessageRef[]): Promise<string[]> {
   const detailed = await Promise.all(
     refs.slice(0, 3).map((m) =>
-      gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
+      gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-ID&metadataHeaders=Auto-Submitted`, token)
         .catch(() => null),
     ),
   );
   return detailed
     .filter((m): m is GmailMessage => m !== null)
-    .map((m) => {
-      const from = gmailHeader(m, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
-      const subject = gmailHeader(m, 'Subject') || '(sans objet)';
-      return `${from} : ${subject}`;
-    });
+    .map(formatQualifiedGmailSummary)
+    .filter((summary): summary is string => Boolean(summary));
 }
 
 function decodeGmailBody(msg: GmailMessage): string {
@@ -700,18 +713,18 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const detailed = await Promise.all(
         msgs.slice(0, 5).map((m) =>
-          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
+          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-ID&metadataHeaders=Auto-Submitted`, token)
             .catch(() => null),
         ),
       );
       const summaries = detailed
         .filter((m): m is GmailMessage => m !== null)
-        .map((m) => {
-          const from = gmailHeader(m, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
-          const subject = gmailHeader(m, 'Subject') || '(sans objet)';
-          return `${from} : ${subject}`;
-        });
+        .map(formatQualifiedGmailSummary)
+        .filter((summary): summary is string => Boolean(summary));
       const count = msgs.length;
+      if (summaries.length === 0) {
+        return `Tu as ${count} email${count > 1 ? 's' : ''} recent${count > 1 ? 's' : ''}, mais rien d'important a mentionner.`;
+      }
       const label = action.unread_only !== false ? 'non lus' : '';
       const top = summaries.slice(0, 3);
       const remaining = Math.max(0, count - top.length);
@@ -726,17 +739,17 @@ async function executeGmail(action: MailAction, token: string): Promise<string> 
 
       const detailed = await Promise.all(
         msgs.slice(0, 3).map((m) =>
-          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, token)
+          gmailGet<GmailMessage>(`/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-ID&metadataHeaders=Auto-Submitted`, token)
             .catch(() => null),
         ),
       );
       const summaries = detailed
         .filter((m): m is GmailMessage => m !== null)
-        .map((m) => {
-          const from = gmailHeader(m, 'From').replace(/<[^>]+>/g, '').trim() || 'Inconnu';
-          const subject = gmailHeader(m, 'Subject') || '(sans objet)';
-          return `${from} : ${subject}`;
-        });
+        .map(formatQualifiedGmailSummary)
+        .filter((summary): summary is string => Boolean(summary));
+      if (summaries.length === 0) {
+        return `${msgs.length} résultat${msgs.length > 1 ? 's' : ''} pour "${action.query}", mais rien d'important a mentionner.`;
+      }
       return `${msgs.length} résultat${msgs.length > 1 ? 's' : ''} pour "${action.query}" : ${summaries.join(' ; ')}.`;
     }
 

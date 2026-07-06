@@ -26,7 +26,13 @@ Home automation executor intents (timers and other HA execution commands).
 2. Domain set to executor for voice formatting.
 3. Can be merged in multi-agent synthesis responses.
 
+## Proactive Context Cache
+1. Keep selected read-only HA entity states warm: timers, lights, covers, scenes and other high-value home state.
+2. Use snapshots for state questions like remaining timer time or whether a light is on.
+3. Never call HA services from proactive refresh; execution commands still run only through the live executor path.
+
 ## Main References
 - src/routes/ingest.ts
 - src/routing/semanticRouteCatalog.ts
 - src/conversation/ConversationService.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

@@ -23,8 +23,14 @@ External web/news/deep research answers (not Home Assistant conversation executi
 2. Domain set to search for voice formatting.
 3. In multi-agent requests, text can be synthesized with other agent outputs.
 
+## Proactive Context Cache
+1. Keep only opted-in headline/news snapshots or dashboard summaries warm.
+2. Do not prewarm deep search or broad web research by default.
+3. External weather can use search routing, but local weather cache remains owned by the weather agent.
+
 ## Main References
 - src/search/agents.ts
 - src/routes/ingest.ts
 - src/routing/routeDispatcher.ts
 - src/routing/semanticRouteCatalog.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

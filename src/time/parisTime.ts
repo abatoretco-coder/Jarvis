@@ -33,6 +33,14 @@ export function formatParisDateTime(date = new Date()): string {
   });
 }
 
+export function formatParisTime(date = new Date()): string {
+  return date.toLocaleTimeString('fr-FR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: PARIS_TIME_ZONE,
+  });
+}
+
 function getParisDateTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: PARIS_TIME_ZONE,

@@ -481,7 +481,8 @@ function normalizeReminderTime(reminderDate: string): string {
 
 const _PLANNER_SYSTEM = `Tu es un assistant de gestion de tâches (Microsoft To Do).
 Analyse la commande vocale en français et retourne un JSON correspondant à une seule action.
-Le message utilisateur commencera par "TODAY=YYYY-MM-DD" indiquant la date du jour. Utilise cette date pour calculer les dates relatives (demain, la semaine prochaine, etc.) et toujours exprimer les dates en format YYYY-MM-DD absolu.
+Le message utilisateur commencera par "TODAY=YYYY-MM-DD" indiquant la date du jour. Utilise cette date pour calculer les dates relatives (demain, la semaine prochaine, etc.).
+Dans le JSON, les champs de date doivent toujours rester au format YYYY-MM-DD absolu. Ne produis aucune phrase utilisateur ici.
 
 Listes surveillées par défaut (utilisées quand aucune liste n'est précisée) :
   - "Tâches" (liste système par défaut)
@@ -581,7 +582,7 @@ async function planTodoAction(
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: _PLANNER_SYSTEM },
-        { role: 'user',   content: `TODAY=${new Date().toISOString().slice(0, 10)}\n${text}` },
+        { role: 'user',   content: `TODAY=${todayIsoInParis()}\n${text}` },
       ],
     }),
     signal: AbortSignal.timeout(timeoutMs),
@@ -637,13 +638,13 @@ export async function planTodoAgentAction(
 export function formatTodoActionPreview(action: TodoAction): string {
   switch (action.action) {
     case 'add_task':
-      return `Tache a ajouter: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}${action.due_date ? `, echeance ${action.due_date}` : ''}.`;
+      return `J'ajoute la tache ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}${action.due_date ? ` pour ${formatDueDateForUser(action.due_date)}` : ''}.`;
     case 'complete_task':
       return `Tache a terminer: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}.`;
     case 'delete_task':
       return `Tache a supprimer: ${action.title}${action.list_name ? ` dans ${action.list_name}` : ''}.`;
     case 'update_task':
-      return `Tache a modifier: ${action.title}${action.new_title ? ` vers ${action.new_title}` : ''}${action.due_date ? `, echeance ${action.due_date}` : ''}.`;
+      return `Tache a modifier: ${action.title}${action.new_title ? ` vers ${action.new_title}` : ''}${action.due_date ? `, pour ${formatDueDateForUser(action.due_date)}` : ''}.`;
     case 'create_list':
       return `Liste a creer: ${action.name}.`;
     case 'delete_list':
@@ -665,6 +666,30 @@ const FR_MONTHS = ['janvier','février','mars','avril','mai','juin','juillet','a
 const FR_DAYS   = { sunday:'dimanche', monday:'lundi', tuesday:'mardi', wednesday:'mercredi', thursday:'jeudi', friday:'vendredi', saturday:'samedi' } as const;
 
 /** "2026-05-06" → "aujourd'hui", "demain", "hier", "6 mai" or "6 mai 2026" */
+function todayIsoInParis(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function addDaysIso(iso: string, days: number): string {
+  const [year = 1970, month = 1, day = 1] = iso.slice(0, 10).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return date.toISOString().slice(0, 10);
+}
+
+export function formatDueDateForUser(iso: string, todayIso = todayIsoInParis()): string {
+  const normalized = iso.slice(0, 10);
+  if (normalized === todayIso) return "aujourd'hui";
+  if (normalized === addDaysIso(todayIso, 1)) return 'demain';
+  return `le ${formatDateFr(normalized)}`;
+}
+
 function formatDateFr(iso: string): string {
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
   const now = new Date();
@@ -836,7 +861,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
 
       await graphPost(`/me/todo/lists/${list.id}/tasks`, token, body);
       const parts: string[] = [];
-      if (action.due_date)                     parts.push(`pour le ${formatDateFr(action.due_date)}`);
+      if (action.due_date)                     parts.push(`pour ${formatDueDateForUser(action.due_date)}`);
       if (action.importance === 'high')        parts.push('marquée urgente');
       if (action.recurrence)                   parts.push(recurrenceFr(action.recurrence));
       const suffix = parts.length ? `, ${parts.join(', ')}` : '';
@@ -937,7 +962,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const details: string[] = [];
       if (patch['title'])       details.push(`renommée en ${patch['title'] as string}`);
       if (patch['dueDateTime'] === null)     details.push('échéance supprimée');
-      else if (patch['dueDateTime'])         details.push(`échéance fixée au ${formatDateFr(action.due_date as string)}`);
+      else if (patch['dueDateTime'])         details.push(`échéance fixée pour ${formatDueDateForUser(action.due_date as string)}`);
       if (patch['recurrence'] === null)      details.push('récurrence supprimée');
       else if (patch['recurrence'])          details.push(`récurrence mise à jour`);
       if (patch['reminderDateTime'])         details.push('rappel programmé');

@@ -62,6 +62,30 @@ const envSchema = z
   NAS_STATUS_CACHE_TTL_MS: numberFromEnv.default(60000),
   NAS_STATUS_CACHE_STALE_MS: numberFromEnv.default(600000),
 
+  // Proactive read-only context cache.
+  // Keeps selected agent snapshots warm so common status questions can answer quickly.
+  PROACTIVE_CONTEXT_CACHE_ENABLED: booleanFromEnv.default(false),
+  PROACTIVE_CONTEXT_CACHE_AGENTS: optionalNonEmptyString,
+  PROACTIVE_CONTEXT_CACHE_REFRESH_MS: numberFromEnv.default(60000),
+  PROACTIVE_CONTEXT_CACHE_SPOTIFY_TTL_MS: numberFromEnv.default(30000),
+  PROACTIVE_CONTEXT_CACHE_SPOTIFY_STALE_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_MAIL_TTL_MS: numberFromEnv.default(180000),
+  PROACTIVE_CONTEXT_CACHE_MAIL_STALE_MS: numberFromEnv.default(900000),
+  PROACTIVE_CONTEXT_CACHE_TODO_TTL_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_TODO_STALE_MS: numberFromEnv.default(1800000),
+  PROACTIVE_CONTEXT_CACHE_CALENDAR_TTL_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_CALENDAR_STALE_MS: numberFromEnv.default(1800000),
+  PROACTIVE_CONTEXT_CACHE_WEATHER_TTL_MS: numberFromEnv.default(600000),
+  PROACTIVE_CONTEXT_CACHE_WEATHER_STALE_MS: numberFromEnv.default(1800000),
+  PROACTIVE_CONTEXT_CACHE_HOME_TTL_MS: numberFromEnv.default(30000),
+  PROACTIVE_CONTEXT_CACHE_HOME_STALE_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_NAS_TTL_MS: numberFromEnv.default(60000),
+  PROACTIVE_CONTEXT_CACHE_NAS_STALE_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_NEWS_TTL_MS: numberFromEnv.default(1800000),
+  PROACTIVE_CONTEXT_CACHE_NEWS_STALE_MS: numberFromEnv.default(7200000),
+  PROACTIVE_CONTEXT_CACHE_DAILY_BRIEF_TTL_MS: numberFromEnv.default(300000),
+  PROACTIVE_CONTEXT_CACHE_DAILY_BRIEF_STALE_MS: numberFromEnv.default(1800000),
+
   // Helix/Elix news service. Jarvis remains the public proxy for Desktop/mobile clients.
   HELIX_NEWS_BASE_URL: optionalUrl,
   HELIX_NEWS_API_TOKEN: optionalNonEmptyString,

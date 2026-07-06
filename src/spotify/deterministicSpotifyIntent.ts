@@ -2,14 +2,24 @@ function normalizeForMatch(input: string): string {
   return String(input ?? '')
     .normalize('NFKD')
     .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
+}
+
+export function isCurrentDeviceReference(input: string): boolean {
+  const source = normalizeForMatch(input);
+  if (!source) return false;
+  return /^(?:l\s+)?(?:appareil|peripherique|device|lecteur)(?:\s+(?:en\s+)?(?:cours|actuel|courant|actif))?$/.test(source)
+    || /^(?:en\s+)?(?:cours|actuel|courant|actif)$/.test(source)
+    || /^(?:current|active)(?:\s+device)?$/.test(source);
 }
 
 export function hasGenericMusicResumeIntent(text: string): boolean {
   const source = normalizeForMatch(text);
   if (!source) return false;
-  const deviceSuffix = '( sur( le| la| mon| ma)? (pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom))?';
+  const deviceTarget = '(pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom|appareil( en)? (cours|actuel|courant|actif)|peripherique( en)? (cours|actuel|courant|actif)|device (current|active))';
+  const deviceSuffix = `( sur( le| la| mon| ma| l)? ${deviceTarget})?`;
 
   const exact = new Set([
     'reprends',
@@ -19,6 +29,8 @@ export function hasGenericMusicResumeIntent(text: string): boolean {
     'play',
     'mets la musique',
     'met la musique',
+    'remets la musique',
+    'remet la musique',
     'joue de la musique',
     'lance de la musique',
     'lance spotify',
@@ -30,7 +42,7 @@ export function hasGenericMusicResumeIntent(text: string): boolean {
   if (exact.has(source)) return true;
 
   return new RegExp(`^((re)?lance|reprends|demarre|start|play)( la)?( musique| spotify)?${deviceSuffix}$`).test(source)
-    || new RegExp(`^(mets|met|joue|lance)( de)? la musique( sur spotify)?${deviceSuffix}$`).test(source);
+    || new RegExp(`^(mets|met|remets|remet|joue|lance)( de)? la musique( sur spotify)?${deviceSuffix}$`).test(source);
 }
 
 export function evaluateGenericResumeGate(input: {

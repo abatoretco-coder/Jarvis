@@ -22,7 +22,13 @@ This is not a primary target. It is used only when:
 2. replyMeta.source is semantic_router, router_or_specialized, or ha_general depending on path.
 3. fallbackReason is general_fallback when fallback was required.
 
+## Proactive Context Cache
+1. General HA must not be prewarmed as a parallel path.
+2. If specialized warm context cannot answer, routing should still fall back to General HA only after normal specialized resolution fails.
+3. General fallback responses should not claim cache freshness for another domain.
+
 ## Main References
 - src/routes/ingest.ts
 - src/env.ts
 - src/conversation/ConversationService.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

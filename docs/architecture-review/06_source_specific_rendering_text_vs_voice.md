@@ -17,9 +17,10 @@ Comprendre comment la meme reponse metier est transformee différemment selon qu
 
 ## TTS
 1. /v1/tts transforme responseText en audio.
-2. Race entre HA TTS et OpenAI TTS selon config.
-3. Premier succes gagne, loser aborted.
-4. Retour audio binaire + x-tts-provider.
+2. Le runtime TTS est uniformise sur OpenAI uniquement.
+3. Le pre-warm TTS prepare aussi l audio via OpenAI pour reduire le delai percu.
+4. /v1/tts/ha est desactive explicitement.
+5. Retour audio binaire + x-tts-provider.
 
 ## Pourquoi cette separation est importante
 1. Meme logique metier, rendu adapte au canal.

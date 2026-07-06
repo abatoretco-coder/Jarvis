@@ -1,25 +1,35 @@
 import type { WeatherSnapshot } from './weatherSnapshot';
 
+function normalizeWeatherText(text: string): string {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/gu, '')
+    .toLowerCase();
+}
+
 export function isTemperatureQuestion(text: string): boolean {
-  return /temp(é?rature)?\b|fait.*combi|combien.*degr|combien.*il.*fait/i.test(text);
+  const normalized = normalizeWeatherText(text);
+  return /temp(erature)?\b|fait.*combi|combien.*degr|combien.*il.*fait/iu.test(normalized);
 }
 
 export function isHumidityQuestion(text: string): boolean {
-  return /humidité|hygrométrie/i.test(text);
+  const normalized = normalizeWeatherText(text);
+  return /humidite|hygrometrie/iu.test(normalized);
 }
 
 export function isPrecipitationQuestion(text: string): boolean {
-  return /pleu|plu|rain|précipitation|goutte|mouillé|averse/i.test(text);
+  const normalized = normalizeWeatherText(text);
+  return /pleu|plu|rain|precipitation|goutte|mouille|averse/iu.test(normalized);
 }
 
 export function isGeneralWeatherQuestion(text: string): boolean {
-  return /quel.*temps|état.*météo|météo|condition|dehors/i.test(text);
+  const normalized = normalizeWeatherText(text);
+  return /quel.*temps|etat.*meteo|meteo|condition|dehors/iu.test(normalized);
 }
 
 export function isDeterministicWeatherQuestion(text: string): boolean {
-  const normalized = text.toLowerCase();
-  const hasCurrentIndicator = /actuel|maintenant|en ce moment|ici|à la maison|du moment|dehors/i.test(normalized);
-  const isComplexQuery = /demain|après-demain|semaine|prévision|prévisions|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|va\s+pleuvoir|fera|pleuvra|dans|quand|comment.*habill/i.test(normalized);
+  const normalized = normalizeWeatherText(text);
+  const isComplexQuery = /demain|apres-demain|semaine|prevision|previsions|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|va\s+pleuvoir|fera|pleuvra|dans|quand|comment.*habill/iu.test(normalized);
 
   if (isComplexQuery) return false;
 
@@ -27,20 +37,37 @@ export function isDeterministicWeatherQuestion(text: string): boolean {
     isTemperatureQuestion(normalized)
     || isHumidityQuestion(normalized)
     || isPrecipitationQuestion(normalized)
-    || (isGeneralWeatherQuestion(normalized) && (hasCurrentIndicator || !isComplexQuery))
+    || isGeneralWeatherQuestion(normalized)
   );
 }
 
 export function isClearlyLocalWeather(text: string): boolean {
-  const localIndicators = /chez.*moi|maison|local|actuellement|maintenant|ici|salon|cuisine|chambre|du moment/i;
-  const externalLocations = /paris|lyon|marseille|london|tokyo|france|italie|allemagne|espagne|florence|venise|rome/i;
+  const normalized = normalizeWeatherText(text);
+  const localIndicators = /chez.*moi|maison|local|actuellement|maintenant|ici|salon|cuisine|chambre|du moment/iu;
+  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome/iu;
 
-  return localIndicators.test(text) || !externalLocations.test(text);
+  return localIndicators.test(normalized) || !externalLocations.test(normalized);
 }
 
 export function isClearlyExternalWeather(text: string): boolean {
-  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome|ville|externe|ailleurs|autre/i;
-  return externalLocations.test(text);
+  const normalized = normalizeWeatherText(text);
+  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome|ville|externe|ailleurs|autre/iu;
+  return externalLocations.test(normalized);
+}
+
+function formatTemperature(value: number): string {
+  return `${Math.round(value)}°C`;
+}
+
+function formatCondition(condition: string): string {
+  const normalized = normalizeWeatherText(condition);
+  if (/\bsunny\b|ensoleille|clear/iu.test(normalized)) return 'ensoleillé';
+  if (/partlycloudy|partly.cloudy|partiellement/iu.test(normalized)) return 'partiellement nuageux';
+  if (/cloudy|nuage/iu.test(normalized)) return 'nuageux';
+  if (/rain|pluie|averse/iu.test(normalized)) return 'pluvieux';
+  if (/snow|neige/iu.test(normalized)) return 'neigeux';
+  if (/fog|brouillard/iu.test(normalized)) return 'brumeux';
+  return condition.replace(/_/gu, ' ');
 }
 
 /**
@@ -52,7 +79,7 @@ export function synthesizeDeterministicWeatherReply(params: {
   weather: WeatherSnapshot;
   log?: { info: (obj: Record<string, unknown>, msg: string) => void };
 }): string | null {
-  const text = params.userText.toLowerCase().trim();
+  const text = normalizeWeatherText(params.userText).trim();
   const snap = params.weather.current;
 
   if (!isDeterministicWeatherQuestion(text)) return null;
@@ -60,9 +87,8 @@ export function synthesizeDeterministicWeatherReply(params: {
 
   if (isTemperatureQuestion(text)) {
     if (snap.temperature !== undefined) {
-      const temp = Math.round(snap.temperature);
-      params.log?.info({ temperature: temp }, 'weather_deterministic_temperature');
-      return `Il fait actuellement ${temp}°C.`;
+      params.log?.info({ temperature: Math.round(snap.temperature) }, 'weather_deterministic_temperature');
+      return `Il fait actuellement ${formatTemperature(snap.temperature)}.`;
     }
   }
 
@@ -82,7 +108,7 @@ export function synthesizeDeterministicWeatherReply(params: {
     }
 
     if (snap.condition) {
-      const isRainy = /pluie|rain|averse|ondée/i.test(snap.condition);
+      const isRainy = /pluie|rain|averse|ondee/iu.test(normalizeWeatherText(snap.condition));
       const msg = isRainy
         ? 'Il pleut actuellement.'
         : 'Il ne pleut pas actuellement.';
@@ -92,13 +118,13 @@ export function synthesizeDeterministicWeatherReply(params: {
   }
 
   if (isGeneralWeatherQuestion(text)) {
-    let reply = `À ${snap.entityId.replace(/^weather\./, '')} `;
+    const location = snap.entityId.replace(/^weather\./u, '').replace(/_/gu, ' ');
+    let reply = `À ${location}, `;
     if (snap.condition) {
-      reply += `il est ${snap.condition}`;
+      reply += `le temps est ${formatCondition(snap.condition)}`;
     }
     if (snap.temperature !== undefined) {
-      const temp = Math.round(snap.temperature);
-      reply += ` (${temp}°C)`;
+      reply += `, ${formatTemperature(snap.temperature)}`;
     }
     reply += '.';
     params.log?.info({ condition: snap.condition, temperature: snap.temperature }, 'weather_deterministic_general');

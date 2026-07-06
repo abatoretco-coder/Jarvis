@@ -24,8 +24,14 @@ Local weather from Home Assistant state snapshot (temperature, humidity, precipi
 2. Domain set to weather for voice formatting.
 3. In multi-agent requests, weather text can be merged with other outputs.
 
+## Proactive Context Cache
+1. Keep local HA weather snapshot warm for temperature, humidity, precipitation and current conditions.
+2. Prepared answers can cover simple local weather questions when the snapshot is fresh.
+3. External city/weather questions still route through search instead of reusing local weather cache.
+
 ## Main References
 - src/routes/ingest.ts
 - src/weather/weatherSnapshot.ts
 - src/weather/deterministicWeatherReply.ts
 - src/routing/semanticRouteCatalog.ts
+- docs/PROACTIVE_CONTEXT_CACHE.md

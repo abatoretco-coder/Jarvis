@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
 
 import type { Env } from '../src/env';
+import { hasGenericMusicResumeIntent, isCurrentDeviceReference } from '../src/spotify/deterministicSpotifyIntent';
 import { planSpotifyActionFromTextWithOpenAi } from '../src/spotify/musicAgentPlanner';
 import { buildMusicAgentSystemPrompt } from '../src/spotify/prompts/musicAgentSystemPrompt';
 import { buildMusicAgentUserTemplate } from '../src/spotify/prompts/musicAgentUserTemplate';
@@ -59,6 +60,13 @@ afterEach(() => {
 });
 
 describe('music agent planner', () => {
+  test('treats current device wording as generic resume, not a transfer target', () => {
+    expect(isCurrentDeviceReference('périphérique en cours')).toBe(true);
+    expect(isCurrentDeviceReference('appareil actuel')).toBe(true);
+    expect(hasGenericMusicResumeIntent('remets la musique sur le périphérique en cours')).toBe(true);
+    expect(hasGenericMusicResumeIntent("relance la musique sur l'appareil actuel")).toBe(true);
+  });
+
   test('returns spotify request when OpenAI emits a valid spotify plan', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () => jsonResponse({
       choices: [

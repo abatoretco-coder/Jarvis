@@ -1,10 +1,12 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { ProactiveContextCache } from './context/ProactiveContextCache';
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
 import { NasStatusClient } from './nas/NasStatusClient';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
+import { registerContextCacheRoute } from './routes/contextCache';
 import { registerDashboardRoute } from './routes/dashboard';
 import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
@@ -21,6 +23,7 @@ export type AppDeps = {
   ha?: HomeAssistantClient;
   spotifyWebApi: SpotifyWebApiClient;
   nasStatus?: NasStatusClient;
+  contextCache?: ProactiveContextCache;
 };
 
 export function buildApp(env: Env): FastifyInstance {
@@ -53,7 +56,13 @@ export function buildApp(env: Env): FastifyInstance {
   const nasStatus = new NasStatusClient(env);
   spotifyWebApi.startSituationPrefetch();
 
-  const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus };
+  const contextCache = new ProactiveContextCache({ env, ha, spotifyWebApi, nasStatus, log: app.log });
+  contextCache.start();
+  app.addHook('onClose', async () => {
+    contextCache.stop();
+  });
+
+  const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache };
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();
@@ -83,6 +92,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerApiKeyHook(app, env);
 
   registerCapabilitiesRoute(app, deps);
+  registerContextCacheRoute(app, deps);
   registerDashboardRoute(app, deps);
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);

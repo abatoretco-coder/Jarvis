@@ -11,16 +11,11 @@ import {
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
+import { qualifyMail, type MailQualification } from '../mail/mailQualification';
 import type { AppDeps } from '../server';
 import { getParisStartOfDayUtc } from '../time/parisTime';
 
-type HaState = {
-  entity_id: string;
-  state: string;
-  attributes?: Record<string, unknown>;
-};
-
-type DashboardSection = {
+export type DashboardSection = {
   title: string;
   summary: string;
   lines: string[];
@@ -70,6 +65,7 @@ type DashboardMailItem = {
   subject: string;
   receivedAt: number;
   snippet?: string;
+  qualification?: MailQualification;
 };
 
 type MicrosoftAccessTokenEnv = {
@@ -157,51 +153,6 @@ const LOCAL_LINKS = [
     value: 'settings',
   },
 ] as const;
-
-function mapWeatherConditionToWmo(condition: string): number {
-  switch (condition.trim().toLowerCase()) {
-    case 'sunny':
-    case 'clear':
-    case 'clear-night':
-      return 0;
-    case 'partlycloudy':
-    case 'partly-cloudy':
-      return 2;
-    case 'cloudy':
-    case 'overcast':
-      return 3;
-    case 'fog':
-      return 45;
-    case 'hail':
-      return 82;
-    case 'lightning':
-    case 'lightning-rainy':
-      return 95;
-    case 'pouring':
-      return 82;
-    case 'rainy':
-      return 61;
-    case 'snowy':
-      return 71;
-    case 'snowy-rainy':
-      return 85;
-    case 'windy':
-    case 'windy-variant':
-      return 48;
-    default:
-      return 3;
-  }
-}
-
-function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-function asStateNumber(state: HaState | undefined, fallback = 0): number {
-  if (!state) return fallback;
-  const parsed = Number(state.state);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
 
 function splitSummary(summary: string): string[] {
   const normalized = summary
@@ -745,7 +696,7 @@ function formatTaskLine(label: string, task: DashboardTask): string {
   return `${label}: ${task.title} (${task.listName})${datePart}${urgency}`;
 }
 
-async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection> {
+export async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection> {
   if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
     return makeSection('Taches', 'jarvis-todo', 'La gestion des taches n est pas configuree (identifiants Microsoft manquants).');
   }
@@ -784,27 +735,24 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
       return leftDue - rightDue;
     });
 
-  const recentUndatedTasks = sortedTasks
-    .filter((task) => isRecentlyCreatedWithoutDueDate(task, now))
-    .sort((left, right) => {
-      const leftCreated = parseDate(left.createdDateTime)?.getTime() ?? 0;
-      const rightCreated = parseDate(right.createdDateTime)?.getTime() ?? 0;
-      return rightCreated - leftCreated;
-    });
-
-  const relevantTasks = [
+  const datedTasks = sortedTasks.filter((task) => Boolean(task.dueDateTime?.dateTime));
+  const primaryTasks = [
     ...overdueTasks.map((task) => formatTaskLine('En retard', task)),
     ...todayTasks.map((task) => formatTaskLine('Aujourd hui', task)),
-    ...upcomingTasks.map((task) => formatTaskLine('Cette semaine', task)),
-    ...recentUndatedTasks.map((task) => formatTaskLine('Recente sans date', task)),
-  ].slice(0, 8);
+  ];
+  const relevantTasks = [
+    ...primaryTasks,
+    ...upcomingTasks
+      .slice(0, Math.max(0, 8 - primaryTasks.length))
+      .map((task) => formatTaskLine('Cette semaine', task)),
+  ];
 
   if (relevantTasks.length === 0) {
-    if (tasks.length === 0) {
+    if (datedTasks.length === 0) {
       return makeSection('Taches', 'jarvis-todo', 'Aucune tache active dans Microsoft To Do.');
     }
 
-    const activePreview = sortedTasks
+    const activePreview = datedTasks
       .slice()
       .sort((left, right) => {
         const leftDue = parseDate(left.dueDateTime?.dateTime)?.getTime() ?? Number.MAX_SAFE_INTEGER;
@@ -820,10 +768,10 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
     return {
       title: 'Taches',
       source: 'jarvis-todo',
-      summary: `${tasks.length} tache${tasks.length > 1 ? 's' : ''} active${tasks.length > 1 ? 's' : ''}. Aucune priorite urgente cette semaine.`,
+      summary: `${datedTasks.length} tache${datedTasks.length > 1 ? 's' : ''} active${datedTasks.length > 1 ? 's' : ''} avec echeance. Aucune priorite urgente cette semaine.`,
       lines: activePreview,
       status: 'ok',
-      items: sortedTasks,
+      items: datedTasks,
     };
   }
 
@@ -831,7 +779,6 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
     overdueTasks.length > 0 ? `${overdueTasks.length} en retard` : '',
     todayTasks.length > 0 ? `${todayTasks.length} aujourd hui` : '',
     upcomingTasks.length > 0 ? `${upcomingTasks.length} a echeance cette semaine` : '',
-    recentUndatedTasks.length > 0 ? `${recentUndatedTasks.length} recente${recentUndatedTasks.length > 1 ? 's' : ''} sans date` : '',
   ].filter(Boolean);
 
   return {
@@ -840,7 +787,7 @@ async function buildTasksSection(env: AppDeps['env']): Promise<DashboardSection>
     summary: `Priorites taches: ${summaryParts.join(', ')}.`,
     lines: relevantTasks,
     status: 'ok',
-    items: sortedTasks,
+    items: datedTasks,
   };
 }
 
@@ -983,7 +930,7 @@ async function fetchMailItemsPageForAccount(
   const detailedPayloads = await Promise.allSettled(
     messages.map((message) =>
       gmailGet<GmailDashboardMessage>(
-        `/messages/${message.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+        `/messages/${message.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-ID&metadataHeaders=Auto-Submitted`,
         token,
       ),
     ),
@@ -996,13 +943,22 @@ async function fetchMailItemsPageForAccount(
       const subject = gmailHeader(result.value, 'Subject') || '(sans objet)';
       const internalDate = Number(result.value.internalDate ?? '0');
       const headerDate = Date.parse(gmailHeader(result.value, 'Date'));
+      const snippet = result.value.snippet?.trim() || undefined;
+      const qualification = qualifyMail({
+        from,
+        subject,
+        snippet,
+        listId: gmailHeader(result.value, 'List-ID') || undefined,
+        autoSubmitted: gmailHeader(result.value, 'Auto-Submitted') || undefined,
+      });
       return {
         id: result.value.id,
         accountLabel: account.label,
         from,
         subject,
         receivedAt: Number.isFinite(internalDate) && internalDate > 0 ? internalDate : (Number.isFinite(headerDate) ? headerDate : 0),
-        snippet: result.value.snippet?.trim() || undefined,
+        snippet,
+        qualification,
       };
     });
 
@@ -1012,7 +968,7 @@ async function fetchMailItemsPageForAccount(
   };
 }
 
-async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']): Promise<DashboardSection> {
+export async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']): Promise<DashboardSection> {
   const accounts = buildMailAccounts(env);
   if (accounts.length === 0) {
     return makeSection('Mail', 'jarvis-mail', 'La gestion des emails n est pas configuree (identifiants Gmail ou Outlook manquants).');
@@ -1041,70 +997,28 @@ async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']
     return makeSection('Mail', 'jarvis-mail', 'Aucun email recent dans les boites de reception connectees.');
   }
 
+  const actionCount = availableItems.filter((item) => item.qualification?.category === 'action').length;
+  const infoCount = availableItems.filter((item) => item.qualification?.category === 'info').length;
+  const ignoredCount = availableItems.filter((item) => item.qualification?.category === 'ignore').length;
+
   const lines = availableItems.slice(0, 8).map((item) => {
     const receivedAt = item.receivedAt > 0 ? formatDateForLine(new Date(item.receivedAt)) : 'date inconnue';
-    return `[${item.accountLabel}] ${receivedAt} - ${item.from} - ${item.subject}`;
+    const prefix = item.qualification?.category === 'action'
+      ? 'Action'
+      : item.qualification?.category === 'ignore'
+        ? 'Ignore'
+        : 'Info';
+    return `[${item.accountLabel}] ${prefix} - ${receivedAt} - ${item.from} - ${item.subject}`;
   });
 
-  const summary = `${availableItems.length} email${availableItems.length > 1 ? 's' : ''} concatene${availableItems.length > 1 ? 's' : ''} depuis ${accounts.length} boite${accounts.length > 1 ? 's' : ''} connectee${accounts.length > 1 ? 's' : ''}${failures.length > 0 ? `, ${failures.length} indisponible${failures.length > 1 ? 's' : ''}` : ''}.`;
+  const summary = `Mail: ${actionCount} action${actionCount > 1 ? 's' : ''}, ${infoCount} info${infoCount > 1 ? 's' : ''} utile${infoCount > 1 ? 's' : ''}, ${ignoredCount} ignore${ignoredCount > 1 ? 's' : ''}${failures.length > 0 ? `, ${failures.length} boite${failures.length > 1 ? 's' : ''} indisponible${failures.length > 1 ? 's' : ''}` : ''}.`;
   return {
     title: 'Mail',
     source: 'jarvis-mail',
     summary,
     lines,
-    status: 'ok',
+    status: failures.length > 0 ? 'partial' : 'ok',
     items: availableItems,
-  };
-}
-
-function buildWeatherPayload(states: HaState[]): Record<string, unknown> | null {
-  const weatherEntity = states.find((state) => state.entity_id === 'weather.maison')
-    ?? states.find((state) => state.entity_id.startsWith('weather.'));
-  const temperatureSensor = states.find((state) => state.entity_id === 'sensor.maison_temperature');
-  const apparentSensor = states.find((state) => state.entity_id === 'sensor.maison_apparent_temperature')
-    ?? states.find((state) => state.entity_id === 'sensor.maison_heat_index_temperature');
-  const humiditySensor = states.find((state) => state.entity_id === 'sensor.maison_humidity');
-
-  if (!weatherEntity && !temperatureSensor) return null;
-
-  const attributes = weatherEntity?.attributes ?? {};
-  const forecast = Array.isArray(attributes.forecast) ? attributes.forecast as Array<Record<string, unknown>> : [];
-  const weatherState = String(weatherEntity?.state ?? attributes.condition ?? 'cloudy');
-  const conditionCode = mapWeatherConditionToWmo(weatherState);
-  const location = String(
-    attributes.friendly_name
-    ?? weatherEntity?.entity_id.replace(/^weather\./, '')
-    ?? temperatureSensor?.attributes?.friendly_name
-    ?? 'Maison'
-  );
-  const temperature = asNumber(attributes.temperature, asStateNumber(temperatureSensor));
-  const feelsLike = asNumber(attributes.apparent_temperature, asStateNumber(apparentSensor, temperature));
-  const humidity = asNumber(attributes.humidity, asStateNumber(humiditySensor));
-  const windSpeed = asNumber(attributes.wind_speed);
-  const windBearing = asNumber(attributes.wind_bearing);
-  const daily = (forecast.length > 0 ? forecast.slice(0, 7) : [{ temperature, templow: temperature, precipitation: 0, wind_speed: windSpeed, condition: weatherState }])
-    .map((item, index) => ({
-      date: typeof item.datetime === 'string' ? item.datetime : new Date(Date.now() + index * 86_400_000).toISOString(),
-      code: mapWeatherConditionToWmo(String(item.condition ?? weatherState ?? 'cloudy')),
-      max: asNumber(item.temperature, temperature),
-      min: asNumber(item.templow, temperature),
-      precipSum: asNumber(item.precipitation, 0),
-      windMax: asNumber(item.wind_speed, windSpeed),
-    }));
-
-  return {
-    location,
-    temp: temperature,
-    feelsLike,
-    tempMax: daily[0]?.max ?? temperature,
-    tempMin: daily[0]?.min ?? temperature,
-    conditionCode,
-    humidity,
-    windSpeed,
-    windDir: windBearing,
-    precipitation: daily[0]?.precipSum ?? 0,
-    daily,
-    hourly: [],
   };
 }
 
@@ -1141,6 +1055,21 @@ type OpenMeteoForecastPayload = {
   };
 };
 
+type ReverseGeocodePayload = {
+  address?: {
+    house_number?: string;
+    road?: string;
+    neighbourhood?: string;
+    suburb?: string;
+    quarter?: string;
+    city_district?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+    municipality?: string;
+  };
+};
+
 function parseCoordinate(raw: unknown, min: number, max: number): number | undefined {
   if (typeof raw !== 'string' && typeof raw !== 'number') return undefined;
   const parsed = Number(raw);
@@ -1159,22 +1088,68 @@ function parseDashboardGeoLocation(query: Record<string, unknown>): DashboardGeo
 }
 
 function weatherCacheKeyForLocation(location: DashboardGeoLocation | null): string {
-  if (!location) return 'ha';
+  if (!location) return 'none';
   return `geo:${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
 }
 
-async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation): Promise<Record<string, unknown>> {
+function summarizeDetectedLocation(payload: ReverseGeocodePayload | null): string | null {
+  const address = payload?.address;
+  if (!address) return null;
+
+  const road = [address.house_number, address.road].filter(Boolean).join(' ').trim();
+  const area = address.neighbourhood
+    ?? address.suburb
+    ?? address.quarter
+    ?? address.city_district
+    ?? null;
+  const city = address.city
+    ?? address.town
+    ?? address.village
+    ?? address.municipality
+    ?? null;
+
+  const parts = [road, area, city]
+    .filter((part, index, array): part is string => Boolean(part) && array.indexOf(part) === index);
+
+  if (parts.length >= 2) return `${parts[0]}, ${parts[1]}`;
+  if (parts.length === 1) return parts[0];
+  return null;
+}
+
+async function reverseGeocodeDetectedLocation(location: DashboardGeoLocation): Promise<string | null> {
   const response = await fetch(
-    `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}`
-    + '&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation'
-    + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max'
-    + '&hourly=temperature_2m,precipitation_probability,weather_code'
-    + '&timezone=auto&forecast_days=7',
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${location.latitude}&lon=${location.longitude}&zoom=18&addressdetails=1`,
     {
-      headers: { accept: 'application/json' },
+      headers: {
+        accept: 'application/json',
+        'user-agent': 'Jarvis/1.0 (+weather reverse geocoding)',
+      },
       signal: AbortSignal.timeout(8_000),
     },
   );
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`reverse_geocode_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+  const payload = await response.json() as ReverseGeocodePayload;
+  return summarizeDetectedLocation(payload);
+}
+
+async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation): Promise<Record<string, unknown>> {
+  const [response, detectedLocation] = await Promise.all([
+    fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}`
+      + '&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m,wind_direction_10m,precipitation'
+      + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max'
+      + '&hourly=temperature_2m,precipitation_probability,weather_code'
+      + '&timezone=auto&forecast_days=7',
+      {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(8_000),
+      },
+    ),
+    reverseGeocodeDetectedLocation(location),
+  ]);
   if (!response.ok) {
     const rawBody = await response.text().catch(() => '');
     throw new Error(`open_meteo_failed:${response.status}:${rawBody.slice(0, 200)}`);
@@ -1202,7 +1177,7 @@ async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation
   }));
 
   return {
-    location: 'Ici',
+    location: detectedLocation || 'Position detectee',
     temp: payload.current.temperature_2m,
     feelsLike: payload.current.apparent_temperature,
     tempMax: daily[0]?.max ?? payload.current.temperature_2m,
@@ -1488,15 +1463,6 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         cache: { hit: true, fetchedAt: new Date(cached.fetchedAt).toISOString() },
       });
     }
-    const haStatesPromise = deps.ha
-      ? deps.ha.getStates()
-        .then((data) => Array.isArray(data) ? data as HaState[] : [])
-        .catch((error) => {
-          app.log.warn({ error }, 'dashboard_ha_states_failed');
-          return [] as HaState[];
-        })
-      : Promise.resolve([] as HaState[]);
-
     const mailPromise = buildMailSection(deps.env, app.log).catch((error) => {
       app.log.warn({ error }, 'dashboard_mail_failed');
       return makeSection('Mail', 'jarvis-mail', 'Impossible de recuperer les emails pour le moment.');
@@ -1516,16 +1482,12 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       };
     });
 
-    const [haStates, mailSection, tasksSection, googleAgenda] = await Promise.all([
-      haStatesPromise, mailPromise, todoPromise, agendaPromise,
+    const [mailSection, tasksSection, googleAgenda] = await Promise.all([
+      mailPromise, todoPromise, agendaPromise,
     ]);
-    let weather = buildWeatherPayload(haStates);
+    let weather: Record<string, unknown> | null = null;
     if (deviceLocation) {
-      try {
-        weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
-      } catch (error) {
-        app.log.warn({ error, hasDeviceLocation: true }, 'dashboard_geo_weather_failed');
-      }
+      weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
     }
     const agenda = googleAgenda;
 

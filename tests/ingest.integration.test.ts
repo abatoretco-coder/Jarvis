@@ -144,6 +144,253 @@ describe('/v1/ingest integration', () => {
     (global as { fetch?: unknown }).fetch = undefined;
   });
 
+  it('answers simple read-only status questions from proactive context cache', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_AGENT_MAP: 'nas:nas:NAS',
+    });
+    const deps = makeDeps(env);
+    deps.contextCache = {
+      get: jest.fn(async (domain: string) => domain === 'nas'
+        ? {
+            domain: 'nas',
+            enabled: true,
+            cached: true,
+            stale: false,
+            fetchedAt: '2026-07-04T08:00:00.000Z',
+            snapshot: {
+              domain: 'nas',
+              value: {},
+              preparedAnswers: [{
+                domain: 'nas',
+                questionKey: 'nas.health',
+                answerText: 'nas-test repond. charge 0.20, memoire 60%.',
+                fetchedAt: '2026-07-04T08:00:00.000Z',
+                freshness: 'fresh',
+              }],
+            },
+          }
+        : null),
+    } as unknown as AppDeps['contextCache'];
+
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-cache-nas',
+        text: 'Le NAS va bien ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: expect.stringContaining('nas-test repond'),
+      replyMeta: {
+        kind: 'general',
+        source: 'proactive_context_cache',
+        contextCache: {
+          hit: true,
+          stale: false,
+          domain: 'nas',
+          questionKey: 'nas.health',
+        },
+      },
+    });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('refreshes stale proactive context before answering from cache', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_AGENT_MAP: 'nas:nas:NAS',
+    });
+    const deps = makeDeps(env);
+    const staleSnapshot = {
+      domain: 'nas',
+      enabled: true,
+      cached: true,
+      stale: true,
+      fetchedAt: '2026-07-04T07:50:00.000Z',
+      snapshot: {
+        domain: 'nas',
+        value: {},
+        preparedAnswers: [{
+          domain: 'nas',
+          questionKey: 'nas.health',
+          answerText: 'Ancien statut NAS.',
+          fetchedAt: '2026-07-04T07:50:00.000Z',
+          freshness: 'stale',
+        }],
+      },
+    };
+    const freshSnapshot = {
+      ...staleSnapshot,
+      cached: false,
+      stale: false,
+      fetchedAt: '2026-07-04T08:00:00.000Z',
+      snapshot: {
+        ...staleSnapshot.snapshot,
+        preparedAnswers: [{
+          ...staleSnapshot.snapshot.preparedAnswers[0],
+          answerText: 'Statut NAS frais.',
+          fetchedAt: '2026-07-04T08:00:00.000Z',
+          freshness: 'fresh',
+        }],
+      },
+    };
+    let getCallCount = 0;
+    deps.contextCache = {
+      get: jest.fn(async () => {
+        getCallCount += 1;
+        return getCallCount === 1 ? staleSnapshot : freshSnapshot;
+      }),
+    } as unknown as AppDeps['contextCache'];
+
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-cache-nas-refresh',
+        text: 'Le NAS va bien ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: expect.stringContaining('Statut NAS frais'),
+      replyMeta: {
+        source: 'proactive_context_cache',
+        contextCache: {
+          hit: true,
+          stale: false,
+          domain: 'nas',
+          questionKey: 'nas.health',
+        },
+      },
+    });
+    expect(deps.contextCache?.get).toHaveBeenNthCalledWith(1, 'nas');
+    expect(deps.contextCache?.get).toHaveBeenNthCalledWith(2, 'nas', { force: true });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('answers daily brief from proactive context before action guard routing', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_AGENT_MAP: 'search.deep:search.deep:Recherche approfondie',
+      OPENAI_API_KEY: 'test-openai-key',
+    });
+    const deps = makeDeps(env);
+    deps.contextCache = {
+      get: jest.fn(async (domain: string) => domain === 'daily_brief'
+        ? {
+            domain: 'daily_brief',
+            enabled: true,
+            cached: true,
+            stale: false,
+            fetchedAt: '2026-07-05T07:00:00.000Z',
+            snapshot: {
+              domain: 'daily_brief',
+              value: {
+                sections: [
+                  'Agenda: calme ce matin.',
+                  'Taches: deux priorites a surveiller.',
+                ],
+              },
+              preparedAnswers: [{
+                domain: 'daily_brief',
+                questionKey: 'daily_brief.today',
+                answerText: 'Brief du jour: agenda calme ce matin, et deux priorites a surveiller cote taches.',
+                fetchedAt: '2026-07-05T07:00:00.000Z',
+                freshness: 'fresh',
+              }],
+            },
+          }
+        : null),
+    } as unknown as AppDeps['contextCache'];
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.deep', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-cache-daily-brief',
+        text: 'mets moi le brief du jour',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: expect.stringContaining('Brief du jour'),
+      replyMeta: {
+        kind: 'general',
+        source: 'proactive_context_cache',
+        contextCache: {
+          hit: true,
+          stale: false,
+          domain: 'daily_brief',
+          questionKey: 'daily_brief.today',
+        },
+      },
+    });
+    expect(response.json().responseText).toContain('agenda calme');
+    expect(response.json().responseText).toContain('priorites');
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('daily brief unavailable returns explicit fallback without router', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      HA_AGENT_MAP: 'search.deep:search.deep:Recherche approfondie',
+      OPENAI_API_KEY: 'test-openai-key',
+    });
+    const deps = makeDeps(env);
+    deps.contextCache = {
+      get: jest.fn(async () => null),
+    } as unknown as AppDeps['contextCache'];
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.deep', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-cache-daily-brief-unavailable',
+        text: 'brief du jour',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: expect.stringContaining('brief du jour fiable'),
+      replyMeta: {
+        kind: 'general',
+        source: 'proactive_context_cache',
+        routeKey: 'daily_brief.unavailable',
+        fallbackReason: 'prepared_context_unavailable',
+      },
+    });
+    expect(deps.contextCache?.get).toHaveBeenNthCalledWith(1, 'daily_brief');
+    expect(deps.contextCache?.get).toHaveBeenNthCalledWith(2, 'daily_brief', { force: true });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
   it('HA general fallback keeps explicit desktop thread id even during conversation window', async () => {
     const calls: Array<{ conversation_id?: string }> = [];
     (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
@@ -231,6 +478,162 @@ describe('/v1/ingest integration', () => {
     const payload = res.json() as { responseText: string };
     expect(payload.responseText).toContain('Il fait actuellement');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
+  it('weather direct: unaccented voice hub query bypasses router and OpenAI', async () => {
+    const weatherStates = [
+      {
+        entity_id: 'weather.maison',
+        state: 'ensoleille',
+        attributes: {
+          friendly_name: 'Maison',
+          temperature: 21.2,
+          humidity: 47,
+        },
+      },
+    ];
+
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'weather', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+    });
+
+    registerIngestRoute(app, makeDeps(env, weatherStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-weather-voice-hub',
+        text: 'meteo chez moi',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: { kind?: string; source?: string } };
+    expect(payload.responseText).toContain('21°C');
+    expect(payload.replyMeta).toMatchObject({ kind: 'weather', source: 'local_weather_snapshot' });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
+  it('executor direct: missing salon light returns from HA index without router', async () => {
+    const haStates = [
+      {
+        entity_id: 'light.home_assistant_voice_0a79e5_led_ring',
+        state: 'off',
+        attributes: { friendly_name: 'HUB Salon LED Ring' },
+      },
+      {
+        entity_id: 'switch.prise_nas',
+        state: 'on',
+        attributes: { friendly_name: 'Prise NAS' },
+      },
+    ];
+
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_execution', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.openai_execution:Executors',
+    });
+
+    registerIngestRoute(app, makeDeps(env, haStates));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-salon-light-missing',
+        text: 'allume la lumiere du salon',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: { fallbackReason?: string } };
+    expect(payload.responseText).toContain('Je ne trouve pas de lumière du salon');
+    expect(payload.replyMeta).toMatchObject({ fallbackReason: 'missing_salon_light' });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
+  it('voice hub daily recap without journal returns a local answer without router', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.deep', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'search.deep:search.deep:Recherche approfondie',
+    });
+
+    registerIngestRoute(app, makeDeps(env));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-daily-recap-fast',
+        text: 'resume ma journee',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: { fallbackReason?: string } };
+    expect(payload.responseText).toContain('journal fiable');
+    expect(payload.replyMeta).toMatchObject({ fallbackReason: 'missing_daily_journal' });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
+  it('time direct: local time question bypasses router and web search', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'search.web', confidence: 0.99 }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'search.web:search.web:Recherche web',
+    });
+
+    registerIngestRoute(app, makeDeps(env));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-time-1',
+        text: 'quelle heure est il',
+        clientContext: { channel: 'voice' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: { kind?: string; source?: string } };
+    expect(payload.responseText).toMatch(/^Il est \d{2}:\d{2}\./u);
+    expect(payload.replyMeta).toMatchObject({ kind: 'time', source: 'local_paris_time' });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
     expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
   });
 
@@ -684,6 +1087,92 @@ describe('/v1/ingest integration', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-tts-provider']).toBe('openai:kokoro');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('desktop ingest can inline prewarmed voice audio in the final response', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      if (url === 'http://127.0.0.1:8880/v1/audio/speech') {
+        return new Response(new Uint8Array([7, 1, 7, 2]), {
+          status: 200,
+          headers: { 'content-type': 'audio/mpeg' },
+        });
+      }
+      return haSpeechResponse('Réponse audio desktop');
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_TTS_API_KEY: 'test-tts-key',
+      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
+      OPENAI_TTS_MODEL: 'kokoro',
+      OPENAI_TTS_VOICE: 'fr_siwis',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-desktop-inline-audio',
+        text: 'Dis bonjour',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as {
+      responseText: string;
+      voiceAudio?: { contentType: string; base64Audio: string; source?: string };
+    };
+    expect(payload.responseText).toContain('Réponse audio desktop');
+    expect(payload.voiceAudio).toEqual({
+      contentType: 'audio/mpeg',
+      base64Audio: Buffer.from([7, 1, 7, 2]).toString('base64'),
+      source: 'inline_warm_inflight',
+    });
+  });
+
+  it('android voice ingest returns text without waiting for inline voice audio', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      if (url === 'http://127.0.0.1:8880/v1/audio/speech') {
+        return new Response(new Uint8Array([8, 2, 8, 3]), {
+          status: 200,
+          headers: { 'content-type': 'audio/mpeg' },
+        });
+      }
+      return haSpeechResponse('RÃ©ponse rapide android');
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_TTS_API_KEY: 'test-tts-key',
+      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
+      OPENAI_TTS_MODEL: 'kokoro',
+      OPENAI_TTS_VOICE: 'fr_siwis',
+    });
+
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-android-no-inline-audio',
+        text: 'Dis bonjour',
+        clientContext: { channel: 'voice', deviceType: 'android' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as {
+      responseText: string;
+      voiceAudio?: { contentType: string; base64Audio: string; source?: string };
+    };
+    expect(payload.responseText).toContain('RÃ©ponse rapide android');
+    expect(payload.voiceAudio).toBeUndefined();
   });
 
   it('semantic activation: definition E2 live bypasses LLM router', async () => {
@@ -2835,6 +3324,89 @@ describe('/v1/ingest integration', () => {
     }
   });
 
+  it('voice hub simple spotify next bypasses semantic and LLM routing', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'spotify', confidence: 0.9, action: 'next' }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: 'spotify:spotify:Spotify',
+    });
+
+    const nextMock = jest.fn(async () => ({ ok: true }));
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      next: nextMock,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-simple-next',
+        text: 'piste suivante',
+        clientContext: { channel: 'ha.voice-hub', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string; replyMeta?: { routeKey?: string } };
+    expect(payload.responseText).toContain('Piste suivante');
+    expect(payload.replyMeta).toMatchObject({ routeKey: 'spotify.next' });
+    expect(nextMock).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
+  it('voice hub short spotify next wording also bypasses routing', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'spotify', confidence: 0.9, action: 'search_and_play' }],
+      reason: 'should_not_be_used',
+    });
+
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: 'spotify:spotify:Spotify',
+    });
+
+    const nextMock = jest.fn(async () => ({ ok: true }));
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      next: nextMock,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-short-next',
+        text: 'titre suivant',
+        clientContext: { channel: 'ha.voice-hub.5a3d5d9dbd86ef74690d', voiceMode: 'short' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { replyMeta?: { routeKey?: string } };
+    expect(payload.replyMeta).toMatchObject({ routeKey: 'spotify.next' });
+    expect(nextMock).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(nonTitleFetchCalls(global.fetch as jest.Mock)).toHaveLength(0);
+  });
+
   it('structured spotify search_and_play generic device command resumes playback instead of asking clarification', async () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2885,6 +3457,58 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).not.toContain('Précisez ce que vous souhaitez écouter');
     expect(playMock).toHaveBeenCalledTimes(1);
     expect(playMock).toHaveBeenCalledWith('alias:pc');
+  });
+
+  it('structured spotify generic current-device command resumes on active device without transfer alias', async () => {
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const deps = makeDeps(env);
+
+    const playMock = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      scheduleSituationRefresh: jest.fn(),
+      getNowPlaying: async () => ({
+        ok: true,
+        data: {
+          is_playing: false,
+          device: { id: 'dev-pc', name: 'JARVIS', volume_percent: 48, is_active: true },
+          item: { id: 'trk-1', name: 'Around the World', artists: [{ name: 'Daft Punk' }] },
+        },
+      }),
+      listDevicesPublic: async () => ({
+        ok: true,
+        devices: [
+          { id: 'dev-pc', name: 'JARVIS', type: 'Computer', isActive: true },
+          { id: 'dev-salon', name: 'Salon', type: 'Computer', isActive: false },
+        ],
+      }),
+      play: playMock,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-spotify-current-device',
+        domain: 'spotify',
+        action: 'search_and_play',
+        text: 'remets la musique sur le périphérique en cours',
+        slots: { device: 'périphérique en cours' },
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as { responseText: string };
+    expect(payload.responseText).toContain('Lecture reprise');
+    expect(playMock).toHaveBeenCalledTimes(1);
+    expect(playMock).toHaveBeenCalledWith(undefined);
   });
 
   it('structured spotify volume_set halves current volume when utterance says "de moitie"', async () => {

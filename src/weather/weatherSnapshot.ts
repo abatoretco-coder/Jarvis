@@ -84,7 +84,11 @@ export function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSn
       condition: String(item.condition ?? currentCondition),
       ...(asFiniteNumber(item.temperature) !== undefined ? { temperature: asFiniteNumber(item.temperature) } : {}),
       ...(asFiniteNumber(item.templow) !== undefined ? { tempLow: asFiniteNumber(item.templow) } : {}),
-      ...(asFiniteNumber(item.precipitation) !== undefined ? { precipitation: asFiniteNumber(item.precipitation) } : {}),
+      ...(asFiniteNumber(item.precipitation_probability) !== undefined
+        ? { precipitation: asFiniteNumber(item.precipitation_probability) }
+        : asFiniteNumber(item.precipitation) !== undefined
+          ? { precipitation: asFiniteNumber(item.precipitation) }
+          : {}),
       ...(asFiniteNumber(item.wind_speed) !== undefined ? { windSpeed: asFiniteNumber(item.wind_speed) } : {}),
     })),
   };

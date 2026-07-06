@@ -2,7 +2,7 @@
 import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { getSpotifyCapability, SPOTIFY_CAPABILITY_REGISTRY_VERSION } from './capabilityRegistry';
 import type { IngestSpotifyRequest, JarvisSpotifyResponse } from './contracts';
-import { evaluateGenericResumeGate } from './deterministicSpotifyIntent';
+import { evaluateGenericResumeGate, isCurrentDeviceReference } from './deterministicSpotifyIntent';
 import { selectBestSpotifyResult } from './musicAgentPlanner';
 
 type LoggerLike = {
@@ -144,6 +144,7 @@ function toSelectionFailureResponse(error: unknown): JarvisSpotifyResponse {
 function normalizeDeviceSlot(slots: Record<string, unknown>): string | undefined {
   const device = slotString(slots, 'device') ?? slotString(slots, 'device_id');
   if (!device) return undefined;
+  if (isCurrentDeviceReference(device)) return undefined;
   if (device.startsWith('alias:')) return device;
   return `alias:${device}`;
 }
@@ -159,6 +160,7 @@ function inferDeviceAliasFromRequest(input: {
   const entities = asRecord(input.understanding?.entities) ?? {};
   const entityDevice = slotString(entities, 'device') ?? slotString(entities, 'target_device') ?? slotString(entities, 'location');
   if (entityDevice) {
+    if (isCurrentDeviceReference(entityDevice)) return undefined;
     const normalized = normalizeForMatch(entityDevice);
     if (/(^|\s)(pc|ordi|ordinateur|computer|jarvis|vm400)(\s|$)/.test(normalized)) return 'alias:pc';
     if (/(^|\s)(tel|telephone|mobile|phone)(\s|$)/.test(normalized)) return 'alias:phone';
