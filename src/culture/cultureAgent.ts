@@ -1,10 +1,16 @@
+import { z } from 'zod';
+
 import type { Env } from '../env';
 import { completeOllamaChat } from '../ollamaChat';
-import type { ConversationResultSetRepository } from '../resultSets/ConversationResultSetRepository';
+import type {
+  ConversationResultSetRepository,
+  ResolvedConversationResult,
+} from '../resultSets/ConversationResultSetRepository';
 import { getParisDateTimeUtc, getParisLocalDateParts, getParisStartOfDayUtc } from '../time/parisTime';
 import { AgoraClient } from './AgoraClient';
 import {
   type AgoraCandidate,
+  agoraCandidateSchema,
   type AgoraItemResponse,
   type AgoraVenuesResponse,
   type CultureAction,
@@ -19,6 +25,16 @@ const PARIS_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
   hour: '2-digit',
   minute: '2-digit',
 });
+
+const cultureResultContextSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  radiusKm: z.number().positive().max(200),
+  from: z.string().datetime({ offset: true }),
+  to: z.string().datetime({ offset: true }),
+});
+
+const candidateMetadataSchema = z.object({ candidate: agoraCandidateSchema });
 
 function normalize(value: string): string {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/['’_-]+/gu, ' ').toLowerCase();
@@ -95,6 +111,19 @@ function displayCandidates(candidates: AgoraCandidate[], stale: boolean, partial
   return [...lines, ...warnings].join('\n');
 }
 
+function candidatesForPresentation(action: CultureAction, candidates: AgoraCandidate[], limit: number): AgoraCandidate[] {
+  if (action === 'find_occurrences') return candidates.slice(0, limit);
+  const seenItems = new Set<string>();
+  const uniqueItems: AgoraCandidate[] = [];
+  for (const candidate of candidates) {
+    if (seenItems.has(candidate.item.id)) continue;
+    seenItems.add(candidate.item.id);
+    uniqueItems.push(candidate);
+    if (uniqueItems.length >= limit) break;
+  }
+  return uniqueItems;
+}
+
 async function synthesize(candidates: unknown[], request: string, env: Env, limit: number): Promise<string> {
   const bounded = candidates.slice(0, Math.min(20, limit));
   const controller = new AbortController();
@@ -142,6 +171,26 @@ function formatItemDetail(response: AgoraItemResponse): string {
   return `${item.title} — ${summary}${occurrences.length ? `\n${occurrences.join('\n')}` : '\nAucune séance future connue.'}`;
 }
 
+function formatSelectedOccurrence(candidate: AgoraCandidate): string {
+  const summary = candidate.item.summary?.trim() || 'Synopsis non communiqué.';
+  const version = typeof candidate.occurrence.attributes.version === 'string'
+    ? candidate.occurrence.attributes.version
+    : 'version inconnue';
+  return `${candidate.item.title} — ${summary}\n${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))} · ${version} · ${formatPrice(candidate)}`;
+}
+
+function queryFromResultContext(context: Record<string, unknown> | null): Record<string, string | number> | undefined {
+  const parsed = cultureResultContextSchema.safeParse(context);
+  if (!parsed.success) return undefined;
+  return {
+    lat: parsed.data.latitude,
+    lon: parsed.data.longitude,
+    radiusKm: parsed.data.radiusKm,
+    from: parsed.data.from,
+    to: parsed.data.to,
+  };
+}
+
 function formatVenues(response: AgoraVenuesResponse): string {
   if (!response.data.length) return 'Je n’ai trouvé aucun cinéma correspondant dans ce rayon.';
   return response.data.slice(0, 20).map((venue, index) => {
@@ -163,8 +212,7 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
   const value = normalize(text);
   const implicitMovieRecommendation = /\b(?:quelque chose|pourrait etre)\b.*\b(sympa|leger|interessant)\b.*\b(ce soir|demain|week[ -]?end)\b/u.test(value);
   const qualitativeMovieRequest = /\bfilms?\b.*\b(sympa|leger|interessant|pas idiot)\b/u.test(value);
-  const contextualRecommendation = /\b(?:pitch\w*|compare|recommand\w*)\b/u.test(value);
-  if (!/\b(films?|cinemas?|seances?|sorties?)\b/u.test(value) && !implicitMovieRecommendation && !contextualRecommendation) return null;
+  if (!/\b(films?|cinemas?|seances?|sorties?)\b/u.test(value) && !implicitMovieRecommendation) return null;
   const types = implicitMovieRecommendation || /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie'] : undefined;
   const version = /\bvostfr\b/u.test(value) ? 'VOSTFR' : /\bvo\b/u.test(value) ? 'VO' : /\bvf\b/u.test(value) ? 'VF' : undefined;
   let action: CultureAction = implicitMovieRecommendation || qualitativeMovieRequest || /\b(compare|choisir|choisirais|prefere|recommand\w*|pitch\w*)\b/u.test(value)
@@ -216,6 +264,7 @@ export async function executeCulture(input: {
   clientContext?: Record<string, unknown>;
   env: Env;
   resultSets: ConversationResultSetRepository;
+  selectedResult?: ResolvedConversationResult | null;
   now?: Date;
 }): Promise<{ text: string; resultSetId?: string }> {
   if (!input.env.AGORA_BASE_URL || !input.env.AGORA_API_TOKEN) throw new Error('agora_not_configured');
@@ -226,16 +275,34 @@ export async function executeCulture(input: {
     timeoutMs: input.env.AGORA_TIMEOUT_MS,
   });
 
+  if (input.action === 'get_item' && input.selectedResult?.entityType === 'agora.occurrence') {
+    const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
+    if (parsed.success) return { text: formatSelectedOccurrence(parsed.data.candidate) };
+    return { text: 'Je ne peux plus retrouver précisément cette séance. Relance la recherche pour actualiser la liste.' };
+  }
+
   if (input.action === 'get_item' && slots.itemId) {
-    return { text: formatItemDetail(await client.getItem(slots.itemId)) };
+    const context = input.selectedResult?.resultSetContext ?? null;
+    return { text: formatItemDetail(await client.getItem(slots.itemId, queryFromResultContext(context))) };
   }
 
   if (slots.resultSetId && (input.action === 'compare_candidates' || input.action === 'recommend_candidates')) {
     const active = input.resultSets.findActive(input.threadId);
     if (active?.id === slots.resultSetId) {
       const limit = slots.limit ?? 10;
-      const ids = [...new Set(active.items.filter((item) => item.entityType === 'agora.item').map((item) => item.entityId))].slice(0, limit);
-      const details = (await Promise.all(ids.map((id) => client.getItem(id)))).map(boundedItemDetail);
+      const storedCandidates = active.items
+        .map((item) => candidateMetadataSchema.safeParse(item.metadata))
+        .filter((parsed) => parsed.success)
+        .map((parsed) => parsed.data.candidate)
+        .slice(0, limit);
+      if (storedCandidates.length) {
+        return { text: await synthesize(storedCandidates, input.text, input.env, limit), resultSetId: active.id };
+      }
+      const itemQuery = queryFromResultContext(active.context);
+      const ids = [...new Set(active.items
+        .filter((item) => item.entityType === 'agora.item')
+        .map((item) => item.entityId))].slice(0, limit);
+      const details = (await Promise.all(ids.map((id) => client.getItem(id, itemQuery)))).map(boundedItemDetail);
       if (details.length) return { text: await synthesize(details, input.text, input.env, limit), resultSetId: active.id };
     }
   }
@@ -257,12 +324,16 @@ export async function executeCulture(input: {
   }
 
   const window = resolveCultureWindow(input.text, input.now);
+  const from = slots.from ?? window.from;
+  const to = slots.to ?? window.to;
+  const resultLimit = slots.limit ?? 20;
+  const agoraLimit = input.action === 'find_occurrences' ? resultLimit : Math.min(50, resultLimit * 3);
   const result = await client.discover({
     lat: location.lat,
     lon: location.lon,
     radiusKm: location.radiusKm,
-    from: slots.from ?? window.from,
-    to: slots.to ?? window.to,
+    from,
+    to,
     types: slots.types?.join(','),
     categories: slots.categories?.join(','),
     q: slots.query,
@@ -271,25 +342,35 @@ export async function executeCulture(input: {
     format: slots.format,
     maxPrice: slots.maxPrice,
     currency: slots.currency,
-    limit: slots.limit ?? 20,
+    limit: agoraLimit,
   });
 
-  const resultSet = result.data.length
+  const presentedCandidates = candidatesForPresentation(input.action, result.data, resultLimit);
+
+  const resultSet = presentedCandidates.length
     ? input.resultSets.create({
         threadId: input.threadId,
         sourceAgent: 'culture',
         sourceAction: input.action,
-        items: result.data.slice(0, 20).map((candidate) => ({
-          entityType: 'agora.item',
-          entityId: candidate.item.id,
+        context: {
+          latitude: location.lat,
+          longitude: location.lon,
+          radiusKm: location.radiusKm,
+          from,
+          to,
+        },
+        items: presentedCandidates.map((candidate) => ({
+          entityType: input.action === 'find_occurrences' ? 'agora.occurrence' : 'agora.item',
+          entityId: input.action === 'find_occurrences' ? candidate.occurrence.id : candidate.item.id,
           displayLabel: `${candidate.item.title} — ${candidate.venue.name}`,
+          metadata: { candidate },
         })),
       })
     : null;
-  let text = displayCandidates(result.data, result.meta.stale, result.meta.partial);
-  if ((input.action === 'compare_candidates' || input.action === 'recommend_candidates') && result.data.length) {
+  let text = displayCandidates(presentedCandidates, result.meta.stale, result.meta.partial);
+  if ((input.action === 'compare_candidates' || input.action === 'recommend_candidates') && presentedCandidates.length) {
     try {
-      text = await synthesize(result.data, input.text, input.env, slots.limit ?? 20);
+      text = await synthesize(presentedCandidates, input.text, input.env, resultLimit);
     } catch {
       text = `${text}\nJe n’ai pas pu générer la comparaison locale, mais les données factuelles ci-dessus restent disponibles.`;
     }

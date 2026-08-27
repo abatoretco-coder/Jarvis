@@ -14,14 +14,14 @@ const source = {
   sourceModifiedAt: null, freshness: 'fresh', sourceType: 'open_data',
 };
 
-function candidate(id: string, title: string, hour: number) {
+function candidate(id: string, title: string, hour: number, occurrenceId = `occ_${id}`, venueName = `Cinéma ${title}`) {
   return {
     item: { id, type: 'movie', title, summary: `Synopsis de ${title}`, categories: ['drama'], attributes: {} },
     occurrence: {
-      id: `occ_${id}`, startsAt: `2026-08-27T${hour}:30:00.000Z`, endsAt: null, status: 'scheduled',
+      id: occurrenceId, startsAt: `2026-08-27T${hour}:30:00.000Z`, endsAt: null, status: 'scheduled',
       price: null, isFree: null, bookingUrl: null, attributes: { version: 'VOSTFR' },
     },
-    venue: { id: `venue_${id}`, name: `Cinéma ${title}`, distanceKm: 2 }, source, rankReasons: ['nearby'],
+    venue: { id: `venue_${occurrenceId}`, name: venueName, distanceKm: 2 }, source, rankReasons: ['nearby'],
   };
 }
 
@@ -126,6 +126,47 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(second.statusCode).toBe(200);
     expect(second.json<{ responseText: string }>().responseText).toContain('Synopsis de Film B');
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/items/item_bbbbbbbbbbbbbbbbbbbbbbbb'))).toBe(true);
+    const itemCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/v1/items/item_bbbbbbbbbbbbbbbbbbbbbbbb'));
+    expect(itemCall).toBeDefined();
+    const itemUrl = new URL(String(itemCall?.[0]));
+    expect(itemUrl.searchParams.get('lat')).toBe(discoverUrl.searchParams.get('lat'));
+    expect(itemUrl.searchParams.get('lon')).toBe(discoverUrl.searchParams.get('lon'));
+    expect(itemUrl.searchParams.get('radiusKm')).toBe(discoverUrl.searchParams.get('radiusKm'));
+    expect(itemUrl.searchParams.get('from')).toBe(discoverUrl.searchParams.get('from'));
+    expect(itemUrl.searchParams.get('to')).toBe(discoverUrl.searchParams.get('to'));
+  });
+
+  test('keeps distinct showtime identity and resolves the displayed second occurrence without a broad item query', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-showtimes-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const showtimes = [
+      candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 17, 'occ_showtime_1', 'Cinéma A'),
+      candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 19, 'occ_showtime_2', 'Cinéma B'),
+    ];
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: showtimes,
+      meta: {
+        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+      },
+    }), { status: 200 }));
+
+    const first = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Séances de Film A ce soir ?' },
+    });
+    expect(first.statusCode).toBe(200);
+    const firstText = first.json<{ responseText: string }>().responseText;
+    expect(firstText).toContain('1. Film A — Cinéma A');
+    expect(firstText).toContain('2. Film A — Cinéma B');
+
+    const second = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'La deuxième ?' },
+    });
+    expect(second.statusCode).toBe(200);
+    const secondText = second.json<{ responseText: string }>().responseText;
+    expect(secondText).toContain('Film A');
+    expect(secondText).toContain('Cinéma B');
+    expect(secondText).not.toContain('Cinéma A');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

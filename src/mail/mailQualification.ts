@@ -64,10 +64,6 @@ function normalizeText(value: string): string {
     .toLowerCase();
 }
 
-function firstNonEmpty(...values: Array<string | undefined>): string {
-  return values.map((value) => value?.trim() ?? '').find(Boolean) ?? '';
-}
-
 function hasAny(patterns: RegExp[], value: string): boolean {
   return patterns.some((pattern) => pattern.test(value));
 }

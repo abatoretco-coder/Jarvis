@@ -1826,11 +1826,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
     const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
       && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
-    if (parsed.data.domain === 'culture' || inferredCulture || referencedResult?.entityType === 'agora.item' || contextualCultureRequest) {
+    const referencedCultureResult = referencedResult?.entityType.startsWith('agora.') ? referencedResult : null;
+    if (parsed.data.domain === 'culture' || inferredCulture || referencedCultureResult || contextualCultureRequest) {
       const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
       const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
         ? parsedCultureAction.data
-        : referencedResult
+        : referencedCultureResult
           ? 'get_item'
           : contextualCultureRequest
             ? 'recommend_candidates'
@@ -1838,7 +1839,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const requestedSlots = {
         ...(inferredCulture?.slots ?? {}),
         ...(parsed.data.slots ?? {}),
-        ...(referencedResult ? { itemId: referencedResult.entityId } : {}),
+        ...(referencedCultureResult?.entityType === 'agora.item'
+          ? { itemId: referencedCultureResult.entityId }
+          : {}),
         ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
       };
       try {
@@ -1850,6 +1853,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           clientContext: parsed.data.clientContext,
           env: deps.env,
           resultSets: resultSetRepository,
+          selectedResult: referencedCultureResult,
         });
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
@@ -1863,7 +1867,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             kind: 'culture',
             source: 'agora',
             routeKey: `culture.${requestedAction}`,
-            semanticDecision: referencedResult ? 'deterministic_reference' : 'activated',
+            semanticDecision: referencedCultureResult ? 'deterministic_reference' : 'activated',
           },
         });
       } catch (error) {

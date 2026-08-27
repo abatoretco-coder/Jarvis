@@ -569,6 +569,7 @@ export function createConversationDb(dbPath: string): Database.Database {
       expires_at_ms INTEGER NOT NULL,
       focused_position INTEGER,
       active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+      context_json TEXT,
       FOREIGN KEY(thread_id) REFERENCES conversation_threads(thread_id) ON DELETE CASCADE
     );
 
@@ -578,6 +579,7 @@ export function createConversationDb(dbPath: string): Database.Database {
       entity_type TEXT NOT NULL,
       entity_id TEXT NOT NULL,
       display_label TEXT NOT NULL,
+      metadata_json TEXT,
       PRIMARY KEY(result_set_id, position),
       FOREIGN KEY(result_set_id) REFERENCES conversation_result_sets(id) ON DELETE CASCADE
     );
@@ -588,6 +590,15 @@ export function createConversationDb(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_conversation_result_sets_expiry
       ON conversation_result_sets(thread_id, expires_at_ms DESC);
   `);
+
+  const resultSetColumns = db.prepare('PRAGMA table_info(conversation_result_sets)').all() as Array<{ name: string }>;
+  if (!resultSetColumns.some((column) => column.name === 'context_json')) {
+    db.exec('ALTER TABLE conversation_result_sets ADD COLUMN context_json TEXT;');
+  }
+  const resultSetItemColumns = db.prepare('PRAGMA table_info(conversation_result_set_items)').all() as Array<{ name: string }>;
+  if (!resultSetItemColumns.some((column) => column.name === 'metadata_json')) {
+    db.exec('ALTER TABLE conversation_result_set_items ADD COLUMN metadata_json TEXT;');
+  }
 
   const threadColumns = db
     .prepare('PRAGMA table_info(conversation_threads)')
