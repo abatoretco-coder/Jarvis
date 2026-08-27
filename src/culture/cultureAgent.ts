@@ -88,6 +88,20 @@ export function resolveCultureWindow(text: string, now = new Date()): { from: st
   };
 }
 
+export function resolveEffectiveCultureWindow(
+  requested: { from: string; to: string },
+  now = new Date(),
+): { from: string; to: string } | null {
+  const requestedFromMs = new Date(requested.from).getTime();
+  const requestedToMs = new Date(requested.to).getTime();
+  const nowMs = now.getTime();
+  if (requestedToMs <= nowMs) return null;
+  return {
+    from: new Date(Math.max(requestedFromMs, nowMs)).toISOString(),
+    to: new Date(requestedToMs).toISOString(),
+  };
+}
+
 function formatPrice(candidate: AgoraCandidate): string {
   if (candidate.occurrence.isFree === true) return 'gratuit';
   const price = candidate.occurrence.price;
@@ -323,9 +337,16 @@ export async function executeCulture(input: {
     return { text: formatVenues(venues) };
   }
 
-  const window = resolveCultureWindow(input.text, input.now);
-  const from = slots.from ?? window.from;
-  const to = slots.to ?? window.to;
+  const now = input.now ?? new Date();
+  const window = resolveCultureWindow(input.text, now);
+  const effectiveWindow = resolveEffectiveCultureWindow({
+    from: slots.from ?? window.from,
+    to: slots.to ?? window.to,
+  }, now);
+  if (!effectiveWindow) {
+    return { text: 'La fenêtre demandée est déjà passée. Je n’ai aucune séance future à proposer pour cette période.' };
+  }
+  const { from, to } = effectiveWindow;
   const resultLimit = slots.limit ?? 20;
   const agoraLimit = input.action === 'find_occurrences' ? resultLimit : Math.min(50, resultLimit * 3);
   const result = await client.discover({

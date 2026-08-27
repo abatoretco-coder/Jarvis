@@ -1,7 +1,12 @@
 import { describe, expect, jest, test } from '@jest/globals';
 
 import { createConversationDb, SqliteThreadRepository } from '../src/conversation/repositories/SqliteRepositories';
-import { executeCulture, inferCultureRequest, resolveCultureWindow } from '../src/culture/cultureAgent';
+import {
+  executeCulture,
+  inferCultureRequest,
+  resolveCultureWindow,
+  resolveEffectiveCultureWindow,
+} from '../src/culture/cultureAgent';
 import { loadEnv } from '../src/env';
 import { ConversationResultSetRepository } from '../src/resultSets/ConversationResultSetRepository';
 
@@ -85,6 +90,73 @@ describe('cultureAgent', () => {
     expect(resolveCultureWindow('cette semaine', summerNow)).toEqual({
       from: '2026-08-26T22:00:00.000Z', to: '2026-09-02T22:00:00.000Z',
     });
+  });
+
+  test('clamps current-day and late-evening searches to now while preserving future windows', () => {
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films aujourd’hui', new Date('2026-08-27T12:00:00.000Z')),
+      new Date('2026-08-27T12:00:00.000Z'),
+    )).toEqual({ from: '2026-08-27T12:00:00.000Z', to: '2026-08-27T22:00:00.000Z' });
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films ce soir', new Date('2026-08-27T20:30:00.000Z')),
+      new Date('2026-08-27T20:30:00.000Z'),
+    )).toEqual({ from: '2026-08-27T20:30:00.000Z', to: '2026-08-28T00:00:00.000Z' });
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films demain', new Date('2026-08-27T12:00:00.000Z')),
+      new Date('2026-08-27T12:00:00.000Z'),
+    )).toEqual({ from: '2026-08-27T22:00:00.000Z', to: '2026-08-28T22:00:00.000Z' });
+  });
+
+  test('does not query Agora for a window that is entirely in the past', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const db = createConversationDb(':memory:');
+    await new SqliteThreadRepository(db).getOrCreate('past-window-thread');
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+    const result = await executeCulture({
+      action: 'discover',
+      slots: { from: '2026-08-26T08:00:00.000Z', to: '2026-08-26T10:00:00.000Z' },
+      text: 'films hier',
+      threadId: 'past-window-thread',
+      env,
+      resultSets: new ConversationResultSetRepository(db),
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    expect(result.text).toContain('déjà passée');
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+    db.close();
+  });
+
+  test('sends only future availability to Agora for today and a late evening', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => (
+      new Response(JSON.stringify(discoverResponse()), { status: 200 })
+    ));
+    const db = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(db);
+    await threads.getOrCreate('today-window-thread');
+    await threads.getOrCreate('late-window-thread');
+    const resultSets = new ConversationResultSetRepository(db);
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+
+    await executeCulture({
+      action: 'discover', slots: {}, text: 'films aujourd’hui', threadId: 'today-window-thread', env, resultSets,
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    await executeCulture({
+      action: 'discover', slots: {}, text: 'films ce soir', threadId: 'late-window-thread', env, resultSets,
+      now: new Date('2026-08-27T20:30:00.000Z'),
+    });
+
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('from')).toBe('2026-08-27T12:00:00.000Z');
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('from')).toBe('2026-08-27T20:30:00.000Z');
+    fetchMock.mockRestore();
+    db.close();
   });
 
   test('sends exact location, interval and VO filters to Agora and stores generic references', async () => {
