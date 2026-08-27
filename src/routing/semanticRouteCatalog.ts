@@ -835,6 +835,42 @@ export const HA_E1_ROUTES: SemanticRouteDefinition[] = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const SEMANTIC_ROUTES: SemanticRouteDefinition[] = [
+  {
+    key: 'culture.discover', level: 'E2', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'discover' }, plannerRequired: false,
+    examples: ['quels films passent ce soir', 'trouve une sortie demain', 'que faire ce week-end autour de chez moi'],
+    metadata: { category: 'culture', latencyTarget: 500 },
+  },
+  {
+    key: 'culture.find_occurrences', level: 'E2', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'find_occurrences' }, plannerRequired: false,
+    examples: ['ou voir ce film demain', 'séances de ce film ce soir', 'dans quel cinéma passe ce film'],
+    metadata: { category: 'culture', latencyTarget: 500 },
+  },
+  {
+    key: 'culture.get_item', level: 'E2', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'get_item' }, plannerRequired: false,
+    examples: ['le deuxième film', 'parle moi du premier film', 'le troisième il parle de quoi'],
+    metadata: { category: 'culture', latencyTarget: 500 },
+  },
+  {
+    key: 'culture.find_venues', level: 'E2', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'find_venues' }, plannerRequired: false,
+    examples: ['quels cinémas sont proches', 'cinémas autour de chez moi', 'trouve un cinéma dans mon rayon'],
+    metadata: { category: 'culture', latencyTarget: 500 },
+  },
+  {
+    key: 'culture.compare_candidates', level: 'E1', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'compare_candidates' }, plannerRequired: true,
+    examples: ['compare ces films', 'lequel de ces films choisir', 'compare le premier et le deuxième'],
+    metadata: { category: 'culture', latencyTarget: 1200 },
+  },
+  {
+    key: 'culture.recommend_candidates', level: 'E1', targetAgentId: 'culture',
+    directRequest: { domain: 'culture', action: 'recommend_candidates' }, plannerRequired: true,
+    examples: ['recommande moi un film parmi ceux la', 'pitche moi ces sorties', 'laquelle de ces sorties choisir'],
+    metadata: { category: 'culture', latencyTarget: 1200 },
+  },
   ...SPOTIFY_E2_ROUTES,      // 7
   ...SEARCH_E2_ROUTES,       // 5
   ...WEATHER_E2_ROUTES,      // 4
@@ -898,6 +934,7 @@ export function getCatalogStats() {
     mail: getCatalogByAgent('mail').length,
     calendar: getCatalogByAgent('calendar').length,
     executors: getCatalogByAgent('executors').length,
+    culture: getCatalogByAgent('culture').length,
   };
   return {
     totalRoutes: SEMANTIC_ROUTES.length,

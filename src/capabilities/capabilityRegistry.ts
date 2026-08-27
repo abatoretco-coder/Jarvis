@@ -8,7 +8,8 @@ export type CapabilityAgent =
   | 'weather'
   | 'search'
   | 'executor'
-  | 'nas_status';
+  | 'nas_status'
+  | 'culture';
 
 export type CapabilityEffect = 'read' | 'write' | 'destructive';
 export type CapabilitySemanticLevel = 'E2' | 'E1' | 'none';
@@ -44,6 +45,12 @@ const spotifyCapabilities = MUSIC_ROUTING_MATRIX.map((entry) => define({
 }));
 
 const coreCapabilities: CapabilityDefinition[] = [
+  define({ agent: 'culture', action: 'discover', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.discover' }),
+  define({ agent: 'culture', action: 'find_occurrences', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.find_occurrences' }),
+  define({ agent: 'culture', action: 'get_item', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.get_item' }),
+  define({ agent: 'culture', action: 'find_venues', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.find_venues' }),
+  define({ agent: 'culture', action: 'compare_candidates', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'culture', routeKey: 'culture.compare_candidates' }),
+  define({ agent: 'culture', action: 'recommend_candidates', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'culture', routeKey: 'culture.recommend_candidates' }),
   define({ agent: 'calendar', action: 'list_upcoming', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.list_upcoming' }),
   define({ agent: 'calendar', action: 'search_events', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.search_events' }),
   define({ agent: 'calendar', action: 'create_event', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.create_event' }),

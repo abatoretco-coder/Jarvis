@@ -559,6 +559,34 @@ export function createConversationDb(dbPath: string): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_pending_mutations_thread_status
       ON pending_mutations(thread_id, status, expires_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS conversation_result_sets (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      source_agent TEXT NOT NULL,
+      source_action TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      focused_position INTEGER,
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+      FOREIGN KEY(thread_id) REFERENCES conversation_threads(thread_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_result_set_items (
+      result_set_id TEXT NOT NULL,
+      position INTEGER NOT NULL CHECK (position > 0),
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      display_label TEXT NOT NULL,
+      PRIMARY KEY(result_set_id, position),
+      FOREIGN KEY(result_set_id) REFERENCES conversation_result_sets(id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_result_sets_active_thread
+      ON conversation_result_sets(thread_id) WHERE active = 1;
+
+    CREATE INDEX IF NOT EXISTS idx_conversation_result_sets_expiry
+      ON conversation_result_sets(thread_id, expires_at_ms DESC);
   `);
 
   const threadColumns = db

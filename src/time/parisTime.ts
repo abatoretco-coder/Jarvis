@@ -68,11 +68,11 @@ function getParisDateTimeParts(date: Date): { year: number; month: number; day: 
   };
 }
 
-function utcDateFromParisLocalDateTime(year: number, month: number, day: number, hour: number): Date {
-  let utcMs = Date.UTC(year, month - 1, day, hour, 0, 0);
+function utcDateFromParisLocalDateTime(year: number, month: number, day: number, hour: number, minute = 0): Date {
+  let utcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
   for (let index = 0; index < 3; index += 1) {
     const paris = getParisDateTimeParts(new Date(utcMs));
-    const desiredAsUtc = Date.UTC(year, month - 1, day, hour, 0, 0);
+    const desiredAsUtc = Date.UTC(year, month - 1, day, hour, minute, 0);
     const actualAsUtc = Date.UTC(paris.year, paris.month - 1, paris.day, paris.hour, paris.minute, paris.second);
     const delta = desiredAsUtc - actualAsUtc;
     if (delta === 0) break;
@@ -86,4 +86,11 @@ export function getParisStartOfDayUtc(date = new Date(), daysOffset = 0): Date {
   const shifted = new Date(Date.UTC(year, month - 1, day + daysOffset, 12, 0, 0));
   const parts = getParisLocalDateParts(shifted);
   return utcDateFromParisLocalDateTime(parts.year, parts.month, parts.day, 0);
+}
+
+export function getParisDateTimeUtc(date = new Date(), daysOffset = 0, hour = 0, minute = 0): Date {
+  const { year, month, day } = getParisLocalDateParts(date);
+  const shifted = new Date(Date.UTC(year, month - 1, day + daysOffset, 12, 0, 0));
+  const parts = getParisLocalDateParts(shifted);
+  return utcDateFromParisLocalDateTime(parts.year, parts.month, parts.day, hour, minute);
 }

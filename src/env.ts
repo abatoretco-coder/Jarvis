@@ -29,6 +29,12 @@ const optionalUrl = z.preprocess((v) => {
   return trimmed ? trimmed : undefined;
 }, z.string().url().optional());
 
+const optionalNumberFromEnv = z.preprocess((v) => {
+  if (typeof v !== 'string') return v;
+  const trimmed = v.trim();
+  return trimmed ? Number(trimmed) : undefined;
+}, z.number().optional());
+
 const envSchema = z
   .object({
   BIND_HOST: z.string().default('0.0.0.0'),
@@ -90,6 +96,21 @@ const envSchema = z
   HELIX_NEWS_BASE_URL: optionalUrl,
   HELIX_NEWS_API_TOKEN: optionalNonEmptyString,
   HELIX_NEWS_TIMEOUT_MS: numberFromEnv.default(60000),
+
+  // Agora Culture / Sorties. Provider secrets never enter Jarvis.
+  AGORA_BASE_URL: optionalUrl,
+  AGORA_API_TOKEN: optionalNonEmptyString,
+  AGORA_TIMEOUT_MS: numberFromEnv.default(8000),
+  CULTURE_HOME_LATITUDE: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
+  CULTURE_HOME_LONGITUDE: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
+  CULTURE_DEFAULT_RADIUS_KM: z.coerce.number().positive().max(200).default(15),
+  AGORA_HOME_LAT: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
+  AGORA_HOME_LON: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
+  AGORA_HOME_RADIUS_KM: z.coerce.number().positive().max(200).default(15),
+
+  // Culture synthesis always uses this local Ollama endpoint directly.
+  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434/v1'),
+  OLLAMA_MODEL: optionalNonEmptyString,
 
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),

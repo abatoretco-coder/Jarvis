@@ -53,6 +53,9 @@ import {
   type VoiceResponseMode,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
+import { AgoraClientError } from '../culture/AgoraClient';
+import { cultureActionSchema } from '../culture/contracts';
+import { executeCulture, inferCultureRequest } from '../culture/cultureAgent';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -64,6 +67,7 @@ import {
 } from '../mail/mailAgent';
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
 import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
+import { ConversationResultSetRepository } from '../resultSets/ConversationResultSetRepository';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -124,8 +128,8 @@ const ingestSchema = z.object({
   clientContext: z.record(z.string(), z.unknown()).optional(),
   correlation_id: z.string().optional(),
   user_id: z.string().optional(),
-  domain: z.literal('spotify').optional(),
-  action: spotifyActionSchema.optional(),
+  domain: z.enum(['spotify', 'culture']).optional(),
+  action: z.union([spotifyActionSchema, cultureActionSchema]).optional(),
   slots: z.record(z.string(), z.unknown()).optional(),
   context: z.record(z.string(), z.unknown()).optional(),
   understanding: z
@@ -790,6 +794,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
   const pendingMutationRepository = new PendingMutationRepository(db);
+  const resultSetRepository = new ConversationResultSetRepository(db);
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -1453,7 +1458,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
     }
 
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) {
+    const rawText = parsed.data.text ?? '';
+    const normalizedRawText = normalizeIntentText(rawText);
+    const existingCultureResultSet = resultSetRepository.findActive(parsed.data.threadId)?.sourceAgent === 'culture';
+    const resultSetFollowup = existingCultureResultSet
+      && /\b(premier|premiere|deuxieme|second|seconde|troisieme|lui|celui la|celle la|parmi ceux la|lequel|laquelle)\b/u.test(normalizedRawText);
+    const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
+    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
       return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
@@ -1809,6 +1820,69 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const toDeterministicHaFailureMessage = (): string => (
       'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
     );
+
+    const inferredCulture = inferCultureRequest(assistantInputText);
+    const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
+    const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
+      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
+    if (parsed.data.domain === 'culture' || inferredCulture || referencedResult?.entityType === 'agora.item' || contextualCultureRequest) {
+      const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
+      const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
+        ? parsedCultureAction.data
+        : referencedResult
+          ? 'get_item'
+          : contextualCultureRequest
+            ? 'recommend_candidates'
+            : inferredCulture?.action ?? 'discover';
+      const requestedSlots = {
+        ...(inferredCulture?.slots ?? {}),
+        ...(parsed.data.slots ?? {}),
+        ...(referencedResult ? { itemId: referencedResult.entityId } : {}),
+        ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
+      };
+      try {
+        const culture = await executeCulture({
+          action: requestedAction,
+          slots: requestedSlots,
+          text: assistantInputText,
+          threadId: effectiveThreadId,
+          clientContext: parsed.data.clientContext,
+          env: deps.env,
+          resultSets: resultSetRepository,
+        });
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
+          : culture.text;
+        await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        return reply.code(200).send({
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'culture',
+            source: 'agora',
+            routeKey: `culture.${requestedAction}`,
+            semanticDecision: referencedResult ? 'deterministic_reference' : 'activated',
+          },
+        });
+      } catch (error) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, error }, 'culture_agent_failed');
+        if (error instanceof z.ZodError) {
+          return reply.code(400).send({ error: 'invalid_culture_contract', issues: error.issues });
+        }
+        if (error instanceof Error && error.message === 'agora_not_configured') {
+          return reply.code(503).send({ error: 'agora_not_configured' });
+        }
+        if (error instanceof AgoraClientError) {
+          if (error.code === 'timeout') return reply.code(504).send({ error: 'agora_timeout' });
+          if (error.code === 'unauthorized') return reply.code(502).send({ error: 'agora_unauthorized' });
+          if (error.code === 'invalid_response') return reply.code(502).send({ error: 'agora_invalid_response' });
+          if (error.code === 'unavailable') return reply.code(503).send({ error: 'agora_unavailable' });
+        }
+        return reply.code(502).send({ error: 'agora_unavailable' });
+      }
+    }
 
     if (parsed.data.domain === 'spotify' && parsed.data.action) {
       const explicitSpotifyPayload = ingestSpotifyRequestSchema.safeParse({
