@@ -281,7 +281,7 @@ async function routeWithProvider(params: {
     );
     return { targets, reason, provider: providerRequest.provider, model: providerRequest.model, latencyMs: Date.now() - t0 };
   } catch (error) {
-    if (controller.signal.aborted) throw new Error('router_timeout');
+    if (controller.signal.aborted) throw new Error('router_timeout', { cause: error });
     throw error;
   } finally {
     clearTimeout(timeoutId);

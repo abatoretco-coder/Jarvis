@@ -1,6 +1,6 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { googleRefreshTokenStoreKey } from '../google/googleCredentialService';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { cleanMailDetailText } from './mailContentCleaner';
 import { qualifyMail, shouldMentionMail } from './mailQualification';
 import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';

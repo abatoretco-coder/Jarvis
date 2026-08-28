@@ -14,6 +14,7 @@ module.exports = [
     ignores: [
       'dist/**',
       '**/dist/**',
+      'artifacts/**',
       'node_modules/**',
       '*.config.cjs',
       '.eslintrc.cjs',

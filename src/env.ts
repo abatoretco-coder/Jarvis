@@ -113,9 +113,9 @@ const envSchema = z
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
   // Chat/completions provider. "ollama" reuses its OpenAI-compatible endpoint
   // while keeping speech configuration independent.
-  // openai: cloud only; ollama: local only; hybrid: local router then OpenAI
+  // ollama: local nominal path; openai/hybrid remain opt-in compatibility modes.
   // fallback when the local structured result is invalid, uncertain or times out.
-  LLM_PROVIDER: z.enum(['openai', 'ollama', 'hybrid']).default('openai'),
+  LLM_PROVIDER: z.enum(['openai', 'ollama', 'hybrid']).default('ollama'),
   OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434/v1'),
   OLLAMA_MODEL: optionalNonEmptyString,
   LLM_LOCAL_ROUTER_TIMEOUT_MS: numberFromEnv.default(1200),

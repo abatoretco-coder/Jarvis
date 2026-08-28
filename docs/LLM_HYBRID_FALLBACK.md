@@ -1,22 +1,20 @@
-# Fallback hybride Ollama → OpenAI
+# Runtime LLM local-first
 
-## Configuration
+## Configuration nominale
 
-Conserver les identifiants et modèles OpenAI dans les variables `OPENAI_*`, puis activer le mode hybride :
+Jarvis utilise Ollama seul dans les profils PC et NAS standards :
 
 ```env
-LLM_PROVIDER=hybrid
+LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434/v1
-OLLAMA_MODEL=qwen3:4b-instruct
-LLM_LOCAL_ROUTER_TIMEOUT_MS=1200
-LLM_FALLBACK_OPENAI_TIMEOUT_MS=6000
+OLLAMA_MODEL=qwen3:8b
 ```
 
-En mode `hybrid`, les valeurs `OPENAI_API_KEY`, `OPENAI_BASE_URL` et `OPENAI_MODEL_ROUTER` sont conservées automatiquement comme fournisseur de secours. Les appels du routeur partent d’abord vers Ollama.
+`OPENAI_API_KEY` n’est pas nécessaire au fonctionnement conversationnel normal. Jarvis adapte en interne sa configuration OpenAI-compatible vers l’API Ollama et n’active aucun fallback.
 
-## Décision de fallback
+## Compatibilité explicite
 
-OpenAI est utilisé seulement si la réponse Ollama est inutilisable : délai dépassé, JSON invalide, aucune cible reconnue ou confiance sous `ROUTER_CONFIDENCE_THRESHOLD`.
+Les modes `openai` et `hybrid` restent disponibles uniquement pour une activation opérateur explicite. En mode `hybrid`, les variables `LLM_FALLBACK_OPENAI_*` doivent être configurées volontairement ; aucun profil standard ne les active.
 
 L’autorisation d’une action ne dépend jamais du modèle : le backend valide toujours l’action et ses arguments, puis applique les confirmations depuis le registre de capacités.
 
@@ -26,17 +24,14 @@ Chaque réponse qui est passée par le routeur contient dans `replyMeta` :
 
 ```json
 {
-  "llmProvider": "openai",
-  "llmModel": "gpt-4o-mini",
-  "llmLatencyMs": 911,
-  "llmFallbackReason": "local_timeout"
+  "llmProvider": "ollama",
+  "llmModel": "qwen3:8b",
+  "llmLatencyMs": 911
 }
 ```
 
-Les raisons possibles sont `local_timeout`, `local_invalid_json`, `local_invalid_target`, `local_low_confidence`, `local_http_error` et `local_error`.
-
-`GET /health` expose également si le fallback est configuré, sans exposer de clé.
+`GET /health` expose `provider: ollama` et `fallback.configured: false`, sans exposer de clé.
 
 ## Réglage conseillé
 
-`qwen3:4b-instruct` met environ 0,34–0,40 s à chaud pour le vrai prompt de routage, mais son premier chargement peut prendre environ 4,4 s. Avec `LLM_LOCAL_ROUTER_TIMEOUT_MS=1200`, la première demande bascule vers OpenAI puis les suivantes restent locales. Augmenter ce délai à `5000` privilégie la confidentialité au premier appel ; le diminuer privilégie la réactivité.
+Le modèle doit être présent avant le démarrage du runtime. Le déploiement ne télécharge jamais automatiquement un modèle Ollama.

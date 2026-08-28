@@ -20,8 +20,8 @@ describe('todoAgent formatting', () => {
       due_date: '2026-08-24',
     });
 
-    expect(preview).toBe("J'ajoute la tache Faire du sport pour demain.");
-    expect(preview).not.toContain('2026-07-06');
+    expect(preview).toBe("J'ajoute la tache Faire du sport pour le 24 août.");
+    expect(preview).not.toContain('2026-08-24');
     expect(preview).not.toContain('prochaine echeance');
   });
 });

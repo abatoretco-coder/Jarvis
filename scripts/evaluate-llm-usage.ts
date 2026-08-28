@@ -5,25 +5,30 @@ type Mode = 'ollama_fast' | 'ollama_deep' | 'openai';
 type Check = (answer: string) => string | undefined;
 type Case = { id: string; area: string; prompt: string; check: Check; tokens?: number };
 type Run = { id: string; area: string; ok: boolean; ms: number; answer: string; issue?: string };
+type LlmResponse = {
+  error?: { message?: string };
+  message?: { content?: string };
+  choices?: Array<{ message?: { content?: string } }>;
+};
 
 const onlyJson = 'Réponds uniquement avec du JSON valide, sans Markdown ni explication.';
 const parse = (value: string) => { try { return JSON.parse(value) as Record<string, unknown>; } catch { return undefined; } };
 const has = (...terms: string[]): Check => (answer) => terms.every((term) => answer.toLocaleLowerCase('fr-FR').includes(term.toLocaleLowerCase('fr-FR'))) ? undefined : `doit contenir : ${terms.join(', ')}`;
 const jsonCheck = (predicate: (value: Record<string, unknown>) => boolean, description: string): Check => (answer) => { const value = parse(answer); return value && predicate(value) ? undefined : description; };
 const target = (value: string): Check => jsonCheck((v) => v.target === value && Number(v.confidence) >= .7, `target ${value} avec confidence >= 0.7 attendu`);
-const route = (request: string, expected: string) => `${onlyJson}\nRetourne {"target":"todo|calendar|mail|spotify|weather|executor|general","confidence":0..1}.\nDemande : « ${request} »`;
+const route = (request: string) => `${onlyJson}\nRetourne {"target":"todo|calendar|mail|spotify|weather|executor|general","confidence":0..1}.\nDemande : « ${request} »`;
 
 const cases: Case[] = [
-  { id: 'route_todo_add', area: 'Routage', prompt: route('Ajoute acheter du lait à ma liste.', 'todo'), check: target('todo') },
-  { id: 'route_todo_list', area: 'Routage', prompt: route('Quelles tâches me restent-il ?', 'todo'), check: target('todo') },
-  { id: 'route_calendar_add', area: 'Routage', prompt: route('Bloque mercredi 15 h pour le kiné.', 'calendar'), check: target('calendar') },
-  { id: 'route_calendar_read', area: 'Routage', prompt: route('Quel est mon prochain rendez-vous ?', 'calendar'), check: target('calendar') },
-  { id: 'route_mail_send', area: 'Routage', prompt: route('Envoie à Léa que je serai en retard.', 'mail'), check: target('mail') },
-  { id: 'route_mail_read', area: 'Routage', prompt: route('Lis-moi mes e-mails non lus.', 'mail'), check: target('mail') },
-  { id: 'route_music', area: 'Routage', prompt: route('Mets du jazz calme sur Spotify.', 'spotify'), check: target('spotify') },
-  { id: 'route_weather', area: 'Routage', prompt: route('Est-ce qu’il pleuvra demain à Lille ?', 'weather'), check: target('weather') },
-  { id: 'route_home', area: 'Routage', prompt: route('Baisse le chauffage du salon à 19 degrés.', 'executor'), check: target('executor') },
-  { id: 'route_general', area: 'Routage', prompt: route('Explique la différence entre RAM et stockage.', 'general'), check: target('general') },
+  { id: 'route_todo_add', area: 'Routage', prompt: route('Ajoute acheter du lait à ma liste.'), check: target('todo') },
+  { id: 'route_todo_list', area: 'Routage', prompt: route('Quelles tâches me restent-il ?'), check: target('todo') },
+  { id: 'route_calendar_add', area: 'Routage', prompt: route('Bloque mercredi 15 h pour le kiné.'), check: target('calendar') },
+  { id: 'route_calendar_read', area: 'Routage', prompt: route('Quel est mon prochain rendez-vous ?'), check: target('calendar') },
+  { id: 'route_mail_send', area: 'Routage', prompt: route('Envoie à Léa que je serai en retard.'), check: target('mail') },
+  { id: 'route_mail_read', area: 'Routage', prompt: route('Lis-moi mes e-mails non lus.'), check: target('mail') },
+  { id: 'route_music', area: 'Routage', prompt: route('Mets du jazz calme sur Spotify.'), check: target('spotify') },
+  { id: 'route_weather', area: 'Routage', prompt: route('Est-ce qu’il pleuvra demain à Lille ?'), check: target('weather') },
+  { id: 'route_home', area: 'Routage', prompt: route('Baisse le chauffage du salon à 19 degrés.'), check: target('executor') },
+  { id: 'route_general', area: 'Routage', prompt: route('Explique la différence entre RAM et stockage.'), check: target('general') },
   { id: 'extract_todo', area: 'Extraction', prompt: `${onlyJson}\nAujourd’hui est 2026-08-23. Extrait {"title":string,"date":"YYYY-MM-DD","time":"HH:MM"}. « Rappelle-moi d’appeler Paul demain à 9 h 30. »`, check: jsonCheck((v) => /paul/i.test(String(v.title)) && v.date === '2026-08-24' && v.time === '09:30', 'Paul, 2026-08-24, 09:30 attendus') },
   { id: 'extract_relative_date', area: 'Extraction', prompt: `${onlyJson}\nAujourd’hui est dimanche 2026-08-23. Extrait {"title":string,"date":"YYYY-MM-DD","time":"HH:MM"}. « Préviens-moi vendredi prochain à 18h de sortir les poubelles. »`, check: jsonCheck((v) => /poubelle/i.test(String(v.title)) && v.date === '2026-08-28' && v.time === '18:00', 'poubelles, 2026-08-28, 18:00 attendus') },
   { id: 'extract_calendar', area: 'Extraction', prompt: `${onlyJson}\nAujourd’hui est 2026-08-23. Extrait {"title":string,"date":"YYYY-MM-DD","start":"HH:MM","duration_minutes":number}. « Réunion projet le 2 septembre de 14h à 15h30. »`, check: jsonCheck((v) => /réunion|projet/i.test(String(v.title)) && v.date === '2026-09-02' && v.start === '14:00' && v.duration_minutes === 90, 'réunion 2026-09-02 14:00 / 90 min attendue') },
@@ -48,7 +53,7 @@ const cases: Case[] = [
 ];
 
 function env() {
-  return Object.fromEntries(readFileSync(resolve(process.cwd(), '.env'), 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap((l) => { const i = l.indexOf('='); return i > 0 ? [[l.slice(0, i), l.slice(i + 1).replace(/^['\"]|['\"]$/g, '')]] : []; }));
+  return Object.fromEntries(readFileSync(resolve(process.cwd(), '.env'), 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).flatMap((l) => { const i = l.indexOf('='); return i > 0 ? [[l.slice(0, i), l.slice(i + 1).replace(/^['"]|['"]$/g, '')]] : []; }));
 }
 
 async function ask(mode: Mode, prompt: string, tokens = 180) {
@@ -58,8 +63,8 @@ async function ask(mode: Mode, prompt: string, tokens = 180) {
   const model = mode === 'ollama_fast' ? 'qwen3:4b-instruct' : mode === 'ollama_deep' ? 'qwen3:8b' : (vars.OPENAI_MODEL ?? 'gpt-4o-mini');
   const body = native ? { model, messages: [{ role: 'user', content: prompt }], stream: false, think: false, options: { temperature: 0, num_predict: tokens } } : { model, messages: [{ role: 'user', content: prompt }], temperature: 0, max_tokens: tokens };
   const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(native || mode === 'ollama_fast' ? { Authorization: 'Bearer ollama' } : { Authorization: `Bearer ${vars.OPENAI_API_KEY}` }) }, body: JSON.stringify(body) });
-  const data = await response.json() as any;
-  if (!response.ok) throw new Error(data?.error?.message ?? `HTTP ${response.status}`);
+  const data = await response.json() as LlmResponse;
+  if (!response.ok) throw new Error(data.error?.message ?? `HTTP ${response.status}`);
   return { answer: (native ? data.message?.content : data.choices?.[0]?.message?.content)?.trim() ?? '', ms: Math.round(performance.now() - started), model };
 }
 

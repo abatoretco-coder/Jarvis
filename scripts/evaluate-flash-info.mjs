@@ -1,10 +1,12 @@
 /** Product-level check for the exact Flash Info route used by Jarvis Desktop. */
+import process from 'node:process';
+
 const baseUrl = (process.env.JARVIS_SELF_URL || 'http://127.0.0.1:8090').replace(/\/$/u, '');
 const apiKey = (process.env.API_KEYS || process.env.API_KEY || '').split(',')[0].trim();
 const headers = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
 const promotional = /\b(blink|amazon|promo(?:tion)?|sonnette|code promo|bon plan)\b/iu;
 
-const itemsResponse = await fetch(`${baseUrl}/v1/news/items?geoFilter=world&tab=world&sectors=general`, { headers });
+const itemsResponse = await globalThis.fetch(`${baseUrl}/v1/news/items?geoFilter=world&tab=world&sectors=general`, { headers });
 if (!itemsResponse.ok) throw new Error(`items_http_${itemsResponse.status}`);
 const itemsPayload = await itemsResponse.json();
 const items = itemsPayload.items || [];
@@ -17,7 +19,7 @@ if (items.some((item) => /\b(the|and|with|that|this|from|into|teachers)\b/iu.tes
   throw new Error('untranslated_summary_leaked');
 }
 
-const summaryResponse = await fetch(`${baseUrl}/v1/news/summary`, {
+const summaryResponse = await globalThis.fetch(`${baseUrl}/v1/news/summary`, {
   method: 'POST',
   headers: { ...headers, 'content-type': 'application/json' },
   body: JSON.stringify({
@@ -38,7 +40,7 @@ if (summaryBullets.length < 3) throw new Error('summary_insufficient_facts');
 if (summaryBullets.some((line) => !/\([^()]{2,80}\)/u.test(line))) throw new Error('summary_unattributed_fact');
 if (summaryBullets.some((line) => !/[.!?][^.!?]*\)?$/u.test(line))) throw new Error('summary_incomplete_fact');
 
-console.log(JSON.stringify({
+globalThis.console.log(JSON.stringify({
   ok: true,
   enrichedEvidence: items.length,
   sources: [...new Set(items.map((item) => item.source))],

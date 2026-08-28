@@ -10,6 +10,7 @@ function makeEnv(overrides: Record<string, string | undefined> = {}): Env {
   return loadEnv({
     REQUIRE_API_KEY: 'false',
     LOG_LEVEL: 'silent',
+    LLM_PROVIDER: 'openai',
     PROACTIVE_CONTEXT_CACHE_ENABLED: 'true',
     PROACTIVE_CONTEXT_CACHE_AGENTS: 'weather,home,nas,spotify',
     ...overrides,
@@ -335,8 +336,8 @@ describe('ProactiveContextCache', () => {
   it('builds a news headline prepared answer from Helix items', async () => {
     const fetchMock = jest.fn(async (..._args: unknown[]) => new Response(JSON.stringify({
       items: [
-        { title: 'Titre A', source: 'Source A', link: 'https://example.test/a' },
-        { title: 'Titre B', source: 'Source B' },
+        { title: 'Titre A', summary: 'Titre A apporte un fait vérifié suffisamment détaillé pour le flash info.', source: 'Source A', link: 'https://example.test/a' },
+        { title: 'Titre B', summary: 'Titre B fournit également un résumé factuel exploitable et vérifiable.', source: 'Source B' },
       ],
     }), {
       status: 200,

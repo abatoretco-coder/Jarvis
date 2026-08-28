@@ -1,6 +1,6 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -80,6 +80,12 @@ function itemResponse(id: string, title: string) {
 
 describe('Culture through /v1/ingest', () => {
   let app: FastifyInstance;
+
+  test('keeps a single Culture dispatch block after merge reconciliation', () => {
+    const ingestSource = readFileSync(resolve(process.cwd(), 'src/routes/ingest.ts'), 'utf8');
+    expect(ingestSource.match(/const inferredCulture = inferCultureRequest/gu)).toHaveLength(1);
+    expect(ingestSource.match(/selectedResult: referencedCultureResult/gu)).toHaveLength(1);
+  });
 
   beforeEach(() => {
     app = Fastify({ logger: false });

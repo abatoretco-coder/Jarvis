@@ -1,5 +1,5 @@
-import { getSpotifyResponse } from '../deterministic/spotifyResponses';
 import { completeOllamaChat, isOllamaBaseUrl } from '../../ollamaChat';
+import { getSpotifyResponse } from '../deterministic/spotifyResponses';
 import { RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG } from './openAiConfig';
 import { resolveRenderPolicy } from './policies';
 import { buildDomainRephraseSystemPrompt } from './prompts/domainRephraseSystemPrompt';

@@ -1,10 +1,10 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { AsyncSnapshotCache } from '../cache/AsyncSnapshotCache';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import type { Env } from '../env';
 import type { HomeAssistantClient } from '../haClient';
 import type { NasStatusClient } from '../nas/NasStatusClient';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import {
   buildAgendaFromGoogle,
   buildMailSection,

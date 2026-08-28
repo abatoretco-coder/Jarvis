@@ -3,6 +3,15 @@ import { describe, expect, test } from '@jest/globals';
 import { loadEnv } from '../src/env';
 
 describe('LLM provider configuration', () => {
+  test('uses Ollama by default without configuring an OpenAI fallback', () => {
+    const env = loadEnv({ REQUIRE_API_KEY: 'false' });
+
+    expect(env.LLM_PROVIDER).toBe('ollama');
+    expect(env.OPENAI_API_KEY).toBe('ollama');
+    expect(env.LLM_FALLBACK_OPENAI_API_KEY).toBeUndefined();
+    expect(env.LLM_FALLBACK_OPENAI_BASE_URL).toBeUndefined();
+  });
+
   test('maps Ollama to the existing OpenAI-compatible chat configuration', () => {
     const env = loadEnv({
       REQUIRE_API_KEY: 'false',

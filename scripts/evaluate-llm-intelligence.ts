@@ -28,7 +28,7 @@ function loadDotEnv(): Record<string, string> {
       .filter((line) => line && !line.startsWith('#'))
       .flatMap((line) => {
         const index = line.indexOf('=');
-        return index > 0 ? [[line.slice(0, index), line.slice(index + 1).replace(/^['\"]|['\"]$/g, '')]] : [];
+        return index > 0 ? [[line.slice(0, index), line.slice(index + 1).replace(/^['"]|['"]$/g, '')]] : [];
       }),
   );
 }

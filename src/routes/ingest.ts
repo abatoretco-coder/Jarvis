@@ -1881,68 +1881,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    const inferredCulture = inferCultureRequest(assistantInputText);
-    const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
-    const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
-    const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
-      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
-    if (parsed.data.domain === 'culture' || inferredCulture || referencedResult?.entityType === 'agora.item' || contextualCultureRequest) {
-      const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
-      const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
-        ? parsedCultureAction.data
-        : referencedResult
-          ? 'get_item'
-          : contextualCultureRequest
-            ? 'recommend_candidates'
-            : inferredCulture?.action ?? 'discover';
-      const requestedSlots = {
-        ...(inferredCulture?.slots ?? {}),
-        ...(parsed.data.slots ?? {}),
-        ...(referencedResult ? { itemId: referencedResult.entityId } : {}),
-        ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
-      };
-      try {
-        const culture = await executeCulture({
-          action: requestedAction,
-          slots: requestedSlots,
-          text: assistantInputText,
-          threadId: effectiveThreadId,
-          clientContext: parsed.data.clientContext,
-          env: deps.env,
-          resultSets: resultSetRepository,
-        });
-        const responseText = voiceEnabled
-          ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
-          : culture.text;
-        await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
-        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
-        return reply.code(200).send({
-          threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
-          replyMeta: {
-            kind: 'culture',
-            source: 'agora',
-            routeKey: `culture.${requestedAction}`,
-            semanticDecision: referencedResult ? 'deterministic_reference' : 'activated',
-          },
-        });
-      } catch (error) {
-        app.log.warn({ threadId: effectiveThreadId, requestId, error }, 'culture_agent_failed');
-        if (error instanceof z.ZodError) {
-          return reply.code(400).send({ error: 'invalid_culture_contract', issues: error.issues });
-        }
-        if (error instanceof Error && error.message === 'agora_not_configured') {
-          return reply.code(503).send({ error: 'agora_not_configured' });
-        }
-        if (error instanceof AgoraClientError) {
-          if (error.code === 'timeout') return reply.code(504).send({ error: 'agora_timeout' });
-          if (error.code === 'unauthorized') return reply.code(502).send({ error: 'agora_unauthorized' });
-          if (error.code === 'invalid_response') return reply.code(502).send({ error: 'agora_invalid_response' });
-          if (error.code === 'unavailable') return reply.code(503).send({ error: 'agora_unavailable' });
-        }
-        return reply.code(502).send({ error: 'agora_unavailable' });
-      }
-    }
+    const toDeterministicHaFailureMessage = (): string => (
+      'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
+    );
 
     const inferredCulture = inferCultureRequest(assistantInputText);
     const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
@@ -3645,26 +3586,46 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       // No valid targets above threshold → HA general fallback
     }
 
-    // ── General local fallback ────────────────────────────────────────────────
-    // General discussion is not a home-automation task. Keep it on the local
-    // Ollama runtime so a missing/unauthorized HA conversation agent can never
-    // turn a greeting into an operational error.
+    // ── General conversation fallback ────────────────────────────────────────
+    // Ollama is the nominal local runtime. The legacy OpenAI profile keeps the
+    // historical HA conversation fallback as dormant compatibility.
     if (assistantText === undefined) {
-      try {
-        const t0 = Date.now();
-        assistantText = await answerGeneralConversationWithOllama({
-          text: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
-          baseUrl: deps.env.OLLAMA_BASE_URL,
-          model: deps.env.OLLAMA_MODEL ?? deps.env.OPENAI_MODEL_ROUTER,
-          timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
-        });
-        app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_ollama_general_done');
-        responseDomain = 'general';
-      } catch (err) {
-        app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_ollama_general_failed');
-        assistantText = 'Je suis là. Que puis-je faire pour toi ?';
-        responseDomain = 'general';
-        gracefulFallback = true;
+      if (deps.env.LLM_PROVIDER === 'openai') {
+        try {
+          assistantText = await conversationService.callHomeAssistantConversation(
+            applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+            effectiveThreadId,
+            undefined,
+            generalAgentId,
+          );
+          if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
+            assistantText = toDeterministicHaFailureMessage();
+            gracefulFallback = true;
+          }
+          responseDomain = 'general';
+        } catch (err) {
+          app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_home_assistant_call_failed');
+          assistantText = toDeterministicHaFailureMessage();
+          responseDomain = 'general';
+          gracefulFallback = true;
+        }
+      } else {
+        try {
+          const t0 = Date.now();
+          assistantText = await answerGeneralConversationWithOllama({
+            text: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+            baseUrl: deps.env.OLLAMA_BASE_URL,
+            model: deps.env.OLLAMA_MODEL ?? deps.env.OPENAI_MODEL_ROUTER,
+            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+          });
+          app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_ollama_general_done');
+          responseDomain = 'general';
+        } catch (err) {
+          app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_ollama_general_failed');
+          assistantText = 'Je suis là. Que puis-je faire pour toi ?';
+          responseDomain = 'general';
+          gracefulFallback = true;
+        }
       }
     }
 

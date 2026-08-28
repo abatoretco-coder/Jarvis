@@ -6,6 +6,11 @@ import { CAPABILITY_REGISTRY } from '../src/capabilities/capabilityRegistry';
 type Mode = 'ollama_fast' | 'ollama_deep' | 'openai';
 type Sample = { target: string; text: string };
 type Result = { target: string; text: string; actual: string; ok: boolean; ms: number };
+type LlmResponse = {
+  error?: { message?: string };
+  message?: { content?: string };
+  choices?: Array<{ message?: { content?: string } }>;
+};
 
 const samples: Sample[] = [
   ['spotify.pause','mets la musique en pause'], ['spotify.play','reprends la musique'], ['spotify.next','passe au morceau suivant'], ['spotify.previous','reviens au morceau précédent'], ['spotify.now_playing','quel titre est en cours ?'], ['spotify.list_devices','liste mes appareils Spotify'], ['spotify.clear_queue','vide la file d’attente Spotify'], ['spotify.search','cherche Daft Punk sur Spotify'], ['spotify.search_and_play','joue Highway to Hell'], ['spotify.queue_add','ajoute Bohemian Rhapsody à la file'], ['spotify.transfer','transfère la musique sur le salon'], ['spotify.add_to_playlist','ajoute ce titre à ma playlist Rock'], ['spotify.volume_set','mets le volume Spotify à 30 %'], ['spotify.like_track','ajoute ce titre à mes favoris'],
@@ -16,7 +21,7 @@ const samples: Sample[] = [
 ].map(([target, text]) => ({ target, text }));
 
 const catalog = CAPABILITY_REGISTRY.map((capability) => `${capability.agent}.${capability.action}`).join(', ');
-function env() { return Object.fromEntries(readFileSync(resolve(process.cwd(), '.env'), 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')).flatMap((line) => { const i = line.indexOf('='); return i > 0 ? [[line.slice(0, i), line.slice(i + 1).replace(/^['\"]|['\"]$/g, '')]] : []; })); }
+function env() { return Object.fromEntries(readFileSync(resolve(process.cwd(), '.env'), 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')).flatMap((line) => { const i = line.indexOf('='); return i > 0 ? [[line.slice(0, i), line.slice(i + 1).replace(/^['"]|['"]$/g, '')]] : []; })); }
 
 async function ask(mode: Mode, prompt: string) {
   const vars = env(); const native = mode === 'ollama_deep'; const started = performance.now();
@@ -24,7 +29,7 @@ async function ask(mode: Mode, prompt: string) {
   const model = mode === 'ollama_fast' ? 'qwen3:4b-instruct' : native ? 'qwen3:8b' : (vars.OPENAI_MODEL ?? 'gpt-4o-mini');
   const body = native ? { model, messages: [{ role: 'user', content: prompt }], stream: false, think: false, options: { temperature: 0, num_predict: 30 } } : { model, messages: [{ role: 'user', content: prompt }], temperature: 0, max_tokens: 30 };
   const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: native || mode === 'ollama_fast' ? 'Bearer ollama' : `Bearer ${vars.OPENAI_API_KEY}` }, body: JSON.stringify(body) });
-  const data = await response.json() as any; if (!response.ok) throw new Error(data?.error?.message ?? `HTTP ${response.status}`);
+  const data = await response.json() as LlmResponse; if (!response.ok) throw new Error(data.error?.message ?? `HTTP ${response.status}`);
   return { content: (native ? data.message?.content : data.choices?.[0]?.message?.content)?.trim() ?? '', ms: Math.round(performance.now() - started) };
 }
 

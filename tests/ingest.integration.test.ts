@@ -60,6 +60,7 @@ function makeEnv(dbPath: string, overrides: Partial<Env> = {}): Env {
     HA_CONVERSATION_MIN_INTERVAL_MS: 0,
     HA_CONVERSATION_RETRY_COUNT: 0,
     HA_CONVERSATION_RETRY_DELAY_MS: 0,
+    LLM_PROVIDER: 'openai',
     OPENAI_API_KEY: undefined,
     OPENAI_BASE_URL: 'https://api.openai.com/v1',
     OPENAI_MODEL_ROUTER: 'gpt-4o-mini',
@@ -118,7 +119,7 @@ function nonTitleFetchCalls(fetchMock: { mock: { calls: unknown[][] } }): unknow
     try {
       const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
       const systemPrompt = parsed.messages?.[0]?.content ?? '';
-      return !systemPrompt.includes('Donne un titre');
+      return !systemPrompt.includes('titre francais factuel') && !systemPrompt.includes('Donne un titre');
     } catch {
       return true;
     }
@@ -433,8 +434,8 @@ describe('/v1/ingest integration', () => {
 
     const secondPayload = second.json() as { threadId: string };
     expect(secondPayload.threadId).toBe('thread-b');
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.conversation_id).toBe('thread-b');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.conversation_id).toBe('thread-b');
   });
 
   it('weather direct: simple local weather question is deterministic without OpenAI call', async () => {
@@ -3203,7 +3204,7 @@ describe('/v1/ingest integration', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'thread-after-spotify',
-        text: 'bonjour',
+        text: 'explique-moi les nouveautés',
         clientContext: { channel: 'desktop' },
       },
     });

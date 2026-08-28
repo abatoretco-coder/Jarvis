@@ -1,5 +1,5 @@
-import { toSingleParagraphPlainText } from './plainText';
 import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { toSingleParagraphPlainText } from './plainText';
 import {
   OLLAMA_SYSTEM_PROMPT_SUMMARIZER,
   OLLAMA_TITLE_SYSTEM_PROMPT,
