@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { toSingleParagraphPlainText } from '../conversation/plainText';
 import type { AppDeps } from '../server';
 
 function optionalTrimmedString(max: number) {
@@ -55,7 +54,7 @@ const newsSummaryBodySchema = z.object({
       snippet: optionalTrimmedString(600),
       publishedAt: optionalTrimmedString(40),
     })
-  ).min(3).max(18),
+  ).min(2).max(18),
 });
 
 type NewsItemsQuery = {
@@ -80,6 +79,25 @@ type HelixSummaryResponse = {
   selection?: unknown;
   generatedAt?: string;
 };
+
+function normalizeNewsSummaryText(input: string): string {
+  const lines = input
+    .split(/\r?\n+/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+  return lines
+    .map((line) => {
+      if (/^#{1,6}\s*/u.test(line)) {
+        const heading = line.replace(/^#{1,6}\s*/u, '').replace(/[#:*]+$/u, '').trim();
+        return heading ? `## ${heading}` : '';
+      }
+      const fact = line.replace(/^(?:[-*•·]+|\d+[.)])\s*/u, '').trim();
+      return fact ? `- ${fact}` : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
 
 function buildHelixHeaders(deps: AppDeps, input: { contentType?: string; requestId: string; correlationId?: string }): Record<string, string> {
   return {
@@ -166,7 +184,7 @@ export function registerNewsSummaryRoute(app: FastifyInstance, deps: AppDeps): v
         body: JSON.stringify(parsed.data),
       }) as HelixSummaryResponse;
 
-      const text = typeof payload.text === 'string' ? toSingleParagraphPlainText(payload.text) : '';
+      const text = typeof payload.text === 'string' ? normalizeNewsSummaryText(payload.text) : '';
       if (!text) return reply.code(502).send({ error: 'helix_news_summary_empty' });
 
       return reply.code(200).send({

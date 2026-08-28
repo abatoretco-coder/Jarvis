@@ -2,6 +2,9 @@
 
 FROM node:20-alpine AS base
 WORKDIR /app
+# Use Node headers bundled in the official image when native modules compile.
+# This avoids a separate header download during image builds.
+ENV npm_config_nodedir=/usr/local
 
 FROM base AS deps
 RUN apk add --no-cache python3 make g++
@@ -25,6 +28,7 @@ RUN apk add --no-cache ffmpeg su-exec
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./package.json
+COPY scripts/evaluate-flash-info.mjs ./scripts/evaluate-flash-info.mjs
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8090

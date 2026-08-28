@@ -26,6 +26,7 @@ import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
 import {
   type AgentRouteEntry,
+  LOCAL_WEATHER_ROUTER_AGENT_ID,
   parseAgentMap,
   type RouterResult,
   type RouterTarget,
@@ -53,6 +54,9 @@ import {
   type VoiceResponseMode,
   type VoiceThreadState,
 } from '../conversation/voiceUx';
+import { AgoraClientError } from '../culture/AgoraClient';
+import { cultureActionSchema } from '../culture/contracts';
+import { executeCulture, inferCultureRequest } from '../culture/cultureAgent';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -63,7 +67,9 @@ import {
   planMailAgentAction,
 } from '../mail/mailAgent';
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
+import { ConversationResultSetRepository } from '../resultSets/ConversationResultSetRepository';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -84,6 +90,7 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
+import { transcribeWithWyoming } from '../stt/wyomingClient';
 import { formatParisTime } from '../time/parisTime';
 import {
   callTodoAgent,
@@ -124,8 +131,8 @@ const ingestSchema = z.object({
   clientContext: z.record(z.string(), z.unknown()).optional(),
   correlation_id: z.string().optional(),
   user_id: z.string().optional(),
-  domain: z.literal('spotify').optional(),
-  action: spotifyActionSchema.optional(),
+  domain: z.enum(['spotify', 'culture']).optional(),
+  action: z.union([spotifyActionSchema, cultureActionSchema]).optional(),
   slots: z.record(z.string(), z.unknown()).optional(),
   context: z.record(z.string(), z.unknown()).optional(),
   understanding: z
@@ -152,6 +159,10 @@ const responseSchema = z.object({
     routeKey: z.string().min(1).optional(),
     semanticDecision: z.string().min(1).optional(),
     fallbackReason: z.string().min(1).optional(),
+    llmProvider: z.enum(['ollama', 'openai']).optional(),
+    llmModel: z.string().min(1).optional(),
+    llmLatencyMs: z.number().int().nonnegative().optional(),
+    llmFallbackReason: z.string().min(1).optional(),
     proposalId: z.string().min(1).optional(),
     pendingAction: z.string().min(1).optional(),
     contextCache: z.object({
@@ -209,6 +220,22 @@ function normalizeIntentText(value: string): string {
     .trim();
 }
 
+/**
+ * Avoid spending an LLM routing pass on social small talk.  Besides being
+ * deterministic, this keeps interactive voice latency low when Ollama is
+ * temporarily busy with a longer Helix or conversation request.
+ */
+function simpleConversationalReply(text: string): string | undefined {
+  const normalized = normalizeIntentText(text);
+  const isGreeting = /\b(salut|bonjour|bonsoir|hello|coucou|hey)\b/.test(normalized);
+  const asksWellbeing = /\b(comment ca va|ca va|tu vas bien|comment vas tu|quoi de neuf)\b/.test(normalized);
+  if (isGreeting && asksWellbeing) return 'Salut ! Je vais bien, merci. Et toi, comment ça va ?';
+  if (/^(salut|bonjour|bonsoir|hello|coucou|hey)(\s+jarvis)?[!., ]*$/u.test(normalized)) {
+    return 'Salut ! Je suis là. Que puis-je faire pour toi ?';
+  }
+  return undefined;
+}
+
 function isLikelyCalendarIntent(text: string): boolean {
   const t = normalizeIntentText(text);
   if (!t) return false;
@@ -247,6 +274,37 @@ function normalizeClientChannel(value: unknown): string | undefined {
 function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string {
   if (!clientChannel?.includes('voice-hub')) return text;
   return `${text}\n\nInstruction: Réponds strictement en français.`;
+}
+
+/** Ordinary chat must stay local and must never depend on Home Assistant. */
+async function answerGeneralConversationWithOllama(params: {
+  text: string;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+}): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), params.timeoutMs);
+  try {
+    const content = await completeOllamaChat({
+      baseUrl: params.baseUrl,
+      model: params.model,
+      temperature: 0.35,
+      numPredict: 180,
+      messages: [
+          {
+            role: 'system',
+            content: 'Tu es Jarvis, un assistant personnel francophone. Réponds naturellement, brièvement et utilement. Ne mentionne jamais Home Assistant, les agents, les conteneurs ou le routage. N’invente aucune action sur des appareils.',
+          },
+          { role: 'user', content: params.text },
+      ],
+      signal: controller.signal,
+    });
+    if (!content) throw new Error('ollama_general_empty_response');
+    return toSingleParagraphPlainText(content);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
@@ -290,6 +348,15 @@ async function synthesizeWeatherReplyWithOpenAi(params: {
   const userPrompt = buildWeatherUserPrompt(params.userText, params.weather);
 
   try {
+    if (isOllamaBaseUrl(params.openAiBaseUrl)) {
+      const content = await completeOllamaChat({
+        baseUrl: params.openAiBaseUrl, model: params.model, temperature: 0.2, numPredict: 220,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], signal: controller.signal,
+      });
+      if (!content) throw new Error('weather_ollama_empty_response');
+      params.log?.info({ model: params.model, content_len: content.length }, 'weather_ollama_done');
+      return toSingleParagraphPlainText(content);
+    }
     const response = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -486,7 +553,8 @@ async function transcribeWithOpenAi(params: {
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_STT_TIMEOUT_MS);
-  const response = await fetch(`${params.env.OPENAI_BASE_URL.replace(/\/$/, '')}/audio/transcriptions`, {
+  const sttBaseUrl = params.env.OPENAI_STT_BASE_URL?.trim() || params.env.OPENAI_BASE_URL;
+  const response = await fetch(`${sttBaseUrl.replace(/\/$/, '')}/audio/transcriptions`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${openAiApiKey}`,
@@ -790,6 +858,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
   const pendingMutationRepository = new PendingMutationRepository(db);
+  const resultSetRepository = new ConversationResultSetRepository(db);
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -817,10 +886,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     hotWindowK: deps.env.LIMIT_K,
     minDeltaM: deps.env.LIMIT_M,
     triggerEveryInteractions: 10,
-    openAiApiKey: deps.env.OPENAI_API_KEY,
-    openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-    openAiModelSummary: deps.env.OPENAI_MODEL_SUMMARY,
-    openAiTimeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+    llmApiKey: deps.env.OPENAI_API_KEY,
+    llmBaseUrl: deps.env.OPENAI_BASE_URL,
+    llmModel: deps.env.OPENAI_MODEL_SUMMARY,
+    llmTimeoutMs: deps.env.OPENAI_TIMEOUT_MS,
   });
 
   const conversationService = new ConversationService(threadRepository, messageRepository, {
@@ -1453,7 +1522,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
     }
 
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) {
+    const rawText = parsed.data.text ?? '';
+    const normalizedRawText = normalizeIntentText(rawText);
+    const existingCultureResultSet = resultSetRepository.findActive(parsed.data.threadId)?.sourceAgent === 'culture';
+    const resultSetFollowup = existingCultureResultSet
+      && /\b(premier|premiere|deuxieme|second|seconde|troisieme|lui|celui la|celle la|parmi ceux la|lequel|laquelle)\b/u.test(normalizedRawText);
+    const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
+    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
       return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
@@ -1806,9 +1881,68 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    const toDeterministicHaFailureMessage = (): string => (
-      'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
-    );
+    const inferredCulture = inferCultureRequest(assistantInputText);
+    const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
+    const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
+      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
+    if (parsed.data.domain === 'culture' || inferredCulture || referencedResult?.entityType === 'agora.item' || contextualCultureRequest) {
+      const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
+      const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
+        ? parsedCultureAction.data
+        : referencedResult
+          ? 'get_item'
+          : contextualCultureRequest
+            ? 'recommend_candidates'
+            : inferredCulture?.action ?? 'discover';
+      const requestedSlots = {
+        ...(inferredCulture?.slots ?? {}),
+        ...(parsed.data.slots ?? {}),
+        ...(referencedResult ? { itemId: referencedResult.entityId } : {}),
+        ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
+      };
+      try {
+        const culture = await executeCulture({
+          action: requestedAction,
+          slots: requestedSlots,
+          text: assistantInputText,
+          threadId: effectiveThreadId,
+          clientContext: parsed.data.clientContext,
+          env: deps.env,
+          resultSets: resultSetRepository,
+        });
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
+          : culture.text;
+        await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        return reply.code(200).send({
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'culture',
+            source: 'agora',
+            routeKey: `culture.${requestedAction}`,
+            semanticDecision: referencedResult ? 'deterministic_reference' : 'activated',
+          },
+        });
+      } catch (error) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, error }, 'culture_agent_failed');
+        if (error instanceof z.ZodError) {
+          return reply.code(400).send({ error: 'invalid_culture_contract', issues: error.issues });
+        }
+        if (error instanceof Error && error.message === 'agora_not_configured') {
+          return reply.code(503).send({ error: 'agora_not_configured' });
+        }
+        if (error instanceof AgoraClientError) {
+          if (error.code === 'timeout') return reply.code(504).send({ error: 'agora_timeout' });
+          if (error.code === 'unauthorized') return reply.code(502).send({ error: 'agora_unauthorized' });
+          if (error.code === 'invalid_response') return reply.code(502).send({ error: 'agora_invalid_response' });
+          if (error.code === 'unavailable') return reply.code(503).send({ error: 'agora_unavailable' });
+        }
+        return reply.code(502).send({ error: 'agora_unavailable' });
+      }
+    }
 
     if (parsed.data.domain === 'spotify' && parsed.data.action) {
       const explicitSpotifyPayload = ingestSpotifyRequestSchema.safeParse({
@@ -2178,7 +2312,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale', key: 'spotify' as const }
       : null;
     const weatherEntry = deps.ha
-      ? { agentId: 'weather', hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes', key: 'weather' }
+      ? { agentId: 'weather', routerId: LOCAL_WEATHER_ROUTER_AGENT_ID, hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes. Jamais une ville externe.', key: 'weather' }
       : null;
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
     const executorsEntry = resolveExecutorsEntry(agentEntries, generalAgentId);
@@ -2191,6 +2325,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     let responseDomain: VoiceResponseDomain = 'general';
     let searchSources: string[] = [];
     let gracefulFallback = false;
+
+    const directConversationReply = simpleConversationalReply(assistantInputText);
+    if (directConversationReply) {
+      assistantText = directConversationReply;
+      app.log.info({ threadId, requestId }, 'ingest_simple_conversation_fast_path');
+    }
 
     if (!routerEnabled) {
       app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
@@ -2968,9 +3108,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               openAiApiKey: deps.env.OPENAI_API_KEY!,
               openAiBaseUrl: deps.env.OPENAI_BASE_URL,
               model: deps.env.OPENAI_MODEL_ROUTER,
-              timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+              timeoutMs: deps.env.LLM_PROVIDER === 'hybrid' ? deps.env.LLM_LOCAL_ROUTER_TIMEOUT_MS : deps.env.ROUTER_TIMEOUT_MS,
               confidenceThreshold: threshold,
               generalAgentId,
+              provider: deps.env.LLM_PROVIDER === 'openai' ? 'openai' : 'ollama',
+              ...(deps.env.LLM_PROVIDER === 'hybrid' && deps.env.LLM_FALLBACK_OPENAI_API_KEY && deps.env.LLM_FALLBACK_OPENAI_BASE_URL && deps.env.LLM_FALLBACK_OPENAI_MODEL_ROUTER ? {
+                fallback: {
+                  openAiApiKey: deps.env.LLM_FALLBACK_OPENAI_API_KEY,
+                  openAiBaseUrl: deps.env.LLM_FALLBACK_OPENAI_BASE_URL,
+                  model: deps.env.LLM_FALLBACK_OPENAI_MODEL_ROUTER,
+                  timeoutMs: deps.env.LLM_FALLBACK_OPENAI_TIMEOUT_MS,
+                },
+              } : {}),
               log: app.log,
             },
           })
@@ -3429,30 +3578,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       // No valid targets above threshold → HA general fallback
     }
 
-    // ── General HA fallback (only when router failed or produced no usable result) ─
+    // ── General local fallback ────────────────────────────────────────────────
+    // General discussion is not a home-automation task. Keep it on the local
+    // Ollama runtime so a missing/unauthorized HA conversation agent can never
+    // turn a greeting into an operational error.
     if (assistantText === undefined) {
       try {
-        app.log.info({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_fallback');
-        const haText = await conversationService.callHomeAssistantConversation(
-          applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
-          effectiveThreadId,
-          undefined,
-          generalAgentId,
-        );
-        if (/^\s*OUT_OF_SCOPE\s*$/i.test(haText)) {
-          app.log.warn({ threadId, requestId, agent: generalAgentId }, 'ingest_ha_general_out_of_scope');
-          assistantText = toDeterministicHaFailureMessage();
-          gracefulFallback = true;
-        } else {
-          assistantText = haText;
-        }
+        const t0 = Date.now();
+        assistantText = await answerGeneralConversationWithOllama({
+          text: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+          baseUrl: deps.env.OLLAMA_BASE_URL,
+          model: deps.env.OLLAMA_MODEL ?? deps.env.OPENAI_MODEL_ROUTER,
+          timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+        });
+        app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_ollama_general_done');
         responseDomain = 'general';
       } catch (err) {
-        app.log.warn(
-          { threadId, requestId, correlation_id: correlationId || undefined, err },
-          'ingest_home_assistant_call_failed'
-        );
-        assistantText = toDeterministicHaFailureMessage();
+        app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_ollama_general_failed');
+        assistantText = 'Je suis là. Que puis-je faire pour toi ?';
         responseDomain = 'general';
         gracefulFallback = true;
       }
@@ -3515,6 +3658,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           pendingAction: `${activeProposalForResponse.agent}.${activeProposalForResponse.action}`,
         } : {}),
         ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
+        ...(routerResult.status === 'fulfilled' ? {
+          llmProvider: routerResult.value.provider,
+          llmModel: routerResult.value.model,
+          llmLatencyMs: routerResult.value.latencyMs,
+          ...(routerResult.value.fallbackReason ? { llmFallbackReason: routerResult.value.fallbackReason } : {}),
+        } : {}),
       },
     };
 
@@ -3545,57 +3694,36 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const incomingContentType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : 'audio/wav';
-    const incomingSpeechContent = typeof req.headers['x-speech-content'] === 'string'
-      ? req.headers['x-speech-content'].trim()
-      : '';
-    const speechContent = incomingSpeechContent || 'format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1; language=fr';
-
-    const requestedEngineId = params.data.engineId.trim();
     const t0 = Date.now();
     const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
 
-    // Helper: attempt HA local STT and return result or null on failure.
-    const tryHaStt = async (): Promise<{ text: string; engineId: string } | null> => {
-      if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) return null;
-      const normalizedRequestedEngine = requestedEngineId.replace(/^stt\./u, '');
-      const haController = new AbortController();
-      const haTimeoutId = setTimeout(() => haController.abort(), deps.env.HA_TIMEOUT_MS);
+    // Desktop and APK call Jarvis directly. Home Assistant is intentionally not
+    // part of the STT path: Jarvis streams PCM directly to local Whisper.
+    const tryLocalStt = async (): Promise<{ text: string; engineId: string } | null> => {
       try {
-        const candidateResponse = await fetch(`${deps.env.HA_BASE_URL.replace(/\/$/, '')}/api/stt/${encodeURIComponent(requestedEngineId)}`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${deps.env.HA_TOKEN}`,
-            'content-type': incomingContentType,
-            'x-speech-content': speechContent,
-          },
-          body: bufferToWebBytes(body),
-          signal: haController.signal,
-        }).finally(() => clearTimeout(haTimeoutId));
-        if (!candidateResponse.ok) return null;
-        const rawHa = await candidateResponse.text();
-        let parsedHa: unknown = rawHa;
-        try { parsedHa = rawHa ? JSON.parse(rawHa) : {}; } catch { parsedHa = { text: rawHa }; }
-        const rootHa = parsedHa && typeof parsedHa === 'object' ? (parsedHa as Record<string, unknown>) : {};
-        const haText = toSingleParagraphPlainText(
-          typeof rootHa.text === 'string' ? rootHa.text : typeof rootHa.result === 'string' ? rootHa.result : ''
-        );
-        if (!haText) return null;
-        return { text: haText, engineId: requestedEngineId };
+        const text = toSingleParagraphPlainText(await transcribeWithWyoming(body, {
+          host: deps.env.LOCAL_STT_HOST,
+          port: deps.env.LOCAL_STT_PORT,
+          timeoutMs: deps.env.LOCAL_STT_TIMEOUT_MS,
+          language: deps.env.OPENAI_STT_LANGUAGE,
+        }));
+        return text ? { text, engineId: 'local:wyoming-whisper' } : null;
       } catch {
-        void normalizedRequestedEngine; // suppress unused warning
         return null;
       }
     };
 
     if (deps.env.STT_LOCAL_FIRST) {
-      // Local-first mode: try HA STT before OpenAI cloud.
-      const localResult = await tryHaStt();
+      const localResult = await tryLocalStt();
       if (localResult) {
         recordPerf('stt', Date.now() - t0);
         app.log.info({ engineId: localResult.engineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined, local_first: true }, 'stt_complete');
         return reply.code(200).send({ text: localResult.text, result: localResult.text, engineId: localResult.engineId });
       }
-      // Fall through to OpenAI if local failed.
+      if (!deps.env.STT_REMOTE_FALLBACK_ENABLED) {
+        app.log.warn({ voice_turn_id: voiceTurnId || undefined }, 'stt_local_unavailable_remote_fallback_disabled');
+        return reply.code(503).send({ error: 'stt_not_available', hint: 'Le STT local est indisponible.' });
+      }
     }
 
     try {
@@ -3613,101 +3741,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         engineId: `openai:${openAiResult.model}`,
       });
     } catch (err) {
-      // Empty transcript = silence/noise. Skip the HA fallback — HA will also return empty.
-      // Only fall back to HA for real failures (network error, auth, etc.).
       if (err instanceof Error && err.message === 'openai_stt_empty_transcript') {
         app.log.info({ engineId: 'openai', voice_turn_id: voiceTurnId || undefined }, 'stt_openai_empty_silence_skip');
-        return reply.code(422).send({ error: 'ha_stt_empty_transcript', engineId: 'openai' });
+        return reply.code(422).send({ error: 'stt_empty_transcript', engineId: 'openai' });
       }
-      app.log.warn({ err }, 'stt_openai_failed_falling_back_to_ha');
+      app.log.warn({ err }, 'stt_openai_failed');
+      return reply.code(503).send({ error: 'stt_not_available', hint: 'Le STT local et le secours OpenAI sont indisponibles.' });
     }
-
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) {
-      return reply.code(503).send({
-        error: 'stt_not_available',
-        hint: 'Configure OPENAI_API_KEY for primary STT and/or HA STT engine for fallback.',
-      });
-    }
-    const normalizedRequestedEngine = requestedEngineId.replace(/^stt\./u, '');
-    const engineCandidates = [
-      requestedEngineId,
-      normalizedRequestedEngine,
-      `stt.${normalizedRequestedEngine}`,
-      normalizedRequestedEngine === 'whisper' ? 'stt.faster_whisper' : undefined,
-      normalizedRequestedEngine === 'whisper' ? 'faster_whisper' : undefined,
-    ]
-      .filter((value): value is string => Boolean(value))
-      .filter((value, idx, arr) => arr.indexOf(value) === idx);
-
-    let response: Response | undefined;
-    let selectedEngineId = requestedEngineId;
-    for (const candidate of engineCandidates) {
-      const sttHaController = new AbortController();
-      const sttHaTimeoutId = setTimeout(() => sttHaController.abort(), deps.env.HA_TIMEOUT_MS);
-      const candidateResponse = await fetch(`${deps.env.HA_BASE_URL.replace(/\/$/, '')}/api/stt/${encodeURIComponent(candidate)}`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${deps.env.HA_TOKEN}`,
-          'content-type': incomingContentType,
-          'x-speech-content': speechContent,
-        },
-        body: bufferToWebBytes(body),
-        signal: sttHaController.signal,
-      }).finally(() => clearTimeout(sttHaTimeoutId));
-
-      if (candidateResponse.ok || candidateResponse.status !== 404) {
-        response = candidateResponse;
-        selectedEngineId = candidate;
-        break;
-      }
-
-      response = candidateResponse;
-    }
-
-    if (!response) {
-      return reply.code(500).send({ error: 'stt_unexpected_state' });
-    }
-
-    const raw = await response.text();
-    let parsed: unknown;
-    try {
-      parsed = raw ? (JSON.parse(raw) as unknown) : {};
-    } catch {
-      parsed = { text: raw };
-    }
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        return reply.code(404).send({
-          error: 'ha_stt_engine_not_found',
-          requestedEngineId,
-          triedEngineIds: engineCandidates,
-          hint: 'Configure un moteur STT Home Assistant (ex: faster_whisper) ou utilise un engineId valide.',
-        });
-      }
-
-      return reply.code(response.status).send({ error: 'ha_stt_failed' });
-    }
-
-    const root = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-    const text = toSingleParagraphPlainText(
-      typeof root.text === 'string'
-        ? root.text
-        : typeof root.result === 'string'
-          ? root.result
-          : ''
-    );
-
-    if (!text) {
-      return reply.code(422).send({
-        error: 'ha_stt_empty_transcript',
-        engineId: selectedEngineId,
-      });
-    }
-
-    recordPerf('stt', Date.now() - t0);
-    app.log.info({ engineId: selectedEngineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'stt_complete');
-    return reply.code(200).send({ text, result: text, engineId: selectedEngineId });
   });
 
   app.get('/v1/conversation-agent/screening', async (_req, reply) => {

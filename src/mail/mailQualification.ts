@@ -18,11 +18,150 @@ export type MailQualification = {
   reason: string;
   briefingSummary: string;
   recommendedAction: MailRecommendedAction;
+  ruleId?: string;
+  groupKey?: string;
   task?: {
     title: string;
     dueDate?: string;
   };
 };
+
+type MailQualificationRule = {
+  id: string;
+  category: MailQualificationCategory;
+  urgency?: MailUrgency;
+  confidence: number;
+  recommendedAction?: MailRecommendedAction;
+  reason: string;
+  fromIncludes?: string[];
+  subjectIncludes?: string[];
+  subjectAnyIncludes?: string[];
+  snippetIncludes?: string[];
+  groupKey?: string;
+};
+
+const PERSONAL_RULES: MailQualificationRule[] = [
+  {
+    id: 'ignore.fnac.marketing',
+    category: 'ignore',
+    confidence: 0.96,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: les emails Fnac observes sont des promotions ou recommandations commerciales.',
+    fromIncludes: ['info@fnac.com'],
+  },
+  {
+    id: 'ignore.booking.campaigns',
+    category: 'ignore',
+    confidence: 0.96,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: campagnes Booking.com marketing et offres Genius.',
+    fromIncludes: ['email.campaign@sg.booking.com'],
+  },
+  {
+    id: 'ignore.sncf.marketing',
+    category: 'ignore',
+    confidence: 0.9,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: newsletter SNCF Connect sans information de voyage directe.',
+    fromIncludes: ['info@mail.sncf-connect.com'],
+    subjectAnyIncludes: ['ete', 'jeux', 'correspondances'],
+  },
+  {
+    id: 'ignore.uber.receipts',
+    category: 'ignore',
+    confidence: 0.88,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: recus Uber Eats a garder visibles dans le dashboard, mais pas dans le briefing.',
+    fromIncludes: ['noreply@uber.com'],
+    subjectAnyIncludes: ['commande', 'uber eats', 'recu'],
+  },
+  {
+    id: 'ignore.retail.marketing',
+    category: 'ignore',
+    confidence: 0.9,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: newsletters commerciales observees.',
+    fromIncludes: ['noreply@kingofcotton.com', 'noreply@email.openai.com'],
+  },
+  {
+    id: 'ignore.booking.verification',
+    category: 'ignore',
+    confidence: 0.92,
+    recommendedAction: 'archive',
+    reason: 'Regle personnelle: codes de verification Booking temporaires.',
+    fromIncludes: ['noreply-iam@booking.com'],
+    subjectAnyIncludes: ['code de verification', 'verification'],
+  },
+  {
+    id: 'info.booking.reservations',
+    category: 'info',
+    confidence: 0.94,
+    reason: 'Regle personnelle: confirmations de reservation Booking utiles pour le voyage.',
+    fromIncludes: ['noreply@booking.com', 'email@cars.booking.com'],
+    subjectAnyIncludes: ['reservation', 'confirmee', 'confirmée', 'location', 'prise en charge'],
+    groupKey: 'travel.booking',
+  },
+  {
+    id: 'info.airbnb.travel',
+    category: 'info',
+    confidence: 0.94,
+    reason: 'Regle personnelle: reservations, recus et messages Airbnb utiles pour le voyage.',
+    fromIncludes: ['automated@airbnb.com', 'express@airbnb.com'],
+    subjectAnyIncludes: ['reservation', 'recu', 'reçu', 'voyage'],
+    groupKey: 'travel.airbnb',
+  },
+  {
+    id: 'info.travel.orders',
+    category: 'info',
+    confidence: 0.9,
+    reason: 'Regle personnelle: commandes liees au voyage.',
+    fromIncludes: ['web@traversiercnb.ca'],
+    subjectAnyIncludes: ['commande', 'details', 'détails', 'traverse'],
+    groupKey: 'travel.orders',
+  },
+  {
+    id: 'action.github.failed-runs',
+    category: 'action',
+    urgency: 'medium',
+    confidence: 0.95,
+    recommendedAction: 'create_task',
+    reason: 'Regle personnelle: echecs CI/securite GitHub a traiter, mais a regrouper par repo/workflow.',
+    fromIncludes: ['notifications@github.com'],
+    subjectAnyIncludes: ['run failed', 'pr run failed', 'secret scan', 'codeql', 'ci -'],
+    groupKey: 'dev.github.failures',
+  },
+  {
+    id: 'info.github.copilot-pr',
+    category: 'info',
+    confidence: 0.78,
+    reason: 'Regle personnelle: commentaires Copilot PR utiles, mais moins urgents que les checks en echec.',
+    fromIncludes: ['notifications@github.com'],
+    subjectAnyIncludes: ['copilot', 'pr #', 'pull request'],
+    groupKey: 'dev.github.pr-comments',
+  },
+  {
+    id: 'action.vercel.failed-deployments',
+    category: 'action',
+    urgency: 'high',
+    confidence: 0.96,
+    recommendedAction: 'create_task',
+    reason: 'Regle personnelle: deploiement production Vercel en echec.',
+    fromIncludes: ['notifications@vercel.com'],
+    subjectAnyIncludes: ['failed production deployment', 'failed deployment'],
+    groupKey: 'dev.vercel.failures',
+  },
+  {
+    id: 'action.airbnb.security',
+    category: 'action',
+    urgency: 'high',
+    confidence: 0.9,
+    recommendedAction: 'ask_user',
+    reason: 'Regle personnelle: activite de compte Airbnb potentiellement sensible.',
+    fromIncludes: ['automated@airbnb.com'],
+    subjectAnyIncludes: ['nouveau mode de paiement', 'activite du compte', 'activité du compte'],
+    groupKey: 'security.airbnb',
+  },
+];
 
 const ACTION_PATTERNS = [
   /\b(peux[- ]tu|pouvez[- ]vous|merci de|merci d[' ]|besoin de|j[' ]attends|en attente de)\b/i,
@@ -72,6 +211,16 @@ function hasAny(patterns: RegExp[], value: string): boolean {
   return patterns.some((pattern) => pattern.test(value));
 }
 
+function includesAll(needles: string[] | undefined, haystack: string): boolean {
+  if (!needles?.length) return true;
+  return needles.every((needle) => haystack.includes(normalizeText(needle)));
+}
+
+function includesAny(needles: string[] | undefined, haystack: string): boolean {
+  if (!needles?.length) return true;
+  return needles.some((needle) => haystack.includes(normalizeText(needle)));
+}
+
 function clampConfidence(value: number): number {
   return Math.max(0, Math.min(1, Number(value.toFixed(2))));
 }
@@ -88,7 +237,44 @@ function taskTitleFor(input: MailQualificationInput): string {
   return subject ? `Traiter le mail de ${from}: ${subject}` : `Traiter le mail de ${from}`;
 }
 
+function matchPersonalRule(input: MailQualificationInput): MailQualificationRule | null {
+  const from = normalizeText(input.from);
+  const subject = normalizeText(input.subject);
+  const snippet = normalizeText(input.snippet ?? '');
+
+  return PERSONAL_RULES.find((rule) =>
+    includesAny(rule.fromIncludes, from)
+    && includesAll(rule.subjectIncludes, subject)
+    && includesAny(rule.subjectAnyIncludes, subject)
+    && includesAll(rule.snippetIncludes, snippet)
+  ) ?? null;
+}
+
+function qualificationFromRule(input: MailQualificationInput, rule: MailQualificationRule): MailQualification {
+  const category = rule.category;
+  const urgency = rule.urgency ?? (category === 'action' ? 'medium' : 'low');
+  const recommendedAction = rule.recommendedAction
+    ?? (category === 'action' ? 'create_task' : category === 'ignore' ? 'archive' : 'none');
+
+  return {
+    category,
+    urgency,
+    confidence: rule.confidence,
+    reason: rule.reason,
+    briefingSummary: buildBriefingSummary(input),
+    recommendedAction,
+    ruleId: rule.id,
+    groupKey: rule.groupKey,
+    ...(category === 'action'
+      ? { task: { title: taskTitleFor(input) } }
+      : {}),
+  };
+}
+
 export function qualifyMail(input: MailQualificationInput): MailQualification {
+  const personalRule = matchPersonalRule(input);
+  if (personalRule) return qualificationFromRule(input, personalRule);
+
   const subject = input.subject.trim() || '(sans objet)';
   const combinedRaw = [input.from, input.subject, input.snippet, input.listId, input.autoSubmitted]
     .filter(Boolean)

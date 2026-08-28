@@ -6,6 +6,11 @@ import {
   routeToHaAgent,
   SPOTIFY_AGENT_ID,
 } from '../src/conversation/haAgentRouter';
+import {
+  buildOrchestratorResponseFormat,
+  HOME_CONTROL_ROUTER_AGENT_ID,
+  routeUserRequest,
+} from '../src/conversation/orchestratorRouter';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +105,80 @@ describe('parseAgentMap', () => {
 // ─── routeToHaAgent ───────────────────────────────────────────────────────────
 
 describe('routeToHaAgent', () => {
+  test('uses an Ollama JSON schema constrained to the available router ids', () => {
+    const format = buildOrchestratorResponseFormat('ollama', ['general', SPOTIFY_AGENT_ID]);
+    expect(format).toMatchObject({
+      type: 'json_schema',
+      json_schema: {
+        name: 'jarvis_orchestrator_route',
+        strict: true,
+        schema: {
+          properties: {
+            targets: { items: { properties: { agentId: { enum: ['general', SPOTIFY_AGENT_ID] } } } },
+          },
+        },
+      },
+    });
+  });
+
+  test('maps the explicit general model destination to the configured HA general agent', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(JSON.stringify({
+        targets: [{ agentId: 'general', confidence: 0.99 }],
+        reason: 'ordinary conversation',
+      }))) as unknown as typeof fetch;
+
+    const result = await routeUserRequest({
+      text: 'Test, tu me reçois ?',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    expect(result.targets).toEqual([
+      { agentId: DEFAULT_OPTIONS.generalAgentId, confidence: 0.99 },
+    ]);
+  });
+
+  test('keeps the general alias stable when the general agent is also in HA_AGENT_MAP', async () => {
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(JSON.stringify({
+        targets: [{ agentId: 'general', confidence: 0.99 }],
+        reason: 'ordinary conversation',
+      }))) as unknown as typeof fetch;
+
+    const result = await routeUserRequest({
+      text: 'Bonjour',
+      agents: [{ agentId: DEFAULT_OPTIONS.generalAgentId, hint: 'Conversation générale' }],
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    expect(result.targets[0]?.agentId).toBe(DEFAULT_OPTIONS.generalAgentId);
+  });
+
+  test('maps home_control back to the real HA executor agent', async () => {
+    const agents = [
+      { agentId: 'conversation.jarvis_executors', hint: 'Domotique', key: 'executors', routerId: HOME_CONTROL_ROUTER_AGENT_ID },
+    ];
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      openAiResponse(JSON.stringify({
+        targets: [{ agentId: HOME_CONTROL_ROUTER_AGENT_ID, confidence: 0.97 }],
+        reason: 'home control',
+      }))) as unknown as typeof fetch;
+
+    const result = await routeUserRequest({
+      text: 'Allume la lumière du salon',
+      agents,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
+
+    expect(result.targets).toEqual([
+      { agentId: 'conversation.jarvis_executors', confidence: 0.97 },
+    ]);
+  });
+
   test('returns single spotify target when LLM picks spotify', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
       openAiResponse(
@@ -217,6 +296,50 @@ describe('routeToHaAgent', () => {
     await expect(
       routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
     ).rejects.toThrow('router_invalid_json');
+  });
+
+  test('falls back from Ollama to OpenAI when the local response is invalid JSON', async () => {
+    const urls: string[] = [];
+    let call = 0;
+    (global as { fetch: typeof fetch }).fetch = (async (url: unknown) => {
+      urls.push(String(url));
+      call += 1;
+      return call === 1
+        ? openAiResponse('not json')
+        : openAiResponse(JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.94 }], reason: 'music' }));
+    }) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'mets du jazz', agents: AGENTS, recentMessages: [],
+      options: {
+        ...DEFAULT_OPTIONS,
+        provider: 'ollama', openAiBaseUrl: 'http://localhost:11434/v1', model: 'qwen3:4b-instruct',
+        fallback: { openAiApiKey: 'cloud-key', openAiBaseUrl: BASE_URL, model: 'gpt-4o-mini', timeoutMs: 3000 },
+      },
+    });
+
+    expect(urls).toEqual(['http://localhost:11434/api/chat', `${BASE_URL}/chat/completions`]);
+    expect(result).toMatchObject({ provider: 'openai', model: 'gpt-4o-mini', fallbackReason: 'local_invalid_json' });
+  });
+
+  test('falls back from Ollama to OpenAI when local confidence is too low', async () => {
+    let call = 0;
+    (global as { fetch: typeof fetch }).fetch = (async () => {
+      call += 1;
+      return openAiResponse(JSON.stringify({
+        targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: call === 1 ? 0.25 : 0.94 }], reason: 'music',
+      }));
+    }) as unknown as typeof fetch;
+
+    const result = await routeToHaAgent({
+      text: 'mets du jazz', agents: AGENTS, recentMessages: [],
+      options: {
+        ...DEFAULT_OPTIONS, provider: 'ollama',
+        fallback: { openAiApiKey: 'cloud-key', openAiBaseUrl: BASE_URL, model: 'gpt-4o-mini', timeoutMs: 3000 },
+      },
+    });
+
+    expect(result).toMatchObject({ provider: 'openai', fallbackReason: 'local_low_confidence' });
   });
 
   test('throws when targets array is missing from LLM response', async () => {

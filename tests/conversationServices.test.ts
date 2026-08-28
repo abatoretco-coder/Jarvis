@@ -35,10 +35,10 @@ describe('conversation services', () => {
       hotWindowK: 10,
       minDeltaM: 20,
       triggerEveryInteractions: 10,
-      openAiApiKey: undefined,
-      openAiBaseUrl: 'https://api.openai.test/v1',
-      openAiModelSummary: 'gpt-4',
-      openAiTimeoutMs: 3000,
+      llmApiKey: undefined,
+      llmBaseUrl: 'http://ollama.test/v1',
+      llmModel: 'qwen-test',
+      llmTimeoutMs: 3000,
     });
 
     await threadRepository.getOrCreate('t-3');

@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { AsyncSnapshotCache } from '../cache/AsyncSnapshotCache';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import type { Env } from '../env';
 import type { HomeAssistantClient } from '../haClient';
 import type { NasStatusClient } from '../nas/NasStatusClient';
@@ -96,6 +97,7 @@ type NewsItem = {
   source?: string;
   link?: string;
   publishedAt?: string;
+  summary?: string;
 };
 
 type SpotifyNowPlaying = {
@@ -946,11 +948,30 @@ export class ProactiveContextCache {
         source: asString(item.source) ?? asString(item.publisher),
         link: asString(item.link) ?? asString(item.url),
         publishedAt: asString(item.publishedAt) ?? asString(item.published_at) ?? asString(item.date),
+        summary: asString(item.snippet) ?? asString(item.summary) ?? asString(item.summary_short),
       }))
-      .filter((item) => item.title !== '(sans titre)')
+      // A headline alone is not intelligence.  The Helix API sends its
+      // normalized factual snippet; drop rows that cannot support a useful
+      // statement instead of turning clickbait into a "Flash Info".
+      .filter((item) => item.title !== '(sans titre)' && Boolean(item.summary?.trim()))
       .slice(0, 8);
     const fetchedAt = new Date().toISOString();
-    const topTitles = items.slice(0, 5).map((item) => item.source ? `${item.title} (${item.source})` : item.title);
+    const highlights = items
+      .slice(0, 5)
+      .map((item) => {
+        const summary = (item.summary ?? '')
+          .replace(/\r?\n+/gu, ' ')
+          .replace(/(?:^|\s)[-•]\s*/gu, ' ')
+          .replace(/\s+/gu, ' ')
+          .trim();
+        if (summary.length < 35) return null;
+        const source = item.source ? ` — source : ${item.source}` : '';
+        return `- ${summary.slice(0, 420)}${source}`;
+      })
+      .filter((value): value is string => Boolean(value));
+    const flashInfo = highlights.length
+      ? `Flash info — faits vérifiés\n${highlights.join('\n')}`
+      : 'Aucune actualité enrichie et vérifiable n’est disponible pour le moment.';
 
     return {
       domain: 'news',
@@ -962,9 +983,7 @@ export class ProactiveContextCache {
         withFreshness({
           domain: 'news',
           questionKey: 'news.headlines',
-          answerText: topTitles.length
-            ? `Voici les dernieres actus suivies: ${topTitles.join('; ')}.`
-            : 'Aucune actualite recente disponible dans le cache pour le moment.',
+          answerText: flashInfo,
           sourceRefs: items
             .filter((item) => item.link || item.source)
             .map((item) => ({ type: 'news-item', id: item.link, label: item.source ?? item.title })),
@@ -993,6 +1012,20 @@ export class ProactiveContextCache {
       'Ne parle jamais d actualites/news.',
       'N invente pas de source, de deadline ou de meteo absente.',
     ].join(' ');
+
+    if (isOllamaBaseUrl(this.deps.env.OPENAI_BASE_URL)) {
+      const content = await completeOllamaChat({
+        baseUrl: this.deps.env.OPENAI_BASE_URL,
+        model: this.deps.env.OPENAI_MODEL_SUMMARY,
+        temperature: 0.2,
+        numPredict: 280,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(draft) }],
+        signal: AbortSignal.timeout(this.deps.env.OPENAI_TIMEOUT_MS),
+      });
+      if (!content) return null;
+      const cleaned = content.replace(/\s+/g, ' ').trim();
+      return /^brief du jour\s*:/iu.test(cleaned) ? cleaned : `Brief du jour: ${cleaned}`;
+    }
 
     const response = await fetch(`${this.deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',

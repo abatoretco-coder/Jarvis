@@ -42,6 +42,29 @@ export class HomeAssistantClient {
     }
   }
 
+  /**
+   * Lightweight, bounded authentication probe for operational health checks.
+   * It deliberately does not throw: a health endpoint must still answer when
+   * Home Assistant is unavailable or its token has been revoked.
+   */
+  async probeHealth(timeoutMs = 1500): Promise<'ok' | 'unauthorized' | 'unreachable'> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(`${this.baseUrl}/api/`, {
+        headers: { authorization: `Bearer ${this.token}` },
+        signal: controller.signal,
+      });
+      if (resp.ok) return 'ok';
+      if (resp.status === 401 || resp.status === 403) return 'unauthorized';
+      return 'unreachable';
+    } catch {
+      return 'unreachable';
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async callService(input: HomeAssistantServiceCall): Promise<{ status: number; data: unknown }> {
     const base = `${this.baseUrl}/api/services/${encodeURIComponent(input.domain)}/${encodeURIComponent(input.service)}`;
     const url = input.returnResponse ? `${base}?return_response=true` : base;

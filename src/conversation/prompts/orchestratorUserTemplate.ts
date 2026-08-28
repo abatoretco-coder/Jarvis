@@ -25,7 +25,7 @@ export function buildOrchestratorUserPrompt(params: {
   }
 
   const agentList = params.agents
-    .map((a) => `  ${a.agentId}: ${a.hint}`)
+    .map((a) => `  ${a.routerId ?? a.agentId}: ${a.hint}`)
     .join('\n');
   parts.push(userTemplateData.agents_line.replace('{{AGENTS_LIST}}', agentList));
 

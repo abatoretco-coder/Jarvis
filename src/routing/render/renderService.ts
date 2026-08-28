@@ -1,4 +1,5 @@
 import { getSpotifyResponse } from '../deterministic/spotifyResponses';
+import { completeOllamaChat, isOllamaBaseUrl } from '../../ollamaChat';
 import { RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG } from './openAiConfig';
 import { resolveRenderPolicy } from './policies';
 import { buildDomainRephraseSystemPrompt } from './prompts/domainRephraseSystemPrompt';
@@ -103,6 +104,14 @@ async function renderWithDomainPrompt(result: ActionExecutionResult, deps: Rende
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), deps.timeoutMs);
   try {
+    if (isOllamaBaseUrl(deps.openAiBaseUrl)) {
+      const text = await completeOllamaChat({
+        baseUrl: deps.openAiBaseUrl, model: deps.openAiModel, temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
+        numPredict: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
+        messages: [{ role: 'system', content: buildDomainRephraseSystemPrompt() }, { role: 'user', content: buildDomainRephraseUserPrompt(result, source) }], signal: controller.signal,
+      });
+      return normalizeText(text) || null;
+    }
     const response = await fetch(`${deps.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -189,6 +198,17 @@ export async function renderMultipleExecutionResults(results: ActionExecutionRes
         status: result.status,
         text: await renderSingleExecutionResult(result, { ...deps, openAiApiKey: undefined }),
       })));
+      if (isOllamaBaseUrl(deps.openAiBaseUrl)) {
+        const text = await completeOllamaChat({
+          baseUrl: deps.openAiBaseUrl, model: deps.openAiModel, temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
+          numPredict: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
+          messages: [
+            { role: 'system', content: 'Tu combines plusieurs resultats d actions Jarvis en une reponse courte, factuelle, en francais. N invente rien.' },
+            { role: 'user', content: JSON.stringify({ results: summaries }) },
+          ], signal: controller.signal,
+        });
+        if (text) return clamp(normalizeText(text), 700);
+      }
       const response = await fetch(`${deps.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: {

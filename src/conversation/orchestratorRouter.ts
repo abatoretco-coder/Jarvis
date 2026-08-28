@@ -26,6 +26,8 @@ export type AgentRouteEntry = {
   hint: string;
   /** Routing key from HA_AGENT_MAP — e.g. "search", "executors" (human label only) */
   key?: string;
+  /** Stable semantic identifier exposed to the model, distinct from an HA entity id. */
+  routerId?: string;
 };
 
 /**
@@ -33,6 +35,12 @@ export type AgentRouteEntry = {
  * handled by the Spotify executor (not an HA conversation entity).
  */
 export const SPOTIFY_AGENT_ID = 'spotify' as const;
+/** Explicit model-facing destination for ordinary conversation. */
+export const GENERAL_ROUTER_AGENT_ID = 'general' as const;
+/** Model-facing name for the HA executor; avoids the misleading `conversation.*` entity id. */
+export const HOME_CONTROL_ROUTER_AGENT_ID = 'home_control' as const;
+/** Model-facing name for the local HA weather source (never external cities). */
+export const LOCAL_WEATHER_ROUTER_AGENT_ID = 'weather_local' as const;
 
 export type RouterTarget = {
   agentId: string;
@@ -46,6 +54,10 @@ export type RouterTarget = {
 export type RouterResult = {
   targets: RouterTarget[];
   reason: string;
+  provider?: 'ollama' | 'openai';
+  model?: string;
+  latencyMs?: number;
+  fallbackReason?: string;
 };
 
 export type RouterOptions = {
@@ -55,6 +67,13 @@ export type RouterOptions = {
   timeoutMs: number;
   confidenceThreshold: number;
   generalAgentId: string;
+  provider?: 'ollama' | 'openai';
+  fallback?: {
+    openAiApiKey: string;
+    openAiBaseUrl: string;
+    model: string;
+    timeoutMs: number;
+  };
   log?: MinLogger;
 };
 
@@ -72,46 +91,147 @@ export async function routeUserRequest(params: {
 }): Promise<RouterResult> {
   const { options } = params;
   const log = options.log;
+  const primaryProvider = options.provider ?? 'openai';
+
+  try {
+    return await routeWithProvider(params, {
+      provider: primaryProvider,
+      openAiApiKey: options.openAiApiKey,
+      openAiBaseUrl: options.openAiBaseUrl,
+      model: options.model,
+      timeoutMs: options.timeoutMs,
+    });
+  } catch (error) {
+    if (!options.fallback || primaryProvider !== 'ollama') throw error;
+    const fallbackReason = normalizeFallbackReason(error);
+    log?.warn({ fallback_reason: fallbackReason, err: error }, 'ha_agent_router_local_fallback_openai');
+    const result = await routeWithProvider(params, { provider: 'openai', ...options.fallback });
+    return { ...result, fallbackReason };
+  }
+}
+
+type ProviderRequest = {
+  provider: 'ollama' | 'openai';
+  openAiApiKey: string;
+  openAiBaseUrl: string;
+  model: string;
+  timeoutMs: number;
+};
+
+/**
+ * Ollama can constrain output against a JSON Schema through its OpenAI
+ * compatibility endpoint.  This is stricter than JSON mode and prevents a
+ * local model from inventing an unavailable agent identifier.
+ */
+export function buildOrchestratorResponseFormat(
+  provider: 'ollama' | 'openai',
+  routerIds: string[],
+): Record<string, unknown> {
+  if (provider !== 'ollama') return { type: 'json_object' };
+  return {
+    type: 'json_schema',
+    json_schema: { name: 'jarvis_orchestrator_route', strict: true, schema: buildOrchestratorJsonSchema(routerIds) },
+  };
+}
+
+function buildOrchestratorJsonSchema(routerIds: string[]): Record<string, unknown> {
+  return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['targets', 'reason'],
+        properties: {
+          targets: {
+            type: 'array',
+            minItems: 1,
+            maxItems: Math.max(1, routerIds.length),
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['agentId', 'confidence'],
+              properties: {
+                agentId: { type: 'string', enum: routerIds },
+                confidence: { type: 'number', minimum: 0, maximum: 1 },
+                action: { type: 'string' },
+                slots: { type: 'object', additionalProperties: true },
+              },
+            },
+          },
+          reason: { type: 'string', minLength: 2, maxLength: 80 },
+        },
+  };
+}
+
+async function routeWithProvider(params: {
+  text: string;
+  agents: AgentRouteEntry[];
+  summary?: string;
+  recentMessages: MessageRecord[];
+  options: RouterOptions;
+}, providerRequest: ProviderRequest): Promise<RouterResult> {
+  const { options } = params;
+  const log = options.log;
   const t0 = Date.now();
 
+  const routingAgents = withGeneralRoutingAgent(params.agents, options.generalAgentId);
+  const routerIdToAgentId = new Map(routingAgents.map((agent) => [agent.routerId ?? agent.agentId, agent.agentId]));
+
   log?.info(
-    { model: options.model, agents: params.agents.map((a) => a.agentId), timeout_ms: options.timeoutMs },
+    { provider: providerRequest.provider, model: providerRequest.model, agents: [...routerIdToAgentId.keys()], timeout_ms: providerRequest.timeoutMs },
     'ha_agent_router_start',
   );
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), providerRequest.timeoutMs);
 
   try {
+    const ollama = providerRequest.provider === 'ollama';
+    const endpoint = ollama
+      ? `${providerRequest.openAiBaseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '')}/api/chat`
+      : `${providerRequest.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`;
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: buildOrchestratorUserPrompt({ ...params, agents: routingAgents }) },
+    ];
     const response = await fetch(
-      `${options.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
+      endpoint,
       {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${options.openAiApiKey}`,
+          authorization: `Bearer ${providerRequest.openAiApiKey}`,
         },
-        body: JSON.stringify({
-          model: options.model,
-          temperature: 0,
-          max_tokens: 120,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: buildOrchestratorUserPrompt(params) },
-          ],
-        }),
+        body: JSON.stringify(ollama
+          ? {
+              model: providerRequest.model,
+              messages,
+              stream: false,
+              think: false,
+              format: buildOrchestratorJsonSchema([...routerIdToAgentId.keys()]),
+              options: { temperature: 0, top_p: 1, seed: 17, num_predict: 160 },
+            }
+          : {
+              model: providerRequest.model,
+              temperature: 0,
+              top_p: 1,
+              max_tokens: 160,
+              response_format: buildOrchestratorResponseFormat('openai', [...routerIdToAgentId.keys()]),
+              messages,
+            }),
         signal: controller.signal,
       }
     );
 
     if (!response.ok) {
       log?.warn({ status: response.status, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_openai_http_error');
-      throw new Error(`router_openai_http_${response.status}`);
+      throw new Error(`router_${providerRequest.provider}_http_${response.status}`);
     }
 
     const raw = await response.json() as Record<string, unknown>;
-    const content = (raw?.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? '';
+    const content = ollama
+      ? ((raw.message as { content?: string } | undefined)?.content
+        ?? (raw.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content
+        ?? '')
+      : ((raw?.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? '');
 
     let parsed: unknown;
     try {
@@ -125,11 +245,12 @@ export async function routeUserRequest(params: {
     const rawTargets = Array.isArray(result.targets) ? result.targets : [];
     const reason = typeof result.reason === 'string' ? result.reason.trim() : '';
 
-    const knownIds = new Set(params.agents.map((a) => a.agentId));
+    const knownIds = new Set(routerIdToAgentId.keys());
     const targets: RouterTarget[] = (rawTargets as unknown[])
       .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
       .map((t) => {
-        const agentId = typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '';
+        const routerId = typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '';
+        const agentId = routerIdToAgentId.get(routerId) ?? '';
         const confidence = typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0;
         const entry: RouterTarget = { agentId, confidence };
         if (agentId === SPOTIFY_AGENT_ID) {
@@ -142,21 +263,58 @@ export async function routeUserRequest(params: {
         }
         return entry;
       })
-      .filter((t) => t.agentId && knownIds.has(t.agentId));
+      .filter((t) => t.agentId);
 
     if (targets.length === 0) {
       log?.warn({ rawTargets, knownIds: [...knownIds], elapsed_ms: Date.now() - t0 }, 'ha_agent_router_no_valid_targets');
       throw new Error('router_no_valid_targets');
     }
 
+    if (!targets.some((target) => target.confidence >= options.confidenceThreshold)) {
+      log?.warn({ targets, threshold: options.confidenceThreshold, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_low_confidence');
+      throw new Error('router_low_confidence');
+    }
+
     log?.info(
       { targets: targets.map((t) => `${t.agentId}:${t.confidence}`), reason, elapsed_ms: Date.now() - t0 },
       'ha_agent_router_done',
     );
-    return { targets, reason };
+    return { targets, reason, provider: providerRequest.provider, model: providerRequest.model, latencyMs: Date.now() - t0 };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('router_timeout');
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function withGeneralRoutingAgent(agents: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry[] {
+  if (agents.some((agent) => agent.agentId === generalAgentId)) {
+    // Keep the model contract stable even when an operator also puts the
+    // general agent in HA_AGENT_MAP.
+    return agents.map((agent) => agent.agentId === generalAgentId
+      ? { ...agent, routerId: GENERAL_ROUTER_AGENT_ID, key: agent.key ?? GENERAL_ROUTER_AGENT_ID }
+      : agent);
+  }
+  return [
+    {
+      agentId: generalAgentId,
+      routerId: GENERAL_ROUTER_AGENT_ID,
+      key: GENERAL_ROUTER_AGENT_ID,
+      hint: 'Conversation générale: salutations, discussion, questions générales, vérification du chat, blagues et aide sur Jarvis sans action connectée',
+    },
+    ...agents,
+  ];
+}
+
+function normalizeFallbackReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === 'router_timeout') return 'local_timeout';
+  if (message === 'router_invalid_json') return 'local_invalid_json';
+  if (message === 'router_no_valid_targets') return 'local_invalid_target';
+  if (message === 'router_low_confidence') return 'local_low_confidence';
+  if (message.startsWith('router_ollama_http_')) return 'local_http_error';
+  return 'local_error';
 }
 
 /**
@@ -169,7 +327,7 @@ export function parseAgentMap(raw: string | undefined): AgentRouteEntry[] {
   if (!raw?.trim()) return [];
   return raw
     .split('|')
-    .map((segment) => {
+    .map((segment): AgentRouteEntry | null => {
       // Format per entry: "key:entity_id:hint"
       // key      = routing label (ignored at runtime, just for human readability)
       // entity_id = e.g. "conversation.jarvis_search"
@@ -182,7 +340,12 @@ export function parseAgentMap(raw: string | undefined): AgentRouteEntry[] {
       const agentId = segment.slice(firstColon + 1, secondColon).trim();
       const hint = segment.slice(secondColon + 1).trim();
       if (!agentId || !hint) return null;
-      return { agentId, hint, ...(key ? { key } : {}) };
+      return {
+        agentId,
+        hint,
+        ...(key ? { key } : {}),
+        ...(key === 'executors' ? { routerId: HOME_CONTROL_ROUTER_AGENT_ID } : {}),
+      };
     })
     .filter((e): e is AgentRouteEntry => e !== null);
 }

@@ -69,6 +69,10 @@ export function pipeStreamThroughFfmpeg(body: ReadableStream<Uint8Array>, filter
 }
 
 export function resolveOpenAiTtsRuntimeConfig(env: Env): OpenAiTtsRuntimeConfig | null {
+  // Ollama implements chat completions, not OpenAI's speech endpoint. In local
+  // LLM mode, TTS therefore needs explicit cloud TTS credentials/base URL or HA.
+  const hasExplicitTtsProvider = Boolean(env.OPENAI_TTS_API_KEY?.trim() && env.OPENAI_TTS_BASE_URL?.trim());
+  if (env.LLM_PROVIDER === 'ollama' && !hasExplicitTtsProvider) return null;
   const apiKey = env.OPENAI_TTS_API_KEY?.trim() || env.OPENAI_API_KEY?.trim();
   const baseUrl = env.OPENAI_TTS_BASE_URL?.trim() || env.OPENAI_BASE_URL;
   if (!apiKey || !baseUrl) return null;

@@ -12,7 +12,7 @@ describe('todoAgent formatting', () => {
     const preview = formatTodoActionPreview({
       action: 'add_task',
       title: 'Faire du sport',
-      due_date: '2026-07-06',
+      due_date: '2026-08-24',
     });
 
     expect(preview).toBe("J'ajoute la tache Faire du sport pour demain.");

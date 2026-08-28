@@ -29,6 +29,12 @@ const optionalUrl = z.preprocess((v) => {
   return trimmed ? trimmed : undefined;
 }, z.string().url().optional());
 
+const optionalNumberFromEnv = z.preprocess((v) => {
+  if (typeof v !== 'string') return v;
+  const trimmed = v.trim();
+  return trimmed ? Number(trimmed) : undefined;
+}, z.number().optional());
+
 const envSchema = z
   .object({
   BIND_HOST: z.string().default('0.0.0.0'),
@@ -91,8 +97,34 @@ const envSchema = z
   HELIX_NEWS_API_TOKEN: optionalNonEmptyString,
   HELIX_NEWS_TIMEOUT_MS: numberFromEnv.default(60000),
 
+  // Agora Culture / Sorties. Provider secrets never enter Jarvis.
+  AGORA_BASE_URL: optionalUrl,
+  AGORA_API_TOKEN: optionalNonEmptyString,
+  AGORA_TIMEOUT_MS: numberFromEnv.default(8000),
+  CULTURE_HOME_LATITUDE: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
+  CULTURE_HOME_LONGITUDE: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
+  CULTURE_DEFAULT_RADIUS_KM: z.coerce.number().positive().max(200).default(15),
+  // Compatibility aliases for existing NAS deployments.
+  AGORA_HOME_LAT: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
+  AGORA_HOME_LON: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
+  AGORA_HOME_RADIUS_KM: z.coerce.number().positive().max(200).default(15),
+
   OPENAI_API_KEY: optionalNonEmptyString,
   OPENAI_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
+  // Chat/completions provider. "ollama" reuses its OpenAI-compatible endpoint
+  // while keeping speech configuration independent.
+  // openai: cloud only; ollama: local only; hybrid: local router then OpenAI
+  // fallback when the local structured result is invalid, uncertain or times out.
+  LLM_PROVIDER: z.enum(['openai', 'ollama', 'hybrid']).default('openai'),
+  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434/v1'),
+  OLLAMA_MODEL: optionalNonEmptyString,
+  LLM_LOCAL_ROUTER_TIMEOUT_MS: numberFromEnv.default(1200),
+  LLM_FALLBACK_OPENAI_TIMEOUT_MS: numberFromEnv.default(6000),
+  // Derived automatically in hybrid mode from the regular OPENAI_* settings.
+  // They are separate so the rest of the application continues to use Ollama.
+  LLM_FALLBACK_OPENAI_API_KEY: optionalNonEmptyString,
+  LLM_FALLBACK_OPENAI_BASE_URL: optionalUrl,
+  LLM_FALLBACK_OPENAI_MODEL_ROUTER: optionalNonEmptyString,
   OPENAI_TTS_API_KEY: optionalNonEmptyString,
   OPENAI_TTS_BASE_URL: optionalUrl,
 
@@ -110,11 +142,18 @@ const envSchema = z
   OPENAI_TIMEOUT_MS: numberFromEnv.default(12000),
   OPENAI_STT_TIMEOUT_MS: numberFromEnv.default(10000),
   OPENAI_TTS_TIMEOUT_MS: numberFromEnv.default(7000),
+  // Kept separate from the chat provider: Ollama has no
+  // /audio/transcriptions endpoint.
+  OPENAI_STT_BASE_URL: optionalUrl,
   OPENAI_STT_MODEL: z.string().default('whisper-1'),
   OPENAI_STT_LANGUAGE: optionalNonEmptyString,
-  // When true, try HA local STT first (faster_whisper) and fall back to OpenAI on failure.
-  // Set to 'true' only if local faster_whisper is GPU-accelerated and faster than OpenAI cloud.
+  // The local provider is a direct Wyoming endpoint; Home Assistant is not in this path.
   STT_LOCAL_FIRST: booleanFromEnv.default(false),
+  // Cloud STT is opt-in. Production stays fully local by default.
+  STT_REMOTE_FALLBACK_ENABLED: booleanFromEnv.default(false),
+  LOCAL_STT_HOST: z.string().min(1).default('whisper-stt'),
+  LOCAL_STT_PORT: numberFromEnv.pipe(z.number().min(1).max(65535)).default(10300),
+  LOCAL_STT_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(1000).max(120000)).default(30000),
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   OPENAI_TTS_VOICE: z.string().default('onyx'),
   OPENAI_TTS_FORMAT: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).default('mp3'),
@@ -328,6 +367,25 @@ const envSchema = z
         message: 'API_KEY or API_KEYS is required when REQUIRE_API_KEY=true',
       });
     }
+  })
+  .transform((value) => {
+    if (value.LLM_PROVIDER !== 'ollama' && value.LLM_PROVIDER !== 'hybrid') return value;
+    const model = value.OLLAMA_MODEL?.trim() || 'qwen3:8b';
+    return {
+      ...value,
+      // Existing agents use this OpenAI-shaped configuration. Ollama accepts the
+      // same chat-completions shape and ignores the placeholder bearer token.
+      OPENAI_BASE_URL: value.OLLAMA_BASE_URL.replace(/\/$/u, ''),
+      OPENAI_API_KEY: value.OPENAI_API_KEY?.trim() || 'ollama',
+      OPENAI_MODEL_SUMMARY: model,
+      OPENAI_MODEL_MUSIC_AGENT: model,
+      OPENAI_MODEL_ROUTER: model,
+      ...(value.LLM_PROVIDER === 'hybrid' ? {
+        LLM_FALLBACK_OPENAI_API_KEY: value.LLM_FALLBACK_OPENAI_API_KEY ?? value.OPENAI_API_KEY,
+        LLM_FALLBACK_OPENAI_BASE_URL: value.LLM_FALLBACK_OPENAI_BASE_URL ?? value.OPENAI_BASE_URL,
+        LLM_FALLBACK_OPENAI_MODEL_ROUTER: value.LLM_FALLBACK_OPENAI_MODEL_ROUTER ?? value.OPENAI_MODEL_ROUTER,
+      } : {}),
+    };
   });
 
 export type Env = z.infer<typeof envSchema>;

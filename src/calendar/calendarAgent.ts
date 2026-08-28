@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
   calendarApiRequest,
@@ -53,6 +54,7 @@ export interface CalendarAgentEnv {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
+  OPENAI_MODEL_SUMMARY?: string;
 }
 
 // ─── Planner types ────────────────────────────────────────────────────────────
@@ -406,6 +408,19 @@ async function planCalendarAction(
   if (preplanned) return parseCalendarAction(preplanned, env);
   const simpleRead = preplanSimpleCalendarRead(text, isoDate);
   if (simpleRead) return parseCalendarAction(simpleRead, env);
+
+  if (isOllamaBaseUrl(env.OPENAI_BASE_URL)) {
+    const content = await completeOllamaChat({
+      baseUrl: env.OPENAI_BASE_URL, model: env.OPENAI_MODEL_SUMMARY ?? 'qwen3:8b',
+      temperature: 0, numPredict: 250, format: 'json',
+      messages: [{ role: 'system', content: buildPlannerSystemPrompt(dateStr, isoDate) }, { role: 'user', content: text }],
+      signal: AbortSignal.timeout(env.OPENAI_TIMEOUT_MS),
+    });
+    let parsed: unknown;
+    try { parsed = JSON.parse(content || '{}'); } catch { throw new Error(`calendar_planner_invalid_json:${content.slice(0, 100)}`); }
+    if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) throw new Error(`calendar_planner_missing_action:${content.slice(0, 100)}`);
+    return parseCalendarAction(parsed, env);
+  }
 
   const resp = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',

@@ -1,4 +1,5 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { googleRefreshTokenStoreKey } from '../google/googleCredentialService';
 import { cleanMailDetailText } from './mailContentCleaner';
 import { qualifyMail, shouldMentionMail } from './mailQualification';
@@ -319,6 +320,16 @@ async function synthesizeMailReplyWithOpenAi(params: {
   userText: string;
   executorResult: string;
 }): Promise<string> {
+  if (isOllamaBaseUrl(params.openAiBaseUrl)) {
+    try {
+      const content = await completeOllamaChat({
+        baseUrl: params.openAiBaseUrl, model: params.model, temperature: 0.2, numPredict: 180,
+        messages: [{ role: 'system', content: MAIL_SYNTHESIS_SYSTEM_PROMPT }, { role: 'user', content: buildMailSynthesisUserPrompt(params.userText, params.executorResult) }],
+        signal: AbortSignal.timeout(params.timeoutMs),
+      });
+      return content || compactMailListForFallback(params.executorResult);
+    } catch { return compactMailListForFallback(params.executorResult); }
+  }
   const resp = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -430,6 +441,16 @@ async function planMailAction(
   accountLabels: string[] = [],
 ): Promise<MailAction> {
   const _PLANNER_SYSTEM = buildPlannerSystem(accountLabels);
+  if (isOllamaBaseUrl(openAiBaseUrl)) {
+    const content = await completeOllamaChat({
+      baseUrl: openAiBaseUrl, model: 'qwen3:8b', temperature: 0, numPredict: 300, format: 'json',
+      messages: [{ role: 'system', content: _PLANNER_SYSTEM }, { role: 'user', content: text }], signal: AbortSignal.timeout(timeoutMs),
+    });
+    let parsed: unknown;
+    try { parsed = JSON.parse(content || '{}'); } catch { throw new Error(`mail_planner_invalid_json:${content.slice(0, 100)}`); }
+    if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) throw new Error(`mail_planner_missing_action:${content.slice(0, 100)}`);
+    return parsed as MailAction;
+  }
   const resp = await fetch(`${openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {

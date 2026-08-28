@@ -1,7 +1,7 @@
 {
-  "date_line":             "Date: {{DATE}}",
-  "summary_line":          "Conversation summary: {{SUMMARY}}",
-  "recent_messages_line":  "Recent messages:\n{{RECENT_MESSAGES}}",
-  "agents_line":           "Available agents:\n{{AGENTS_LIST}}",
-  "user_message_line":     "User message: {{USER_TEXT}}"
+  "date_line":             "DATE: {{DATE}}",
+  "summary_line":          "CONTEXTE RÉSUMÉ (non prioritaire):\n{{SUMMARY}}",
+  "recent_messages_line":  "TOURS PRÉCÉDENTS (non prioritaires):\n{{RECENT_MESSAGES}}",
+  "agents_line":           "IDENTIFIANTS AUTORISÉS ET RÔLES:\n{{AGENTS_LIST}}",
+  "user_message_line":     "DERNIÈRE DEMANDE À CLASSER:\n<user_message>\n{{USER_TEXT}}\n</user_message>"
 }

@@ -99,7 +99,6 @@ export function buildApp(env: Env): FastifyInstance {
   registerNewsSummaryRoute(app, deps);
   registerNasStatusRoute(app, deps);
   registerOAuthRoutes(app, deps);
-
   registerIngestRoute(app, deps);
 
   return app;

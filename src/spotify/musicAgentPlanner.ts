@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import type { Env } from '../env';
+import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { SPOTIFY_CAPABILITIES } from './capabilityRegistry';
 import { spotifyActionSchema } from './contracts';
@@ -107,6 +108,14 @@ async function requestPlannerCandidate(input: {
   const timeout = setTimeout(() => controller.abort(), input.env.OPENAI_TIMEOUT_MS);
 
   try {
+    if (isOllamaBaseUrl(input.env.OPENAI_BASE_URL)) {
+      const content = await completeOllamaChat({
+        baseUrl: input.env.OPENAI_BASE_URL, model: input.env.OPENAI_MODEL_MUSIC_AGENT,
+        temperature: 0, numPredict: 250, format: 'json',
+        messages: [{ role: 'system', content: input.systemPrompt }, { role: 'user', content: input.userPrompt }], signal: controller.signal,
+      });
+      return plannerResponseSchema.parse(parseJsonObject(content));
+    }
     const response = await fetch(`${input.env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -335,6 +344,22 @@ export async function selectBestSpotifyResult(input: {
   const timeout = setTimeout(() => controller.abort(), env.OPENAI_TIMEOUT_MS);
 
   try {
+    if (isOllamaBaseUrl(env.OPENAI_BASE_URL)) {
+      const content = await completeOllamaChat({
+        baseUrl: env.OPENAI_BASE_URL, model: env.OPENAI_MODEL_MUSIC_AGENT,
+        temperature: 0, numPredict: 20, format: 'json',
+        messages: [
+          { role: 'system', content: 'Sélectionne le meilleur résultat Spotify. Réponse JSON obligatoire, objet unique: {"index":N}.' },
+          { role: 'user', content: `Réponds en JSON strict uniquement avec la clé index.\nCommande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}` },
+        ], signal: controller.signal,
+      });
+      const directNumber = Number(content.trim());
+      if (Number.isFinite(directNumber)) return Math.min(Math.max(0, Math.round(directNumber)), candidates.length - 1);
+      const data = parseJsonObject(content) as { index?: unknown };
+      const index = Number(data.index);
+      if (!Number.isFinite(index)) throw new Error('openai_selection_invalid_index');
+      return Math.min(Math.max(0, Math.round(index)), candidates.length - 1);
+    }
     const response = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
