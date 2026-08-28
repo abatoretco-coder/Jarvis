@@ -16,6 +16,7 @@ export const cultureSlotsSchema = z.object({
   venueId: z.string().max(128).optional(),
   types: z.array(z.string()).max(10).optional(),
   categories: z.array(z.string()).max(20).optional(),
+  tags: z.array(z.string()).max(20).optional(),
   from: z.string().datetime({ offset: true }).optional(),
   to: z.string().datetime({ offset: true }).optional(),
   timeOfDay: z.string().max(50).optional(),
@@ -26,8 +27,10 @@ export const cultureSlotsSchema = z.object({
   format: z.string().max(32).optional(),
   maxPrice: z.number().nonnegative().optional(),
   currency: z.string().length(3).optional(),
+  freeOnly: z.boolean().optional(),
   limit: z.number().int().min(1).max(20).optional(),
   candidatePosition: z.number().int().positive().optional(),
+  candidatePositions: z.array(z.number().int().positive()).min(2).max(2).optional(),
   resultSetId: z.string().max(128).optional(),
 }).passthrough().superRefine((value, context) => {
   if ((value.latitude === undefined) !== (value.longitude === undefined)) {
@@ -95,14 +98,16 @@ export const agoraCandidateSchema = z.object({
   occurrence: occurrenceCoreSchema,
   venue: venueSummarySchema.extend({ distanceKm: z.number().nonnegative() }),
   source: sourceSchema,
+  sources: z.array(sourceSchema.extend({ bookingUrl: z.string().url().nullable().optional() })).optional(),
   rankReasons: z.array(z.string()),
 });
 export type AgoraCandidate = z.infer<typeof agoraCandidateSchema>;
 
 const providerMetaSchema = z.object({
   source: z.string().min(1),
-  status: z.enum(['fresh', 'stale', 'expired', 'unavailable']),
+  status: z.enum(['fresh', 'stale', 'expired', 'unavailable', 'disabled']),
   lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
+  disabledReason: z.string().optional(),
 });
 
 export const agoraDiscoverResponseSchema = z.object({

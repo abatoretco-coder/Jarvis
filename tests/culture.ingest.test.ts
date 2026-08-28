@@ -20,21 +20,31 @@ function candidate(
   hour: number,
   occurrenceId = `occ_${id}`,
   venueName = `Cinéma ${title}`,
-  options: { version?: string; contributors?: string[] } = {},
+  options: {
+    version?: string;
+    contributors?: string[];
+    type?: 'movie' | 'theatre' | 'concert' | 'exhibition' | 'comedy' | 'festival' | 'other';
+    categories?: string[];
+    isFree?: boolean | null;
+    price?: { min: number | null; max: number | null; currency: string | null } | null;
+  } = {},
 ) {
   return {
     item: {
       id,
-      type: 'movie',
+      type: options.type ?? 'movie',
       title,
       summary: `Synopsis de ${title}`,
-      categories: ['drama'],
+      categories: options.categories ?? ['drama'],
       contributors: options.contributors ?? [],
       attributes: {},
     },
     occurrence: {
       id: occurrenceId, startsAt: `2026-08-27T${hour}:00:00.000Z`, endsAt: null, status: 'scheduled',
-      price: null, isFree: null, bookingUrl: null, attributes: { version: options.version ?? 'VOSTFR' },
+      price: options.price ?? null,
+      isFree: options.isFree ?? null,
+      bookingUrl: null,
+      attributes: options.version || (options.type ?? 'movie') === 'movie' ? { version: options.version ?? 'VOSTFR' } : {},
     },
     venue: { id: `venue_${occurrenceId}`, name: venueName, distanceKm: 2 }, source, rankReasons: ['nearby'],
   };
@@ -346,6 +356,95 @@ describe('Culture through /v1/ingest', () => {
     for (const parameter of ['lat', 'lon', 'radiusKm', 'from', 'to', 'types']) {
       expect(refinementUrl?.searchParams.get(parameter)).toBe(initialUrl?.searchParams.get(parameter));
     }
+  });
+
+  test('keeps a factual multi-outing conversation and bounds comparison to the requested candidates', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-mixed-outings-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const mixed = [
+      candidate('item_concert', 'Concert jazz', 18, 'occ_concert', 'Club Jazz', { type: 'concert', categories: ['Jazz'], isFree: true }),
+      candidate('item_expo', 'Expo photo', 19, 'occ_expo', 'Galerie Photo', { type: 'exhibition', categories: ['Photo'], isFree: true }),
+      candidate('item_theatre', 'Pièce du soir', 20, 'occ_theatre', 'Théâtre Test', { type: 'theatre', categories: ['Théâtre'], isFree: false, price: { min: 25, max: 30, currency: 'EUR' } }),
+      candidate('item_movie', 'Film du soir', 21, 'occ_movie', 'Cinéma Test', { isFree: true }),
+      candidate('item_festival', 'Festival local', 22, 'occ_festival', 'Parc Test', { type: 'festival', categories: ['Festival'], isFree: true }),
+    ];
+    const expoTomorrow = [
+      candidate('item_expo', 'Expo photo', 18, 'occ_expo_tomorrow_1', 'Galerie A', { type: 'exhibition', categories: ['Photo'], isFree: true }),
+      candidate('item_expo', 'Expo photo', 19, 'occ_expo_tomorrow_2', 'Galerie B', { type: 'exhibition', categories: ['Photo'], isFree: true }),
+      candidate('item_expo', 'Expo photo', 20, 'occ_expo_tomorrow_3', 'Galerie C', { type: 'exhibition', categories: ['Photo'], isFree: true }),
+    ];
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'ollama') {
+        return new Response(JSON.stringify({ message: { content: 'Je choisirais la première option.' } }), { status: 200 });
+      }
+      const data = url.searchParams.get('q') === 'Expo photo'
+        ? expoTomorrow
+        : url.searchParams.get('freeOnly') === 'true'
+          ? mixed.filter((entry) => entry.occurrence.isFree)
+          : mixed;
+      void init;
+      return new Response(JSON.stringify({
+        data,
+        meta: {
+          generatedAt: '2026-08-29T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+          providers: [
+            { source: 'paris_data', status: 'fresh', lastSuccessAt: '2026-08-29T08:00:00.000Z' },
+            { source: 'ticketmaster', status: 'disabled', lastSuccessAt: null, disabledReason: 'missing_api_key' },
+          ],
+        },
+      }), { status: 200 });
+    });
+
+    const initial = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'mixed-outings', text: 'Qu’est-ce qu’on peut faire ce soir autour de chez moi ?' },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json<{ responseText: string }>().responseText).toContain('Concert jazz');
+    expect(initial.json<{ responseText: string }>().responseText).toContain('Expo photo');
+
+    const free = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'mixed-outings', text: 'Seulement gratuit.' },
+    });
+    expect(free.statusCode).toBe(200);
+    expect(new URL(String(fetchMock.mock.calls.at(-1)?.[0])).searchParams.get('freeOnly')).toBe('true');
+
+    const selected = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'mixed-outings', text: 'Le deuxième.' },
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.json<{ responseText: string }>().responseText).toContain('Expo photo');
+    expect(selected.json<{ responseText: string }>().responseText).toContain('Galerie Photo');
+
+    const location = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'mixed-outings', text: 'C’est où et à quelle heure ?' },
+    });
+    expect(location.statusCode).toBe(200);
+    expect(location.json<{ responseText: string }>().responseText).toContain('Galerie Photo');
+
+    const tomorrow = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'mixed-outings', text: 'Et demain ?' },
+    });
+    expect(tomorrow.statusCode).toBe(200);
+    const tomorrowUrl = new URL(String(fetchMock.mock.calls.at(-1)?.[0]));
+    expect(tomorrowUrl.searchParams.get('q')).toBe('Expo photo');
+    expect(tomorrowUrl.searchParams.get('types')).toBe('exhibition');
+    expect(tomorrow.json<{ responseText: string }>().responseText).toContain('Galerie C');
+
+    const comparison = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: {
+        threadId: 'mixed-outings',
+        text: 'Entre le premier et le troisième, lequel tu conseilles ?',
+      },
+    });
+    expect(comparison.statusCode).toBe(200);
+    expect(comparison.json<{ responseText: string }>().responseText).toBe('Je choisirais la première option.');
+    const ollamaCall = fetchMock.mock.calls.find(([url]) => new URL(String(url)).hostname === 'ollama');
+    const ollamaBody = JSON.parse(String((ollamaCall?.[1] as RequestInit | undefined)?.body)) as { messages: Array<{ content: string }> };
+    const prompt = ollamaBody.messages.map((message) => message.content).join('\n');
+    expect(prompt).toContain('Galerie A');
+    expect(prompt).toContain('Galerie C');
+    expect(prompt).not.toContain('Galerie B');
   });
 
   test('uses the focused item for a factual after-21h occurrence refresh', async () => {

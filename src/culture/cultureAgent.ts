@@ -43,12 +43,14 @@ const cultureResultContextSchema = z.object({
   to: z.string().datetime({ offset: true }),
   types: z.array(z.string()).max(10).optional(),
   categories: z.array(z.string()).max(20).optional(),
+  tags: z.array(z.string()).max(20).optional(),
   query: z.string().max(200).optional(),
   venueId: z.string().max(128).optional(),
   version: z.string().max(32).optional(),
   format: z.string().max(32).optional(),
   maxPrice: z.number().nonnegative().optional(),
   currency: z.string().length(3).optional(),
+  freeOnly: z.boolean().optional(),
 });
 
 const candidateMetadataSchema = z.object({ candidate: agoraCandidateSchema });
@@ -136,12 +138,12 @@ function formatPrice(candidate: AgoraCandidate): string {
 }
 
 function displayCandidates(candidates: AgoraCandidate[], stale: boolean, partial: boolean): string {
-  if (!candidates.length) return 'Je n’ai trouvé aucune séance correspondant à ces critères dans les données Agora.';
+  if (!candidates.length) return 'Je n’ai trouvé aucune séance ou sortie correspondant à ces critères dans les données Agora.';
   const lines = candidates.slice(0, 20).map((candidate, index) => {
     const version = typeof candidate.occurrence.attributes.version === 'string'
-      ? candidate.occurrence.attributes.version
-      : 'version inconnue';
-    return `${index + 1}. ${candidate.item.title} — ${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))} · ${version} · ${formatPrice(candidate)}`;
+      ? ` · ${candidate.occurrence.attributes.version}`
+      : '';
+    return `${index + 1}. ${candidate.item.title} — ${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))}${version} · ${formatPrice(candidate)}`;
   });
   const warnings = [
     stale ? 'Les données servies par Agora sont anciennes mais encore dans leur fenêtre autorisée.' : '',
@@ -203,19 +205,19 @@ function boundedItemDetail(response: AgoraItemResponse): Record<string, unknown>
 
 function formatItemDetail(response: AgoraItemResponse): string {
   const item = response.data;
-  const summary = item.summary?.trim() || 'Synopsis non communiqué.';
+  const summary = item.summary?.trim() || 'Description non communiquée.';
   const occurrences = item.occurrences.slice(0, 5).map((occurrence, index) => (
     `${index + 1}. ${occurrence.venue.name}, ${PARIS_FORMATTER.format(new Date(occurrence.startsAt))}`
   ));
-  return `${item.title} — ${summary}${occurrences.length ? `\n${occurrences.join('\n')}` : '\nAucune séance future connue.'}`;
+  return `${item.title} — ${summary}${occurrences.length ? `\n${occurrences.join('\n')}` : '\nAucune occurrence future connue.'}`;
 }
 
 function formatSelectedOccurrence(candidate: AgoraCandidate): string {
-  const summary = candidate.item.summary?.trim() || 'Synopsis non communiqué.';
+  const summary = candidate.item.summary?.trim() || 'Description non communiquée.';
   const version = typeof candidate.occurrence.attributes.version === 'string'
-    ? candidate.occurrence.attributes.version
-    : 'version inconnue';
-  return `${candidate.item.title} — ${summary}\n${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))} · ${version} · ${formatPrice(candidate)}`;
+    ? ` · ${candidate.occurrence.attributes.version}`
+    : '';
+  return `${candidate.item.title} — ${summary}\n${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))}${version} · ${formatPrice(candidate)}`;
 }
 
 function queryFromResultContext(
@@ -285,12 +287,14 @@ function slotsFromResultContext(context: Record<string, unknown> | null): Record
     to: parsed.data.to,
     types: parsed.data.types,
     categories: parsed.data.categories,
+    tags: parsed.data.tags,
     query: parsed.data.query,
     venueId: parsed.data.venueId,
     version: parsed.data.version,
     format: parsed.data.format,
     maxPrice: parsed.data.maxPrice,
     currency: parsed.data.currency,
+    freeOnly: parsed.data.freeOnly,
   };
 }
 
@@ -307,11 +311,24 @@ export function inferCultureRefinement(input: {
   const explicitResolvedSelector = input.selectedResult
     && /\b(?:celui|celle|le film|la seance|ce cinema)\b/u.test(value);
   if (explicitResolvedSelector) return null;
+  const selectedOccurrenceHasRequestedFacts = input.selectedResult?.entityType === 'agora.occurrence'
+    && /\bc est ou\b|\ba quelle heure\b|\bcombien (?:ca )?coute\b/u.test(value);
+  if (selectedOccurrenceHasRequestedFacts) return null;
   let refined = false;
 
   const version = /\bvostfr\b/u.test(value) ? 'VOSTFR' : /\bvo\b/u.test(value) ? 'VO' : /\bvf\b/u.test(value) ? 'VF' : undefined;
   if (version) {
     slots.version = version;
+    refined = true;
+  }
+  if (/\b(?:seulement\s+)?gratuit(?:e|es|s)?\b/u.test(value)) {
+    slots.freeOnly = true;
+    refined = true;
+  }
+  const maxPrice = value.match(/\b(?:moins de|max(?:imum)?|budget)\s+(?:de\s+)?(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|euros?)/u);
+  if (maxPrice) {
+    slots.maxPrice = Number(maxPrice[1]?.replace(',', '.'));
+    slots.currency = 'EUR';
     refined = true;
   }
   const radius = value.match(/\b(?:a|à)?\s*moins de\s+(\d{1,3}(?:[.,]\d+)?)\s*km\b/u);
@@ -324,7 +341,13 @@ export function inferCultureRefinement(input: {
   const focusNeedsOccurrences = /\bil passe ou\b|\ba quelle heure\b|\bet demain\b|\bapres\s+([01]?\d|2[0-3])\s*h/u.test(value);
   if (focusNeedsOccurrences && selectedCandidate.success) {
     slots.query = selectedCandidate.data.candidate.item.title;
-    slots.types = ['movie'];
+    slots.types = [selectedCandidate.data.candidate.item.type];
+    refined = true;
+  }
+  if (/\bmeme style\b/u.test(value) && selectedCandidate.success) {
+    slots.types = [selectedCandidate.data.candidate.item.type];
+    slots.tags = selectedCandidate.data.candidate.item.categories.slice(0, 5);
+    delete slots.query;
     refined = true;
   }
   if (/\bdemain\b/u.test(value)) {
@@ -347,7 +370,7 @@ export function inferCultureRefinement(input: {
 }
 
 function formatVenues(response: AgoraVenuesResponse): string {
-  if (!response.data.length) return 'Je n’ai trouvé aucun cinéma correspondant dans ce rayon.';
+  if (!response.data.length) return 'Je n’ai trouvé aucun lieu culturel correspondant dans ce rayon.';
   return response.data.slice(0, 20).map((venue, index) => {
     const distance = venue.distanceKm === undefined ? '' : ` · ${venue.distanceKm.toFixed(1)} km`;
     return `${index + 1}. ${venue.name} — ${venue.city ?? 'ville non communiquée'}${distance}`;
@@ -365,12 +388,22 @@ function requestedLimit(text: string): number | undefined {
 
 export function inferCultureRequest(text: string): { action: CultureAction; slots: Record<string, unknown> } | null {
   const value = normalize(text);
-  const implicitMovieRecommendation = /\b(?:quelque chose|pourrait etre)\b.*\b(sympa|leger|interessant)\b.*\b(ce soir|demain|week[ -]?end)\b/u.test(value);
+  if (/\b(?:mets|joue|lance|ecoute)\b.*\b(?:musique|jazz|rock|rap|playlist|spotify)\b/u.test(value)) return null;
+  const implicitMovieRecommendation = /\bpourrait etre\b.*\b(sympa|leger|interessant)\b.*\b(ce soir|demain|week[ -]?end)\b/u.test(value);
+  const implicitRecommendation = /\b(?:quelque chose|un truc|pourrait etre)\b.*\b(sympa|leger|interessant)\b/u.test(value);
+  const implicitFreeOuting = /\b(?:quelque chose|un truc)\b.*\bgratuit(?:e|es|s)?\b/u.test(value);
   const qualitativeMovieRequest = /\bfilms?\b.*\b(sympa|leger|interessant|pas idiot)\b/u.test(value);
-  if (!/\b(films?|cinemas?|seances?|sorties?)\b/u.test(value) && !implicitMovieRecommendation) return null;
-  const types = implicitMovieRecommendation || /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie'] : undefined;
+  const cultureTerms = /\b(films?|cinemas?|seances?|sorties?|concerts?|jazz|expos?|expositions?|theatre|spectacles?|humour|comedie|festivals?|activites?|que faire|qu est ce qu on (?:fait|peut faire)|qu est ce qu il y a)\b/u;
+  if (!cultureTerms.test(value) && !implicitRecommendation && !implicitFreeOuting) return null;
+  const types = implicitMovieRecommendation || /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie']
+    : /\bconcerts?|jazz\b/u.test(value) ? ['concert']
+      : /\bexpos?|expositions?\b/u.test(value) ? ['exhibition']
+        : /\bhumour|comedie\b/u.test(value) ? ['comedy']
+          : /\bfestivals?\b/u.test(value) ? ['festival']
+            : /\btheatre|spectacles?\b/u.test(value) ? ['theatre']
+              : undefined;
   const version = /\bvostfr\b/u.test(value) ? 'VOSTFR' : /\bvo\b/u.test(value) ? 'VO' : /\bvf\b/u.test(value) ? 'VF' : undefined;
-  let action: CultureAction = implicitMovieRecommendation || qualitativeMovieRequest || /\b(compare|choisir|choisirais|prefere|recommand\w*|pitch\w*)\b/u.test(value)
+  let action: CultureAction = implicitRecommendation || implicitFreeOuting || qualitativeMovieRequest || /\b(compare|choisir|choisirais|prefere|recommand\w*|conseille|pitch\w*)\b/u.test(value)
     ? 'recommend_candidates'
     : 'discover';
   if (/\bcinemas?\b/u.test(value) && /\b(proche\w*|pres|autour|moins de|rayon)\b/u.test(value)) {
@@ -380,8 +413,36 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
   }
   const titleMatch = value.match(/\b(?:seances?\s+(?:du film\s+|de\s+|pour\s+)?|ou\s+(?:(?:est ce que\s+)?je\s+(?:peux|puis)|puis\s+je)?\s*voir\s+)(.+?)(?=\s+(?:aujourd hui|demain|ce soir|demain soir|en vo|en vf|en vostfr|pres de|autour)|[?.!,]|$)/u);
   const query = titleMatch?.[1]?.trim();
+  const venueQuery = value.match(/\bqu est ce qu il y a (?:au|a la|aux)\s+(.+?)(?=\s+(?:ce soir|demain|ce week|vendredi|samedi|dimanche)|[?.!,]|$)/u)?.[1]?.trim();
+  const tags = ['jazz', 'photo', 'art contemporain', 'famille', 'danse', 'plein air'].filter((tag) => value.includes(tag));
+  const freeOnly = /\bgratuit(?:e|es|s)?\b/u.test(value) || undefined;
+  const priceMatch = value.match(/\bmoins de\s+(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|euros?)/u);
+  const maxPrice = priceMatch ? Number(priceMatch[1]?.replace(',', '.')) : undefined;
+  const radiusMatch = value.match(/\bmoins de\s+(\d{1,3}(?:[.,]\d+)?)\s*km\b/u);
+  const radiusKm = radiusMatch ? Number(radiusMatch[1]?.replace(',', '.')) : undefined;
   const limit = requestedLimit(value);
-  return { action, slots: { types, version, ...(query ? { query } : {}), ...(limit ? { limit } : {}) } };
+  return {
+    action,
+    slots: {
+      types, version, freeOnly, ...(tags.length ? { tags } : {}),
+      ...(query || venueQuery ? { query: query ?? venueQuery } : {}),
+      ...(maxPrice !== undefined ? { maxPrice, currency: 'EUR' } : {}),
+      ...(radiusKm !== undefined ? { radiusKm } : {}),
+      ...(limit ? { limit } : {}),
+    },
+  };
+}
+
+export function inferCultureComparisonPositions(text: string): number[] | undefined {
+  const value = normalize(text);
+  const ordinals: Record<string, number> = {
+    premier: 1, premiere: 1, deuxieme: 2, second: 2, seconde: 2, troisieme: 3, quatrieme: 4, cinquieme: 5,
+  };
+  const positions = Object.entries(ordinals)
+    .filter(([word]) => new RegExp(`\\b${word}\\b`, 'u').test(value))
+    .map(([, position]) => position)
+    .filter((position, index, all) => all.indexOf(position) === index);
+  return positions.length === 2 ? positions : undefined;
 }
 
 function resolveLocation(input: {
@@ -433,6 +494,7 @@ export async function executeCulture(input: {
   if (
     input.selectedResult
     && (input.action === 'compare_candidates' || input.action === 'recommend_candidates')
+    && !slots.candidatePositions
   ) {
     const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
     if (parsed.success) {
@@ -473,7 +535,9 @@ export async function executeCulture(input: {
     const active = input.resultSets.findActive(input.threadId);
     if (active?.id === slots.resultSetId) {
       const limit = slots.limit ?? 10;
+      const allowedPositions = slots.candidatePositions ? new Set(slots.candidatePositions) : null;
       const storedCandidates = active.items
+        .filter((item) => !allowedPositions || allowedPositions.has(item.position))
         .map((item) => candidateMetadataSchema.safeParse(item.metadata))
         .filter((parsed) => parsed.success)
         .map((parsed) => parsed.data.candidate)
@@ -492,7 +556,7 @@ export async function executeCulture(input: {
 
   const location = resolveLocation({ slots, clientContext: input.clientContext, env: input.env });
   if (!location) {
-    return { text: 'J’ai besoin de ta position ou de coordonnées de domicile configurées pour chercher des séances autour de toi.' };
+    return { text: 'J’ai besoin de ta position ou de coordonnées de domicile configurées pour chercher des sorties autour de toi.' };
   }
   if (input.action === 'find_venues') {
     const venues = await client.findVenues({
@@ -549,17 +613,21 @@ export async function executeCulture(input: {
     to,
     types: slots.types?.join(','),
     categories: slots.categories?.join(','),
+    tags: slots.tags?.join(','),
     q: slots.query,
     venueId: slots.venueId,
     version: slots.version,
     format: slots.format,
     maxPrice: slots.maxPrice,
     currency: slots.currency,
+    freeOnly: slots.freeOnly ? 'true' : undefined,
     limit: agoraLimit,
   });
 
   const presentedCandidates = candidatesForPresentation(input.action, result.data, resultLimit);
 
+  const occurrenceIdentity = input.action === 'find_occurrences'
+    || presentedCandidates.some((candidate) => candidate.item.type !== 'movie');
   const resultSet = presentedCandidates.length
     ? input.resultSets.create({
         threadId: input.threadId,
@@ -574,22 +642,24 @@ export async function executeCulture(input: {
           to,
           types: slots.types,
           categories: slots.categories,
+          tags: slots.tags,
           query: slots.query,
           venueId: slots.venueId,
           version: slots.version,
           format: slots.format,
           maxPrice: slots.maxPrice,
           currency: slots.currency,
+          freeOnly: slots.freeOnly,
         },
         items: presentedCandidates.map((candidate) => ({
-          entityType: input.action === 'find_occurrences' ? 'agora.occurrence' : 'agora.item',
-          entityId: input.action === 'find_occurrences' ? candidate.occurrence.id : candidate.item.id,
+          entityType: occurrenceIdentity ? 'agora.occurrence' : 'agora.item',
+          entityId: occurrenceIdentity ? candidate.occurrence.id : candidate.item.id,
           displayLabel: `${candidate.item.title} — ${candidate.venue.name}`,
           metadata: {
             candidate,
             referenceLabels: candidateReferenceLabels(
               candidate,
-              input.action === 'find_occurrences' ? 'occurrence' : 'item',
+              occurrenceIdentity ? 'occurrence' : 'item',
             ),
           },
         })),

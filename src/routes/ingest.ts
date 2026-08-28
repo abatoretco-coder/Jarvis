@@ -56,7 +56,7 @@ import {
 } from '../conversation/voiceUx';
 import { AgoraClientError } from '../culture/AgoraClient';
 import { cultureActionSchema } from '../culture/contracts';
-import { executeCulture, inferCultureRefinement, inferCultureRequest } from '../culture/cultureAgent';
+import { executeCulture, inferCultureComparisonPositions, inferCultureRefinement, inferCultureRequest } from '../culture/cultureAgent';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -1568,7 +1568,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const existingCultureResultSet = resultSetRepository.findActive(effectiveThreadId)?.sourceAgent === 'culture';
     const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
     const resultSetRefinement = existingCultureResultSet
-      && /\b(seulement|vo|vf|vostfr|moins de|apres|demain)\b/u.test(normalizedRawText);
+      && /\b(seulement|vo|vf|vostfr|gratuit|budget|moins de|apres|demain|meme style)\b/u.test(normalizedRawText);
     const resultSetFollowup = resultSetReference || resultSetRefinement;
     const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
     if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
@@ -1900,7 +1900,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       selectedResult: referencedResult,
     });
     const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
-      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
+      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|tu conseilles|compare|hesite|pitche)\b/u.test(normalizeIntentText(text));
+    const comparisonPositions = contextualCultureRequest ? inferCultureComparisonPositions(text) : undefined;
     const referencedCultureResult = referencedResult?.entityType.startsWith('agora.') ? referencedResult : null;
     const unresolvedReferenceText = referenceResolution.status === 'ambiguous'
       ? `Je ne peux pas déterminer lequel tu désignes. Précise le numéro parmi : ${referenceResolution.candidates.map((candidate) => `${candidate.position}. ${candidate.displayLabel}`).join(' ; ')}.`
@@ -1939,6 +1940,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           ? { itemId: referencedCultureResult.entityId }
           : {}),
         ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
+        ...(comparisonPositions ? { candidatePositions: comparisonPositions } : {}),
       };
       try {
         const culture = await executeCulture({

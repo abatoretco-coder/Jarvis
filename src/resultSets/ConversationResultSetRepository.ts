@@ -68,7 +68,7 @@ function normalizeReference(value: string): string {
     .trim();
 }
 
-const REFERENCE_TEXT_PATTERN = /\b(?:celui|celle|lui|elle|premier|premiere|deuxieme|second|seconde|troisieme|quatrieme|cinquieme|dernier|derniere|film|seance|cinema|parmi ceux la|lequel|laquelle|quelle heure|passe ou|pitche)\b/u;
+const REFERENCE_TEXT_PATTERN = /\b(?:celui|celle|lui|elle|premier|premiere|deuxieme|second|seconde|troisieme|quatrieme|cinquieme|dernier|derniere|film|seance|cinema|parmi ceux la|lequel|laquelle|quelle heure|passe ou|c est ou|combien|coute|pitche)\b/u;
 
 export function isConversationResultSetReferenceText(text: string): boolean {
   return REFERENCE_TEXT_PATTERN.test(normalizeReference(text));
@@ -193,7 +193,7 @@ export class ConversationResultSetRepository {
       return item ? this.resolveAndFocus(set, item) : { status: 'not_found', resultSetId: set.id };
     }
 
-    const focusedFollowUp = /\b(?:et\s+)?(?:lui|elle|celui la|celle la)\b|\bil passe ou\b|\ba quelle heure\b|\bpitche?\s+(?:le|la)\s+moi\b|\bet demain\b|\bce cinema\b|\b(?:et\s+)?(?:apres|avant)\b/u.test(normalized);
+    const focusedFollowUp = /\b(?:et\s+)?(?:lui|elle|celui la|celle la)\b|\bil passe ou\b|\bc est ou\b|\ba quelle heure\b|\bcombien (?:ca )?coute\b|\bpitche?\s+(?:le|la)\s+moi\b|\bet demain\b|\bce cinema\b|\b(?:et\s+)?(?:apres|avant)\b/u.test(normalized);
     if (focusedFollowUp && set.focusedPosition !== null) {
       const item = set.items.find((candidate) => candidate.position === set.focusedPosition);
       return item ? this.resolveAndFocus(set, item) : { status: 'not_found', resultSetId: set.id };

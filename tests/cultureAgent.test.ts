@@ -76,6 +76,29 @@ describe('cultureAgent', () => {
     });
   });
 
+  test('recognizes generic outings, type, tags, price and venue constraints', () => {
+    expect(inferCultureRequest('Mets du jazz au salon')).toBeNull();
+    expect(inferCultureRequest('Quelque chose de gratuit.')).toMatchObject({
+      action: 'recommend_candidates',
+      slots: { freeOnly: true },
+    });
+    expect(inferCultureRequest('Qu’est-ce qu’on peut faire ce soir autour de chez moi ?')).toMatchObject({
+      action: 'discover', slots: { types: undefined },
+    });
+    expect(inferCultureRequest('Je veux une expo à moins de 3 km demain.')).toMatchObject({
+      action: 'discover', slots: { types: ['exhibition'] },
+    });
+    expect(inferCultureRequest('Un concert jazz vendredi soir à moins de 30 €.')).toMatchObject({
+      action: 'discover', slots: { types: ['concert'], tags: ['jazz'], maxPrice: 30, currency: 'EUR' },
+    });
+    expect(inferCultureRequest('Qu’est-ce qu’il y a au Centquatre ce week-end ?')).toMatchObject({
+      action: 'discover', slots: { query: 'centquatre' },
+    });
+    expect(inferCultureRequest('Une sortie famille gratuite dimanche.')).toMatchObject({
+      action: 'discover', slots: { tags: ['famille'], freeOnly: true },
+    });
+  });
+
   test('resolves Paris windows across days, evening midnight and multi-day periods', () => {
     const summerNow = new Date('2026-08-27T10:00:00.000Z');
     expect(resolveCultureWindow('aujourd’hui', summerNow)).toEqual({
