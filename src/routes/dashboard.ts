@@ -11,7 +11,7 @@ import {
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
-import { qualifyMail, type MailQualification } from '../mail/mailQualification';
+import { type MailQualification,qualifyMail } from '../mail/mailQualification';
 import type { AppDeps } from '../server';
 import { getParisStartOfDayUtc } from '../time/parisTime';
 

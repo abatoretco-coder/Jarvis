@@ -1944,6 +1944,73 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
+    const inferredCulture = inferCultureRequest(assistantInputText);
+    const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
+    const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
+      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
+    const referencedCultureResult = referencedResult?.entityType.startsWith('agora.') ? referencedResult : null;
+    if (parsed.data.domain === 'culture' || inferredCulture || referencedCultureResult || contextualCultureRequest) {
+      const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
+      const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
+        ? parsedCultureAction.data
+        : referencedCultureResult
+          ? 'get_item'
+          : contextualCultureRequest
+            ? 'recommend_candidates'
+            : inferredCulture?.action ?? 'discover';
+      const requestedSlots = {
+        ...(inferredCulture?.slots ?? {}),
+        ...(parsed.data.slots ?? {}),
+        ...(referencedCultureResult?.entityType === 'agora.item'
+          ? { itemId: referencedCultureResult.entityId }
+          : {}),
+        ...(contextualCultureRequest && activeResultSet ? { resultSetId: activeResultSet.id } : {}),
+      };
+      try {
+        const culture = await executeCulture({
+          action: requestedAction,
+          slots: requestedSlots,
+          text: assistantInputText,
+          threadId: effectiveThreadId,
+          clientContext: parsed.data.clientContext,
+          env: deps.env,
+          resultSets: resultSetRepository,
+          selectedResult: referencedCultureResult,
+        });
+        const responseText = voiceEnabled
+          ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
+          : culture.text;
+        await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        return reply.code(200).send({
+          threadId: effectiveThreadId,
+          responseText: toSingleParagraphPlainText(responseText),
+          replyMeta: {
+            kind: 'culture',
+            source: 'agora',
+            routeKey: `culture.${requestedAction}`,
+            semanticDecision: referencedCultureResult ? 'deterministic_reference' : 'activated',
+          },
+        });
+      } catch (error) {
+        app.log.warn({ threadId: effectiveThreadId, requestId, error }, 'culture_agent_failed');
+        if (error instanceof z.ZodError) {
+          return reply.code(400).send({ error: 'invalid_culture_contract', issues: error.issues });
+        }
+        if (error instanceof Error && error.message === 'agora_not_configured') {
+          return reply.code(503).send({ error: 'agora_not_configured' });
+        }
+        if (error instanceof AgoraClientError) {
+          if (error.code === 'timeout') return reply.code(504).send({ error: 'agora_timeout' });
+          if (error.code === 'unauthorized') return reply.code(502).send({ error: 'agora_unauthorized' });
+          if (error.code === 'invalid_response') return reply.code(502).send({ error: 'agora_invalid_response' });
+          if (error.code === 'unavailable') return reply.code(503).send({ error: 'agora_unavailable' });
+        }
+        return reply.code(502).send({ error: 'agora_unavailable' });
+      }
+    }
+
     if (parsed.data.domain === 'spotify' && parsed.data.action) {
       const explicitSpotifyPayload = ingestSpotifyRequestSchema.safeParse({
         ...parsed.data,

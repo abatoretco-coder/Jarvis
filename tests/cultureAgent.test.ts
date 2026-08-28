@@ -1,7 +1,12 @@
 import { describe, expect, jest, test } from '@jest/globals';
 
 import { createConversationDb, SqliteThreadRepository } from '../src/conversation/repositories/SqliteRepositories';
-import { executeCulture, inferCultureRequest, resolveCultureWindow } from '../src/culture/cultureAgent';
+import {
+  executeCulture,
+  inferCultureRequest,
+  resolveCultureWindow,
+  resolveEffectiveCultureWindow,
+} from '../src/culture/cultureAgent';
 import { loadEnv } from '../src/env';
 import { ConversationResultSetRepository } from '../src/resultSets/ConversationResultSetRepository';
 
@@ -15,11 +20,11 @@ const source = {
   sourceType: 'open_data',
 };
 
-function candidate(id: string, title: string) {
+function candidate(id: string, title: string, occurrenceSuffix = id, venueName = 'Cinéma exact') {
   return {
     item: { id, type: 'movie', title, summary: null, categories: [], attributes: {} },
     occurrence: {
-      id: `occ_${id}`,
+      id: `occ_${occurrenceSuffix}`,
       startsAt: '2026-08-28T18:30:00.000Z',
       endsAt: null,
       status: 'scheduled',
@@ -28,7 +33,7 @@ function candidate(id: string, title: string) {
       bookingUrl: null,
       attributes: { version: 'VO' },
     },
-    venue: { id: `venue_${id}`, name: 'Cinéma exact', distanceKm: 2.1 },
+    venue: { id: `venue_${occurrenceSuffix}`, name: venueName, distanceKm: 2.1 },
     source,
     rankReasons: ['nearby'],
   };
@@ -65,9 +70,7 @@ describe('cultureAgent', () => {
     expect(inferCultureRequest('Pitche-moi les trois meilleurs films')).toMatchObject({
       action: 'recommend_candidates', slots: { limit: 3 },
     });
-    expect(inferCultureRequest('Pitche-moi les trois meilleurs')).toMatchObject({
-      action: 'recommend_candidates', slots: { limit: 3 },
-    });
+    expect(inferCultureRequest('Pitche-moi les trois meilleurs')).toBeNull();
     expect(inferCultureRequest('Qu’est-ce qui pourrait être sympa ce soir ?')).toMatchObject({
       action: 'recommend_candidates', slots: { types: ['movie'] },
     });
@@ -87,6 +90,73 @@ describe('cultureAgent', () => {
     expect(resolveCultureWindow('cette semaine', summerNow)).toEqual({
       from: '2026-08-26T22:00:00.000Z', to: '2026-09-02T22:00:00.000Z',
     });
+  });
+
+  test('clamps current-day and late-evening searches to now while preserving future windows', () => {
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films aujourd’hui', new Date('2026-08-27T12:00:00.000Z')),
+      new Date('2026-08-27T12:00:00.000Z'),
+    )).toEqual({ from: '2026-08-27T12:00:00.000Z', to: '2026-08-27T22:00:00.000Z' });
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films ce soir', new Date('2026-08-27T20:30:00.000Z')),
+      new Date('2026-08-27T20:30:00.000Z'),
+    )).toEqual({ from: '2026-08-27T20:30:00.000Z', to: '2026-08-28T00:00:00.000Z' });
+    expect(resolveEffectiveCultureWindow(
+      resolveCultureWindow('films demain', new Date('2026-08-27T12:00:00.000Z')),
+      new Date('2026-08-27T12:00:00.000Z'),
+    )).toEqual({ from: '2026-08-27T22:00:00.000Z', to: '2026-08-28T22:00:00.000Z' });
+  });
+
+  test('does not query Agora for a window that is entirely in the past', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const db = createConversationDb(':memory:');
+    await new SqliteThreadRepository(db).getOrCreate('past-window-thread');
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+    const result = await executeCulture({
+      action: 'discover',
+      slots: { from: '2026-08-26T08:00:00.000Z', to: '2026-08-26T10:00:00.000Z' },
+      text: 'films hier',
+      threadId: 'past-window-thread',
+      env,
+      resultSets: new ConversationResultSetRepository(db),
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    expect(result.text).toContain('déjà passée');
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+    db.close();
+  });
+
+  test('sends only future availability to Agora for today and a late evening', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => (
+      new Response(JSON.stringify(discoverResponse()), { status: 200 })
+    ));
+    const db = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(db);
+    await threads.getOrCreate('today-window-thread');
+    await threads.getOrCreate('late-window-thread');
+    const resultSets = new ConversationResultSetRepository(db);
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+
+    await executeCulture({
+      action: 'discover', slots: {}, text: 'films aujourd’hui', threadId: 'today-window-thread', env, resultSets,
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    await executeCulture({
+      action: 'discover', slots: {}, text: 'films ce soir', threadId: 'late-window-thread', env, resultSets,
+      now: new Date('2026-08-27T20:30:00.000Z'),
+    });
+
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('from')).toBe('2026-08-27T12:00:00.000Z');
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('from')).toBe('2026-08-27T20:30:00.000Z');
+    fetchMock.mockRestore();
+    db.close();
   });
 
   test('sends exact location, interval and VO filters to Agora and stores generic references', async () => {
@@ -125,7 +195,50 @@ describe('cultureAgent', () => {
     expect(calledUrl.searchParams.get('from')).toBe('2026-08-28T16:00:00.000Z');
     expect(calledUrl.searchParams.get('to')).toBe('2026-08-29T00:00:00.000Z');
     expect(calledUrl.searchParams.get('version')).toBe('VO');
+    expect(calledUrl.searchParams.get('limit')).toBe('50');
     fetchMock.mockRestore();
+    db.close();
+  });
+
+  test('deduplicates movie discovery but preserves distinct explicit showtimes', async () => {
+    const sameMovie = 'item_aaaaaaaaaaaaaaaaaaaaaaaa';
+    const responseCandidates = [
+      candidate(sameMovie, 'Film unique', 'showtime_1', 'Cinéma A'),
+      candidate(sameMovie, 'Film unique', 'showtime_2', 'Cinéma B'),
+      candidate('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B'),
+    ];
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => (
+      new Response(JSON.stringify(discoverResponse(responseCandidates)), { status: 200 })
+    ));
+    const db = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(db);
+    await threads.getOrCreate('dedupe-thread');
+    await threads.getOrCreate('showtimes-thread');
+    const resultSets = new ConversationResultSetRepository(db);
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+
+    const discovery = await executeCulture({
+      action: 'discover', slots: {}, text: 'films ce soir', threadId: 'dedupe-thread', env, resultSets,
+    });
+    expect(discovery.text.match(/Film unique/gu)).toHaveLength(1);
+    expect(resultSets.findActive('dedupe-thread')?.items).toMatchObject([
+      { entityType: 'agora.item', entityId: sameMovie },
+      { entityType: 'agora.item', entityId: 'item_bbbbbbbbbbbbbbbbbbbbbbbb' },
+    ]);
+
+    const showtimes = await executeCulture({
+      action: 'find_occurrences', slots: { query: 'Film unique' }, text: 'séances de Film unique ce soir',
+      threadId: 'showtimes-thread', env, resultSets,
+    });
+    expect(showtimes.text.match(/Film unique/gu)).toHaveLength(2);
+    expect(resultSets.findActive('showtimes-thread')?.items.slice(0, 2)).toMatchObject([
+      { entityType: 'agora.occurrence', entityId: 'occ_showtime_1' },
+      { entityType: 'agora.occurrence', entityId: 'occ_showtime_2' },
+    ]);
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('limit')).toBe('20');
     db.close();
   });
 
