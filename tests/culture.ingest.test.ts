@@ -307,6 +307,47 @@ describe('Culture through /v1/ingest', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  test('reuses the active voice-hub Culture thread before the Home Assistant preflight', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-voice-thread-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: candidates,
+      meta: {
+        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+      },
+    }), { status: 200 }));
+    const clientContext = { channel: 'ha.voice-hub', voiceMode: 'short' };
+
+    const initial = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: {
+        threadId: 'culture-voice-thread-a',
+        text: 'Quels films passent ce soir ?',
+        clientContext,
+      },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({ threadId: 'culture-voice-thread-a' });
+
+    const refinement = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: {
+        threadId: 'culture-voice-thread-b',
+        text: 'Seulement en VO.',
+        clientContext,
+      },
+    });
+
+    expect(refinement.statusCode).toBe(200);
+    expect(refinement.json()).toMatchObject({ threadId: 'culture-voice-thread-a' });
+    expect(refinement.json()).not.toMatchObject({ error: 'ha_not_configured' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [initialUrl, refinementUrl] = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(refinementUrl?.searchParams.get('version')).toBe('VO');
+    for (const parameter of ['lat', 'lon', 'radiusKm', 'from', 'to', 'types']) {
+      expect(refinementUrl?.searchParams.get(parameter)).toBe(initialUrl?.searchParams.get(parameter));
+    }
+  });
+
   test('uses the focused item for a factual after-21h occurrence refresh', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-focus-refinement-'));
     const dbPath = join(tempDir, 'conversation.sqlite');

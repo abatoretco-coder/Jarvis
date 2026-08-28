@@ -1527,16 +1527,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const rawText = parsed.data.text ?? '';
     const normalizedRawText = normalizeIntentText(rawText);
-    const existingCultureResultSet = resultSetRepository.findActive(parsed.data.threadId)?.sourceAgent === 'culture';
-    const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
-    const resultSetRefinement = existingCultureResultSet
-      && /\b(seulement|vo|vf|vostfr|moins de|apres|demain)\b/u.test(normalizedRawText);
-    const resultSetFollowup = resultSetReference || resultSetRefinement;
-    const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
-    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
-      return reply.code(503).send({ error: 'ha_not_configured' });
-    }
-
     const threadId = parsed.data.threadId.trim();
     const text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
@@ -1573,6 +1563,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         },
         'ingest_reusing_active_thread'
       );
+    }
+
+    const existingCultureResultSet = resultSetRepository.findActive(effectiveThreadId)?.sourceAgent === 'culture';
+    const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
+    const resultSetRefinement = existingCultureResultSet
+      && /\b(seulement|vo|vf|vostfr|moins de|apres|demain)\b/u.test(normalizedRawText);
+    const resultSetFollowup = resultSetReference || resultSetRefinement;
+    const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
+    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
+      return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
