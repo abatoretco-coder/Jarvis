@@ -29,13 +29,21 @@ export type ResolvedConversationResult = ConversationResultSetItem & {
   resultSetContext: JsonObject | null;
 };
 
+export type ConversationReferenceResolution =
+  | { status: 'resolved'; result: ResolvedConversationResult }
+  | { status: 'ambiguous'; resultSetId: string; candidates: ConversationResultSetItem[] }
+  | { status: 'not_found'; resultSetId: string }
+  | { status: 'expired' }
+  | { status: 'not_reference' };
+
+export const MAX_CONVERSATION_RESULT_SET_ITEMS = 20;
 const MAX_SET_CONTEXT_BYTES = 16_384;
 const MAX_ITEM_METADATA_BYTES = 32_768;
 
 function serializeBounded(value: JsonObject | null | undefined, maxBytes: number): string | null {
   if (!value) return null;
   const json = JSON.stringify(value);
-  if (Buffer.byteLength(json, 'utf8') > maxBytes) throw new Error('conversation_result_set_context_too_large');
+  if (Buffer.byteLength(json, 'utf8') > maxBytes) throw new Error('conversation_result_set_payload_too_large');
   return json;
 }
 
@@ -47,6 +55,40 @@ function parseObject(value: unknown): JsonObject | null {
   } catch {
     return null;
   }
+}
+
+function normalizeReference(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/['’_-]+/gu, ' ')
+    .replace(/[^a-z0-9\s]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+const REFERENCE_TEXT_PATTERN = /\b(?:celui|celle|lui|elle|premier|premiere|deuxieme|second|seconde|troisieme|quatrieme|cinquieme|dernier|derniere|film|seance|cinema|parmi ceux la|lequel|laquelle|quelle heure|passe ou|pitche)\b/u;
+
+export function isConversationResultSetReferenceText(text: string): boolean {
+  return REFERENCE_TEXT_PATTERN.test(normalizeReference(text));
+}
+
+function containsNormalizedLabel(text: string, label: string): boolean {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, 'u').test(text);
+}
+
+function referenceLabels(item: ConversationResultSetItem): string[] {
+  const configured = item.metadata?.referenceLabels;
+  const labels = Array.isArray(configured)
+    ? configured.filter((label): label is string => typeof label === 'string')
+    : [];
+  return [item.displayLabel, ...labels].map(normalizeReference).filter((label) => label.length >= 2);
+}
+
+function toResolved(set: ConversationResultSet, item: ConversationResultSetItem): ResolvedConversationResult {
+  return { ...item, resultSetId: set.id, resultSetContext: set.context };
 }
 
 export class ConversationResultSetRepository {
@@ -61,10 +103,11 @@ export class ConversationResultSetRepository {
     ttlMs?: number;
   }): ConversationResultSet {
     const now = Date.now();
+    this.cleanupExpired(now);
     const id = randomUUID();
     const expiresAtMs = now + (input.ttlMs ?? 86_400_000);
     const contextJson = serializeBounded(input.context, MAX_SET_CONTEXT_BYTES);
-    const items = input.items.slice(0, 20).map((item, index) => ({
+    const items = input.items.slice(0, MAX_CONVERSATION_RESULT_SET_ITEMS).map((item, index) => ({
       ...item,
       position: index + 1,
       metadata: item.metadata ?? null,
@@ -105,7 +148,93 @@ export class ConversationResultSetRepository {
     };
   }
 
+  cleanupExpired(now = Date.now()): number {
+    return this.db.prepare('DELETE FROM conversation_result_sets WHERE expires_at_ms<=?').run(now).changes;
+  }
+
   findActive(threadId: string): ConversationResultSet | null {
+    return this.loadActive(threadId);
+  }
+
+  resolveReferenceDetailed(threadId: string, text: string): ConversationReferenceResolution {
+    const now = Date.now();
+    const expired = this.db.prepare(`
+      SELECT 1 FROM conversation_result_sets
+      WHERE thread_id=? AND active=1 AND expires_at_ms<=?
+      LIMIT 1
+    `).get(threadId, now);
+    this.cleanupExpired(now);
+    const set = this.loadActive(threadId);
+    if (!set) return expired ? { status: 'expired' } : { status: 'not_reference' };
+
+    const normalized = normalizeReference(text);
+    const ordinals: Record<string, number> = {
+      premier: 1,
+      premiere: 1,
+      deuxieme: 2,
+      second: 2,
+      seconde: 2,
+      troisieme: 3,
+      quatrieme: 4,
+      cinquieme: 5,
+    };
+    let requestedPosition: number | null = null;
+    for (const [word, position] of Object.entries(ordinals)) {
+      if (new RegExp(`\\b${word}\\b`, 'u').test(normalized)) {
+        requestedPosition = position;
+        break;
+      }
+    }
+    if (requestedPosition === null && /\bdernier(?:e)?\b/u.test(normalized)) {
+      requestedPosition = set.items.at(-1)?.position ?? null;
+    }
+    if (requestedPosition !== null) {
+      const item = set.items.find((candidate) => candidate.position === requestedPosition);
+      return item ? this.resolveAndFocus(set, item) : { status: 'not_found', resultSetId: set.id };
+    }
+
+    const focusedFollowUp = /\b(?:et\s+)?(?:lui|elle|celui la|celle la)\b|\bil passe ou\b|\ba quelle heure\b|\bpitche?\s+(?:le|la)\s+moi\b|\bet demain\b|\bce cinema\b|\b(?:et\s+)?(?:apres|avant)\b/u.test(normalized);
+    if (focusedFollowUp && set.focusedPosition !== null) {
+      const item = set.items.find((candidate) => candidate.position === set.focusedPosition);
+      return item ? this.resolveAndFocus(set, item) : { status: 'not_found', resultSetId: set.id };
+    }
+
+    const refinementExpression = /\b(?:seulement|moins de|apres|avant)\b/u.test(normalized);
+    const explicitSelector = /\b(?:celui|celle)\b|\b(?:le film|la seance|ce cinema)\b/u.test(normalized);
+    if (refinementExpression && !explicitSelector) return { status: 'not_reference' };
+
+    const scored = set.items.map((item) => {
+      const matches = referenceLabels(item).filter((label) => containsNormalizedLabel(normalized, label));
+      return { item, score: matches.reduce((total, label) => total + label.length, 0) };
+    }).filter(({ score }) => score > 0);
+    if (scored.length) {
+      const bestScore = Math.max(...scored.map(({ score }) => score));
+      const best = scored.filter(({ score }) => score === bestScore).map(({ item }) => item);
+      return best.length === 1
+        ? this.resolveAndFocus(set, best[0]!)
+        : { status: 'ambiguous', resultSetId: set.id, candidates: best.slice(0, 5) };
+    }
+
+    const looksLikeReference = isConversationResultSetReferenceText(normalized);
+    return looksLikeReference
+      ? { status: 'not_found', resultSetId: set.id }
+      : { status: 'not_reference' };
+  }
+
+  resolveReference(threadId: string, text: string): ResolvedConversationResult | null {
+    const resolution = this.resolveReferenceDetailed(threadId, text);
+    return resolution.status === 'resolved' ? resolution.result : null;
+  }
+
+  private resolveAndFocus(
+    set: ConversationResultSet,
+    item: ConversationResultSetItem,
+  ): { status: 'resolved'; result: ResolvedConversationResult } {
+    this.db.prepare('UPDATE conversation_result_sets SET focused_position=? WHERE id=?').run(item.position, set.id);
+    return { status: 'resolved', result: toResolved(set, item) };
+  }
+
+  private loadActive(threadId: string): ConversationResultSet | null {
     const row = this.db.prepare(`
       SELECT * FROM conversation_result_sets
       WHERE thread_id=? AND active=1 AND expires_at_ms>?
@@ -139,36 +268,5 @@ export class ConversationResultSetRepository {
         metadata: parseObject(item.metadata_json),
       })),
     };
-  }
-
-  resolveReference(threadId: string, text: string): ResolvedConversationResult | null {
-    const set = this.findActive(threadId);
-    if (!set) return null;
-    const normalized = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    const ordinals: Record<string, number> = {
-      premier: 1,
-      premiere: 1,
-      deuxieme: 2,
-      second: 2,
-      seconde: 2,
-      troisieme: 3,
-      quatrieme: 4,
-      cinquieme: 5,
-    };
-    let position: number | null = null;
-    for (const [word, value] of Object.entries(ordinals)) {
-      if (new RegExp(`\\b${word}\\b`, 'u').test(normalized)) {
-        position = value;
-        break;
-      }
-    }
-    if (position === null && /\b(lui|celui la|celle la|et lui)\b/u.test(normalized)) {
-      position = set.focusedPosition;
-    }
-    if (position === null) return null;
-    const item = set.items.find((candidate) => candidate.position === position) ?? null;
-    if (!item) return null;
-    this.db.prepare('UPDATE conversation_result_sets SET focused_position=? WHERE id=?').run(position, set.id);
-    return { ...item, resultSetId: set.id, resultSetContext: set.context };
   }
 }

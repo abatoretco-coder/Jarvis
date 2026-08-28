@@ -101,6 +101,9 @@ const envSchema = z
   AGORA_BASE_URL: optionalUrl,
   AGORA_API_TOKEN: optionalNonEmptyString,
   AGORA_TIMEOUT_MS: numberFromEnv.default(8000),
+  CONVERSATION_RESULT_SET_TTL_MS: numberFromEnv
+    .pipe(z.number().min(60_000).max(604_800_000))
+    .default(86_400_000),
   CULTURE_HOME_LATITUDE: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
   CULTURE_HOME_LONGITUDE: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
   CULTURE_DEFAULT_RADIUS_KM: z.coerce.number().positive().max(200).default(15),

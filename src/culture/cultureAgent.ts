@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Env } from '../env';
 import { completeOllamaChat } from '../ollamaChat';
 import type {
+  ConversationResultSet,
   ConversationResultSetRepository,
   ResolvedConversationResult,
 } from '../resultSets/ConversationResultSetRepository';
@@ -14,6 +15,7 @@ import {
   type AgoraItemResponse,
   type AgoraVenuesResponse,
   type CultureAction,
+  cultureActionSchema,
   cultureSlotsSchema,
 } from './contracts';
 
@@ -26,15 +28,38 @@ const PARIS_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
   minute: '2-digit',
 });
 
+const PARIS_TIME_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
+  timeZone: 'Europe/Paris',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
 const cultureResultContextSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   radiusKm: z.number().positive().max(200),
   from: z.string().datetime({ offset: true }),
   to: z.string().datetime({ offset: true }),
+  types: z.array(z.string()).max(10).optional(),
+  categories: z.array(z.string()).max(20).optional(),
+  query: z.string().max(200).optional(),
+  venueId: z.string().max(128).optional(),
+  version: z.string().max(32).optional(),
+  format: z.string().max(32).optional(),
+  maxPrice: z.number().nonnegative().optional(),
+  currency: z.string().length(3).optional(),
 });
 
 const candidateMetadataSchema = z.object({ candidate: agoraCandidateSchema });
+const venueMetadataSchema = z.object({
+  venue: z.object({
+    id: z.string(),
+    name: z.string(),
+    city: z.string().nullable(),
+    distanceKm: z.number().optional(),
+  }),
+});
 
 function normalize(value: string): string {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/['’_-]+/gu, ' ').toLowerCase();
@@ -193,7 +218,9 @@ function formatSelectedOccurrence(candidate: AgoraCandidate): string {
   return `${candidate.item.title} — ${summary}\n${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))} · ${version} · ${formatPrice(candidate)}`;
 }
 
-function queryFromResultContext(context: Record<string, unknown> | null): Record<string, string | number> | undefined {
+function queryFromResultContext(
+  context: Record<string, unknown> | null,
+): Record<string, string | number | undefined> | undefined {
   const parsed = cultureResultContextSchema.safeParse(context);
   if (!parsed.success) return undefined;
   return {
@@ -202,6 +229,120 @@ function queryFromResultContext(context: Record<string, unknown> | null): Record
     radiusKm: parsed.data.radiusKm,
     from: parsed.data.from,
     to: parsed.data.to,
+  };
+}
+
+function contributorReferenceLabels(candidate: AgoraCandidate): string[] {
+  return (candidate.item.contributors ?? []).flatMap((contributor) => {
+    const words = contributor.trim().split(/\s+/u);
+    const surname = words.length > 1 ? words.at(-1) : null;
+    return surname ? [contributor, surname] : [contributor];
+  });
+}
+
+function candidateReferenceLabels(candidate: AgoraCandidate, entityType: 'item' | 'occurrence'): string[] {
+  const itemLabels = [candidate.item.title, ...contributorReferenceLabels(candidate)];
+  if (entityType === 'item') return [...new Set(itemLabels)];
+  const startsAt = new Date(candidate.occurrence.startsAt);
+  const timeParts = PARIS_TIME_FORMATTER.formatToParts(startsAt);
+  const hour = timeParts.find((part) => part.type === 'hour')?.value ?? '';
+  const minute = timeParts.find((part) => part.type === 'minute')?.value ?? '';
+  const timeLabels = minute === '00'
+    ? [`${hour}h`, `${hour}h00`]
+    : [`${hour}h${minute}`, `${hour} h ${minute}`];
+  const version = typeof candidate.occurrence.attributes.version === 'string'
+    ? candidate.occurrence.attributes.version
+    : null;
+  const format = typeof candidate.occurrence.attributes.format === 'string'
+    ? candidate.occurrence.attributes.format
+    : null;
+  const versionLabels = version === 'VOSTFR' ? [version, 'VO'] : version ? [version] : [];
+  return [...new Set([
+    ...itemLabels,
+    candidate.venue.name,
+    ...timeLabels,
+    ...versionLabels,
+    ...(format ? [format] : []),
+  ].filter(Boolean))];
+}
+
+function shiftParisLocalDay(value: string, days: number): string {
+  const date = new Date(value);
+  const parts = PARIS_TIME_FORMATTER.formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value ?? 0);
+  return getParisDateTimeUtc(date, days, hour, minute).toISOString();
+}
+
+function slotsFromResultContext(context: Record<string, unknown> | null): Record<string, unknown> | null {
+  const parsed = cultureResultContextSchema.safeParse(context);
+  if (!parsed.success) return null;
+  return {
+    latitude: parsed.data.latitude,
+    longitude: parsed.data.longitude,
+    radiusKm: parsed.data.radiusKm,
+    from: parsed.data.from,
+    to: parsed.data.to,
+    types: parsed.data.types,
+    categories: parsed.data.categories,
+    query: parsed.data.query,
+    venueId: parsed.data.venueId,
+    version: parsed.data.version,
+    format: parsed.data.format,
+    maxPrice: parsed.data.maxPrice,
+    currency: parsed.data.currency,
+  };
+}
+
+export function inferCultureRefinement(input: {
+  text: string;
+  activeResultSet: ConversationResultSet | null;
+  selectedResult?: ResolvedConversationResult | null;
+}): { action: CultureAction; slots: Record<string, unknown> } | null {
+  const active = input.activeResultSet;
+  if (active?.sourceAgent !== 'culture') return null;
+  const slots = slotsFromResultContext(active.context);
+  if (!slots) return null;
+  const value = normalize(input.text);
+  const explicitResolvedSelector = input.selectedResult
+    && /\b(?:celui|celle|le film|la seance|ce cinema)\b/u.test(value);
+  if (explicitResolvedSelector) return null;
+  let refined = false;
+
+  const version = /\bvostfr\b/u.test(value) ? 'VOSTFR' : /\bvo\b/u.test(value) ? 'VO' : /\bvf\b/u.test(value) ? 'VF' : undefined;
+  if (version) {
+    slots.version = version;
+    refined = true;
+  }
+  const radius = value.match(/\b(?:a|à)?\s*moins de\s+(\d{1,3}(?:[.,]\d+)?)\s*km\b/u);
+  if (radius) {
+    slots.radiusKm = Number(radius[1]?.replace(',', '.'));
+    refined = true;
+  }
+
+  const selectedCandidate = candidateMetadataSchema.safeParse(input.selectedResult?.metadata);
+  const focusNeedsOccurrences = /\bil passe ou\b|\ba quelle heure\b|\bet demain\b|\bapres\s+([01]?\d|2[0-3])\s*h/u.test(value);
+  if (focusNeedsOccurrences && selectedCandidate.success) {
+    slots.query = selectedCandidate.data.candidate.item.title;
+    slots.types = ['movie'];
+    refined = true;
+  }
+  if (/\bdemain\b/u.test(value)) {
+    slots.from = shiftParisLocalDay(String(slots.from), 1);
+    slots.to = shiftParisLocalDay(String(slots.to), 1);
+    refined = true;
+  }
+  const afterHour = value.match(/\bapres\s+([01]?\d|2[0-3])\s*h/u);
+  if (afterHour) {
+    const contextDate = new Date(String(slots.from));
+    slots.from = getParisDateTimeUtc(contextDate, 0, Number(afterHour[1])).toISOString();
+    refined = true;
+  }
+  if (!refined) return null;
+  const previousAction = cultureActionSchema.safeParse(active.sourceAction);
+  return {
+    action: focusNeedsOccurrences ? 'find_occurrences' : previousAction.success ? previousAction.data : 'discover',
+    slots,
   };
 }
 
@@ -289,6 +430,34 @@ export async function executeCulture(input: {
     timeoutMs: input.env.AGORA_TIMEOUT_MS,
   });
 
+  if (
+    input.selectedResult
+    && (input.action === 'compare_candidates' || input.action === 'recommend_candidates')
+  ) {
+    const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
+    if (parsed.success) {
+      try {
+        return {
+          text: await synthesize([parsed.data.candidate], input.text, input.env, 1),
+          resultSetId: input.selectedResult.resultSetId,
+        };
+      } catch {
+        return {
+          text: `${formatSelectedOccurrence(parsed.data.candidate)}\nJe n’ai pas pu générer le pitch local.`,
+          resultSetId: input.selectedResult.resultSetId,
+        };
+      }
+    }
+  }
+
+  if (input.selectedResult?.entityType === 'agora.venue') {
+    const parsed = venueMetadataSchema.safeParse(input.selectedResult.metadata);
+    if (parsed.success) {
+      const distance = parsed.data.venue.distanceKm === undefined ? '' : ` · ${parsed.data.venue.distanceKm.toFixed(1)} km`;
+      return { text: `${parsed.data.venue.name} — ${parsed.data.venue.city ?? 'ville non communiquée'}${distance}` };
+    }
+  }
+
   if (input.action === 'get_item' && input.selectedResult?.entityType === 'agora.occurrence') {
     const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
     if (parsed.success) return { text: formatSelectedOccurrence(parsed.data.candidate) };
@@ -334,7 +503,30 @@ export async function executeCulture(input: {
       type: slots.types?.includes('movie') ? 'cinema' : undefined,
       limit: slots.limit ?? 20,
     });
-    return { text: formatVenues(venues) };
+    const resultSet = venues.data.length
+      ? input.resultSets.create({
+          threadId: input.threadId,
+          sourceAgent: 'culture',
+          sourceAction: input.action,
+          ttlMs: input.env.CONVERSATION_RESULT_SET_TTL_MS,
+          context: {
+            latitude: location.lat,
+            longitude: location.lon,
+            radiusKm: location.radiusKm,
+            from: new Date().toISOString(),
+            to: new Date(Date.now() + 86_400_000).toISOString(),
+            types: slots.types,
+            query: slots.query,
+          },
+          items: venues.data.map((venue) => ({
+            entityType: 'agora.venue',
+            entityId: venue.id,
+            displayLabel: venue.name,
+            metadata: { venue, referenceLabels: [venue.name] },
+          })),
+        })
+      : null;
+    return { text: formatVenues(venues), ...(resultSet ? { resultSetId: resultSet.id } : {}) };
   }
 
   const now = input.now ?? new Date();
@@ -373,18 +565,33 @@ export async function executeCulture(input: {
         threadId: input.threadId,
         sourceAgent: 'culture',
         sourceAction: input.action,
+        ttlMs: input.env.CONVERSATION_RESULT_SET_TTL_MS,
         context: {
           latitude: location.lat,
           longitude: location.lon,
           radiusKm: location.radiusKm,
           from,
           to,
+          types: slots.types,
+          categories: slots.categories,
+          query: slots.query,
+          venueId: slots.venueId,
+          version: slots.version,
+          format: slots.format,
+          maxPrice: slots.maxPrice,
+          currency: slots.currency,
         },
         items: presentedCandidates.map((candidate) => ({
           entityType: input.action === 'find_occurrences' ? 'agora.occurrence' : 'agora.item',
           entityId: input.action === 'find_occurrences' ? candidate.occurrence.id : candidate.item.id,
           displayLabel: `${candidate.item.title} — ${candidate.venue.name}`,
-          metadata: { candidate },
+          metadata: {
+            candidate,
+            referenceLabels: candidateReferenceLabels(
+              candidate,
+              input.action === 'find_occurrences' ? 'occurrence' : 'item',
+            ),
+          },
         })),
       })
     : null;

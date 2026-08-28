@@ -14,21 +14,36 @@ const source = {
   sourceModifiedAt: null, freshness: 'fresh', sourceType: 'open_data',
 };
 
-function candidate(id: string, title: string, hour: number, occurrenceId = `occ_${id}`, venueName = `Cinéma ${title}`) {
+function candidate(
+  id: string,
+  title: string,
+  hour: number,
+  occurrenceId = `occ_${id}`,
+  venueName = `Cinéma ${title}`,
+  options: { version?: string; contributors?: string[] } = {},
+) {
   return {
-    item: { id, type: 'movie', title, summary: `Synopsis de ${title}`, categories: ['drama'], attributes: {} },
+    item: {
+      id,
+      type: 'movie',
+      title,
+      summary: `Synopsis de ${title}`,
+      categories: ['drama'],
+      contributors: options.contributors ?? [],
+      attributes: {},
+    },
     occurrence: {
-      id: occurrenceId, startsAt: `2026-08-27T${hour}:30:00.000Z`, endsAt: null, status: 'scheduled',
-      price: null, isFree: null, bookingUrl: null, attributes: { version: 'VOSTFR' },
+      id: occurrenceId, startsAt: `2026-08-27T${hour}:00:00.000Z`, endsAt: null, status: 'scheduled',
+      price: null, isFree: null, bookingUrl: null, attributes: { version: options.version ?? 'VOSTFR' },
     },
     venue: { id: `venue_${occurrenceId}`, name: venueName, distanceKm: 2 }, source, rankReasons: ['nearby'],
   };
 }
 
 const candidates = [
-  candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 17),
-  candidate('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B', 18),
-  candidate('item_cccccccccccccccccccccccc', 'Film C', 19),
+  candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 17, undefined, undefined, { contributors: ['Alice Martin'] }),
+  candidate('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B', 18, undefined, undefined, { contributors: ['Amy Adams'] }),
+  candidate('item_cccccccccccccccccccccccc', 'Film C', 19, undefined, undefined, { contributors: ['Charlie Dupont'] }),
 ];
 
 function makeEnv(dbPath: string): Env {
@@ -40,6 +55,7 @@ function makeEnv(dbPath: string): Env {
     AGORA_BASE_URL: 'http://agora:8092',
     AGORA_API_TOKEN: 'a'.repeat(32),
     AGORA_TIMEOUT_MS: 100,
+    CONVERSATION_RESULT_SET_TTL_MS: 86_400_000,
     CULTURE_HOME_LATITUDE: 48.85,
     CULTURE_HOME_LONGITUDE: 2.35,
     CULTURE_DEFAULT_RADIUS_KM: 15,
@@ -113,6 +129,12 @@ describe('Culture through /v1/ingest', () => {
       if (url.pathname.includes('item_bbbbbbbbbbbbbbbbbbbbbbbb')) {
         return new Response(JSON.stringify(itemResponse('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B')), { status: 200 });
       }
+      if (url.pathname.includes('item_cccccccccccccccccccccccc')) {
+        return new Response(JSON.stringify(itemResponse('item_cccccccccccccccccccccccc', 'Film C')), { status: 200 });
+      }
+      if (url.hostname === 'ollama') {
+        return new Response(JSON.stringify({ message: { content: 'Pitch ciblé de Film B.' } }), { status: 200 });
+      }
       return new Response('not found', { status: 404 });
     });
 
@@ -140,16 +162,59 @@ describe('Culture through /v1/ingest', () => {
     expect(itemUrl.searchParams.get('radiusKm')).toBe(discoverUrl.searchParams.get('radiusKm'));
     expect(itemUrl.searchParams.get('from')).toBe(discoverUrl.searchParams.get('from'));
     expect(itemUrl.searchParams.get('to')).toBe(discoverUrl.searchParams.get('to'));
+    expect(itemUrl.searchParams.has('types')).toBe(false);
+    expect(itemUrl.searchParams.has('version')).toBe(false);
+
+    const focused = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Et lui ?' },
+    });
+    expect(focused.statusCode).toBe(200);
+    expect(focused.json<{ responseText: string }>().responseText).toContain('Synopsis de Film B');
+
+    const pitch = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Pitche-le-moi' },
+    });
+    expect(pitch.statusCode).toBe(200);
+    expect(pitch.json<{ responseText: string }>().responseText).toBe('Pitch ciblé de Film B.');
+    const ollamaCall = fetchMock.mock.calls.find(([url]) => new URL(String(url)).hostname === 'ollama');
+    const ollamaBody = JSON.parse(String((ollamaCall?.[1] as RequestInit | undefined)?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const ollamaPrompt = ollamaBody.messages.map((message) => message.content).join('\n');
+    expect(ollamaPrompt).toContain('Film B');
+    expect(ollamaPrompt).not.toContain('Film A');
+    expect(ollamaPrompt).not.toContain('Film C');
+    const attributed = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Le film avec Amy Adams' },
+    });
+    expect(attributed.statusCode).toBe(200);
+    expect(attributed.json<{ responseText: string }>().responseText).toContain('Synopsis de Film B');
+
+    const third = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Le troisième' },
+    });
+    expect(third.statusCode).toBe(200);
+    expect(third.json<{ responseText: string }>().responseText).toContain('Synopsis de Film C');
+    const focusedThird = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Et lui ?' },
+    });
+    expect(focusedThird.statusCode).toBe(200);
+    expect(focusedThird.json<{ responseText: string }>().responseText).toContain('Synopsis de Film C');
+
+    const filmBCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/items/item_bbbbbbbbbbbbbbbbbbbbbbbb'));
+    const filmCCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/items/item_cccccccccccccccccccccccc'));
+    expect(filmBCalls).toHaveLength(3);
+    expect(filmCCalls).toHaveLength(2);
   });
 
-  test('keeps distinct showtime identity and resolves the displayed second occurrence without a broad item query', async () => {
+  test('keeps distinct Dune showtimes and resolves time and version attributes without a broad item query', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-showtimes-'));
     registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
     const showtimes = [
-      candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 17, 'occ_showtime_1', 'Cinéma A'),
-      candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 19, 'occ_showtime_2', 'Cinéma B'),
+      candidate('item_dune', 'Dune', 17, 'occ_showtime_1', 'Cinéma A', { version: 'VF' }),
+      candidate('item_dune', 'Dune', 18, 'occ_showtime_2', 'Cinéma B', { version: 'VOSTFR' }),
     ];
-    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
       data: showtimes,
       meta: {
         generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
@@ -158,21 +223,304 @@ describe('Culture through /v1/ingest', () => {
     }), { status: 200 }));
 
     const first = await app.inject({
-      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Séances de Film A ce soir ?' },
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Séances de Dune demain ?' },
     });
     expect(first.statusCode).toBe(200);
     const firstText = first.json<{ responseText: string }>().responseText;
-    expect(firstText).toContain('1. Film A — Cinéma A');
-    expect(firstText).toContain('2. Film A — Cinéma B');
+    expect(firstText).toContain('1. Dune — Cinéma A');
+    expect(firstText).toContain('2. Dune — Cinéma B');
 
     const second = await app.inject({
-      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'La deuxième ?' },
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Celle de 20h ?' },
     });
     expect(second.statusCode).toBe(200);
     const secondText = second.json<{ responseText: string }>().responseText;
-    expect(secondText).toContain('Film A');
+    expect(secondText).toContain('Dune');
     expect(secondText).toContain('Cinéma B');
     expect(secondText).not.toContain('Cinéma A');
+
+    const versionSelection = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Celle en VO' },
+    });
+    expect(versionSelection.statusCode).toBe(200);
+    expect(versionSelection.json<{ responseText: string }>().responseText).toContain('Cinéma B');
+    expect(versionSelection.json<{ responseText: string }>().responseText).toContain('VOSTFR');
+
+    const explicitShowtime = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'La séance de 20h' },
+    });
+    expect(explicitShowtime.statusCode).toBe(200);
+    expect(explicitShowtime.json<{ responseText: string }>().responseText).toContain('Cinéma B');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('refetches Agora while preserving structured constraints across successive refinements', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-refinement-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('item_bbbbbbbbbbbbbbbbbbbbbbbb')) {
+        return new Response(JSON.stringify(itemResponse('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B')), { status: 200 });
+      }
+      if (url.pathname.includes('item_cccccccccccccccccccccccc')) {
+        return new Response(JSON.stringify(itemResponse('item_cccccccccccccccccccccccc', 'Film C')), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: candidates,
+        meta: {
+          generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+          providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+        },
+      }), { status: 200 });
+    });
+
+    for (const text of ['Quels films passent ce soir ?', 'Seulement en VO.', 'À moins de 5 km.', 'Et après 21h ?']) {
+      const response = await app.inject({
+        method: 'POST', url: '/v1/ingest', payload: { threadId: 'refinement-conversation', text },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const [initial, versionRefinement, radiusRefinement, timeRefinement] = fetchMock.mock.calls
+      .map(([url]) => new URL(String(url)));
+    expect(versionRefinement?.searchParams.get('version')).toBe('VO');
+    expect(radiusRefinement?.searchParams.get('version')).toBe('VO');
+    expect(radiusRefinement?.searchParams.get('radiusKm')).toBe('5');
+    expect(timeRefinement?.searchParams.get('version')).toBe('VO');
+    expect(timeRefinement?.searchParams.get('radiusKm')).toBe('5');
+    expect(timeRefinement?.searchParams.get('q')).toBeNull();
+    expect(timeRefinement?.searchParams.get('from')).toContain('T19:00:00.000Z');
+    for (const refined of [versionRefinement, radiusRefinement]) {
+      expect(refined?.searchParams.get('lat')).toBe(initial?.searchParams.get('lat'));
+      expect(refined?.searchParams.get('lon')).toBe(initial?.searchParams.get('lon'));
+      expect(refined?.searchParams.get('from')).toBe(initial?.searchParams.get('from'));
+      expect(refined?.searchParams.get('to')).toBe(initial?.searchParams.get('to'));
+      expect(refined?.searchParams.get('types')).toBe('movie');
+    }
+
+    const last = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'refinement-conversation', text: 'Et la dernière ?' },
+    });
+    expect(last.statusCode).toBe(200);
+    expect(last.json<{ responseText: string }>().responseText).toContain('Film C');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  test('uses the focused item for a factual after-21h occurrence refresh', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-focus-refinement-'));
+    const dbPath = join(tempDir, 'conversation.sqlite');
+    registerIngestRoute(app, makeDeps(makeEnv(dbPath)));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('item_bbbbbbbbbbbbbbbbbbbbbbbb')) {
+        return new Response(JSON.stringify(itemResponse('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B')), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: candidates,
+        meta: {
+          generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+          providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+        },
+      }), { status: 200 });
+    });
+
+    await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'focus-refinement', text: 'Quels films passent ce soir ?' },
+    });
+    const selection = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'focus-refinement', text: 'Le deuxième' },
+    });
+    expect(selection.statusCode).toBe(200);
+    expect(selection.json<{ responseText: string }>().responseText).toContain('Film B');
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'focus-refinement', text: 'Il passe où après 21h ?' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const lastUrl = new URL(String(fetchMock.mock.calls.at(-1)?.[0]));
+    expect(lastUrl.pathname).toBe('/v1/discover');
+    expect(lastUrl.searchParams.get('q')).toBe('Film B');
+    expect(lastUrl.searchParams.get('radiusKm')).toBe('15');
+    expect(lastUrl.searchParams.get('from')).toContain('T19:00:00.000Z');
+
+    const combined = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: {
+        threadId: 'focus-refinement',
+        text: 'Seulement en VO et à moins de 5 km.',
+      },
+    });
+    expect(combined.statusCode).toBe(200);
+    const combinedUrl = new URL(String(fetchMock.mock.calls.at(-1)?.[0]));
+    expect(combinedUrl.searchParams.get('q')).toBe('Film B');
+    expect(combinedUrl.searchParams.get('version')).toBe('VO');
+    expect(combinedUrl.searchParams.get('radiusKm')).toBe('5');
+    expect(combinedUrl.searchParams.get('from')).toBe(lastUrl.searchParams.get('from'));
+
+    const after21From = combinedUrl.searchParams.get('from');
+    const tomorrow = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'focus-refinement', text: 'Et demain ?' },
+    });
+    expect(tomorrow.statusCode).toBe(200);
+    const tomorrowUrl = new URL(String(fetchMock.mock.calls.at(-1)?.[0]));
+    expect(tomorrowUrl.searchParams.get('q')).toBe('Film B');
+    expect(tomorrowUrl.searchParams.get('radiusKm')).toBe('5');
+    expect(Date.parse(tomorrowUrl.searchParams.get('from') ?? '') - Date.parse(after21From ?? '')).toBe(86_400_000);
+  });
+
+  test('stores and resolves a venue as an agora.venue ResultSet item', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-venues-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const venues = [{
+      id: 'venue_cinema_x',
+      name: 'Cinéma X',
+      type: 'cinema',
+      address: null,
+      city: 'Paris',
+      postalCode: null,
+      country: 'FR',
+      latitude: 48.86,
+      longitude: 2.34,
+      timezone: 'Europe/Paris',
+      websiteUrl: null,
+      attributes: {},
+      distanceKm: 2.4,
+      source,
+    }];
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: venues,
+      meta: { generatedAt: '2026-08-27T09:00:00.000Z' },
+    }), { status: 200 }));
+
+    const search = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'venue-reference', text: 'Quels cinémas sont proches ?' },
+    });
+    expect(search.statusCode).toBe(200);
+    expect(search.json<{ responseText: string }>().responseText).toContain('Cinéma X');
+
+    const selection = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'venue-reference', text: 'Le premier' },
+    });
+    expect(selection.statusCode).toBe(200);
+    expect(selection.json<{ responseText: string }>().responseText).toContain('Cinéma X — Paris · 2.4 km');
+
+    const focusedVenue = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'venue-reference', text: 'Ce cinéma ?' },
+    });
+    expect(focusedVenue.statusCode).toBe(200);
+    expect(focusedVenue.json<{ responseText: string }>().responseText).toContain('Cinéma X — Paris · 2.4 km');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns a bounded clarification for an ambiguous venue reference without guessing an ID', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-ambiguity-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const sharedVenue = [
+      candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film A', 17, 'occ_shared_1', 'Cinéma Commun'),
+      candidate('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B', 18, 'occ_shared_2', 'Cinéma Commun'),
+    ];
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: sharedVenue,
+      meta: {
+        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+      },
+    }), { status: 200 }));
+
+    await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'ambiguous-reference', text: 'Séances ce soir ?' },
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'ambiguous-reference', text: 'Celle au cinéma Commun' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('Précise le numéro parmi');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('reports an expired ResultSet instead of falling through to another agent', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-expired-'));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    env.CONVERSATION_RESULT_SET_TTL_MS = 1;
+    registerIngestRoute(app, makeDeps(env));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: candidates,
+      meta: {
+        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+      },
+    }), { status: 200 }));
+
+    await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'expired-reference', text: 'Films ce soir ?' },
+    });
+    const currentTime = Date.now();
+    jest.spyOn(Date, 'now').mockReturnValue(currentTime + 1_000);
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'expired-reference', text: 'Le premier' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('liste précédente a expiré');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('reports an out-of-range ordinal without another Agora call', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-missing-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      data: candidates.slice(0, 2),
+      meta: {
+        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+      },
+    }), { status: 200 }));
+
+    await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'missing-reference', text: 'Films ce soir ?' },
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'missing-reference', text: 'Le cinquième' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('Je ne retrouve pas ce résultat');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not leak focus between two threadIds', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-thread-isolation-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes('item_bbbbbbbbbbbbbbbbbbbbbbbb')) {
+        return new Response(JSON.stringify(itemResponse('item_bbbbbbbbbbbbbbbbbbbbbbbb', 'Film B')), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: candidates,
+        meta: {
+          generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
+          providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+        },
+      }), { status: 200 });
+    });
+
+    for (const threadId of ['isolated-a', 'isolated-b']) {
+      await app.inject({
+        method: 'POST', url: '/v1/ingest', payload: { threadId, text: 'Films ce soir ?' },
+      });
+    }
+    await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'isolated-a', text: 'Le deuxième' },
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest', payload: { threadId: 'isolated-b', text: 'Et lui ?' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('Je ne retrouve pas ce résultat');
+    const itemCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/items/'));
+    expect(itemCalls).toHaveLength(1);
   });
 });

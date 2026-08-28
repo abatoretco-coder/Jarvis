@@ -56,7 +56,7 @@ import {
 } from '../conversation/voiceUx';
 import { AgoraClientError } from '../culture/AgoraClient';
 import { cultureActionSchema } from '../culture/contracts';
-import { executeCulture, inferCultureRequest } from '../culture/cultureAgent';
+import { executeCulture, inferCultureRefinement, inferCultureRequest } from '../culture/cultureAgent';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -69,7 +69,10 @@ import {
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
 import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
-import { ConversationResultSetRepository } from '../resultSets/ConversationResultSetRepository';
+import {
+  ConversationResultSetRepository,
+  isConversationResultSetReferenceText,
+} from '../resultSets/ConversationResultSetRepository';
 import {
   INGEST_ACK_CONFIG,
   INGEST_RUNTIME_TUNING_CONFIG,
@@ -1525,8 +1528,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const rawText = parsed.data.text ?? '';
     const normalizedRawText = normalizeIntentText(rawText);
     const existingCultureResultSet = resultSetRepository.findActive(parsed.data.threadId)?.sourceAgent === 'culture';
-    const resultSetFollowup = existingCultureResultSet
-      && /\b(premier|premiere|deuxieme|second|seconde|troisieme|lui|celui la|celle la|parmi ceux la|lequel|laquelle)\b/u.test(normalizedRawText);
+    const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
+    const resultSetRefinement = existingCultureResultSet
+      && /\b(seulement|vo|vf|vostfr|moins de|apres|demain)\b/u.test(normalizedRawText);
+    const resultSetFollowup = resultSetReference || resultSetRefinement;
     const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
     if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
       return reply.code(503).send({ error: 'ha_not_configured' });
@@ -1886,21 +1891,48 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     );
 
     const inferredCulture = inferCultureRequest(assistantInputText);
-    const referencedResult = resultSetRepository.resolveReference(effectiveThreadId, text);
+    const referenceResolution = resultSetRepository.resolveReferenceDetailed(effectiveThreadId, text);
+    const referencedResult = referenceResolution.status === 'resolved' ? referenceResolution.result : null;
     const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const cultureRefinement = inferCultureRefinement({
+      text: assistantInputText,
+      activeResultSet,
+      selectedResult: referencedResult,
+    });
     const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
       && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|compare|pitche)\b/u.test(normalizeIntentText(text));
     const referencedCultureResult = referencedResult?.entityType.startsWith('agora.') ? referencedResult : null;
-    if (parsed.data.domain === 'culture' || inferredCulture || referencedCultureResult || contextualCultureRequest) {
+    const unresolvedReferenceText = referenceResolution.status === 'ambiguous'
+      ? `Je ne peux pas déterminer lequel tu désignes. Précise le numéro parmi : ${referenceResolution.candidates.map((candidate) => `${candidate.position}. ${candidate.displayLabel}`).join(' ; ')}.`
+      : referenceResolution.status === 'not_found'
+        ? 'Je ne retrouve pas ce résultat dans la liste active. Précise son numéro ou son intitulé.'
+        : referenceResolution.status === 'expired'
+          ? 'La liste précédente a expiré. Relance la recherche pour obtenir des résultats à jour.'
+          : null;
+    if (
+      unresolvedReferenceText
+      && (referenceResolution.status === 'ambiguous' || (!inferredCulture && !cultureRefinement))
+    ) {
+      await conversationService.persistMessages(effectiveThreadId, text, unresolvedReferenceText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText: unresolvedReferenceText,
+      });
+    }
+    if (parsed.data.domain === 'culture' || inferredCulture || cultureRefinement || referencedCultureResult || contextualCultureRequest) {
       const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
       const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
         ? parsedCultureAction.data
-        : referencedCultureResult
-          ? 'get_item'
-          : contextualCultureRequest
+        : cultureRefinement
+          ? cultureRefinement.action
+        : contextualCultureRequest
             ? 'recommend_candidates'
+            : referencedCultureResult
+              ? 'get_item'
             : inferredCulture?.action ?? 'discover';
       const requestedSlots = {
+        ...(cultureRefinement?.slots ?? {}),
         ...(inferredCulture?.slots ?? {}),
         ...(parsed.data.slots ?? {}),
         ...(referencedCultureResult?.entityType === 'agora.item'
@@ -1931,7 +1963,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             kind: 'culture',
             source: 'agora',
             routeKey: `culture.${requestedAction}`,
-            semanticDecision: referencedCultureResult ? 'deterministic_reference' : 'activated',
+            semanticDecision: cultureRefinement
+              ? 'deterministic_refinement'
+              : referencedCultureResult
+                ? 'deterministic_reference'
+                : 'activated',
           },
         });
       } catch (error) {
