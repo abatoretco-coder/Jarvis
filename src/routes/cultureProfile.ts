@@ -5,19 +5,19 @@ import { createConversationDb } from '../conversation/repositories/SqliteReposit
 import { AgoraClient } from '../culture/AgoraClient';
 import { CulturePersonalizationService } from '../culture/CulturePersonalizationService';
 import { CultureProactiveRecommendationService } from '../culture/CultureProactiveRecommendationService';
-import { CultureProfileRepository, resolveCultureProfileId } from '../culture/CultureProfileRepository';
+import {
+  resolveTrustedCultureProfileId,
+  trustedCultureUserIdSchema,
+} from '../culture/CultureProfileIdentity';
+import { CultureProfileRepository } from '../culture/CultureProfileRepository';
 import type { AppDeps } from '../server';
 
-const userIdSchema = z.string().trim().min(1).max(128).refine((value) => [...value].every((character) => {
-  const code = character.codePointAt(0) ?? 0;
-  return code >= 32 && code !== 127;
-}), 'control characters are not allowed');
-const profileQuerySchema = z.object({ user_id: userIdSchema.optional() }).strict();
+const profileQuerySchema = z.object({ user_id: trustedCultureUserIdSchema.optional() }).strict();
 
 export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps): void {
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const profiles = new CultureProfileRepository(db, deps.env.CULTURE_FEEDBACK_RETENTION_DAYS);
-  const profileIdFrom = (userId?: string) => resolveCultureProfileId(
+  const profileIdFrom = (userId?: string) => resolveTrustedCultureProfileId(
     userId,
     deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default',
   );
@@ -61,33 +61,26 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
   });
 
   app.put('/v1/culture/profile/proactive', async (req, reply) => {
-    const body = z.object({ user_id: userIdSchema.optional(), enabled: z.boolean() }).strict().safeParse(req.body);
+    const body = z.object({ user_id: trustedCultureUserIdSchema.optional(), enabled: z.boolean() }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     return reply.send({ data: profiles.setProactiveEnabled(profileIdFrom(body.data.user_id), body.data.enabled) });
   });
 
   app.delete('/v1/culture/profile/preferences/:kind/:key', async (req, reply) => {
     const params = z.object({
-      kind: z.enum(['type', 'tag', 'venue']),
+      kind: z.enum(['type', 'tag', 'venue', 'entity']),
       key: z.string().trim().min(1).max(120),
     }).strict().safeParse(req.params);
     const query = profileQuerySchema.safeParse(req.query);
     if (!params.success || !query.success) return reply.code(400).send({ error: 'invalid_request' });
     const profileId = profileIdFrom(query.data.user_id);
-    const profile = profiles.getProfile(profileId);
     const key = params.data.key.toLowerCase();
-    profiles.updatePreferences(profileId, {
-      typeWeights: params.data.kind === 'type' ? { [key]: -(profile.typeWeights[key] ?? 0) } : undefined,
-      tagWeights: params.data.kind === 'tag' ? { [key]: -(profile.tagWeights[key] ?? 0) } : undefined,
-      venueWeights: params.data.kind === 'venue' ? { [key]: -(profile.venueWeights[key] ?? 0) } : undefined,
-      removeExclusions: [`${params.data.kind}:${key}`],
-    });
-    profiles.forgetFeedback(profileId, key);
+    profiles.forgetPreference(profileId, { kind: params.data.kind, key });
     return reply.send({ removed: true });
   });
 
   app.post('/v1/culture/profile/reset', async (req, reply) => {
-    const body = z.object({ user_id: userIdSchema.optional(), confirm: z.literal(true) }).strict().safeParse(req.body);
+    const body = z.object({ user_id: trustedCultureUserIdSchema.optional(), confirm: z.literal(true) }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'explicit_confirmation_required' });
     profiles.resetProfile(profileIdFrom(body.data.user_id));
     return reply.send({ reset: true });
@@ -95,7 +88,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
 
   app.post('/v1/culture/proactive/evaluate', async (req, reply) => {
     const body = z.object({
-      user_id: userIdSchema.optional(),
+      user_id: trustedCultureUserIdSchema.optional(),
       latitude: z.number().min(-90).max(90).optional(),
       longitude: z.number().min(-180).max(180).optional(),
       radiusKm: z.number().positive().max(200).optional(),
@@ -148,5 +141,24 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
       app.log.warn({ error, profileId }, 'culture_proactive_agora_failed');
       return reply.code(503).send({ error: 'agora_unavailable' });
     }
+  });
+
+  app.post('/v1/culture/proactive/ack', async (req, reply) => {
+    const body = z.object({
+      user_id: trustedCultureUserIdSchema.optional(),
+      fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+      entityType: z.enum(['agora.item', 'agora.occurrence', 'agora.venue']),
+      entityId: z.string().trim().min(1).max(128),
+      reason: z.string().trim().max(500).optional(),
+    }).strict().safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+    const acknowledged = profiles.recordNotification({
+      profileId: profileIdFrom(body.data.user_id),
+      entityType: body.data.entityType,
+      entityId: body.data.entityId,
+      fingerprint: body.data.fingerprint,
+      reason: body.data.reason ?? 'delivery_ack',
+    });
+    return reply.send({ acknowledged, duplicate: !acknowledged });
   });
 }

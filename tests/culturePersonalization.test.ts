@@ -97,7 +97,7 @@ describe('CulturePersonalizationService', () => {
 });
 
 describe('CultureProactiveRecommendationService', () => {
-  test('notifies once for a fresh high-affinity candidate, then suppresses the duplicate', () => {
+  test('keeps evaluation pure until an idempotent delivery acknowledgement', () => {
     const db = createConversationDb(':memory:');
     const profiles = new CultureProfileRepository(db);
     profiles.updatePreferences('profile', { tagWeights: { jazz: 8 } });
@@ -108,8 +108,27 @@ describe('CultureProactiveRecommendationService', () => {
       profileId: 'profile', candidates: [candidate('Jazz', 'concert', ['jazz'])], runtimeEnabled: true,
       responseStale: false, threshold: 92, cooldownMs: 0, nowMs: Date.parse('2026-08-29T12:00:00.000Z'),
     };
-    expect(service.evaluate(input)).toMatchObject({ shouldNotify: true });
-    expect(service.evaluate({ ...input, nowMs: input.nowMs + 1 })).toMatchObject({
+    const first = service.evaluate(input);
+    expect(first).toMatchObject({ shouldNotify: true });
+    expect(service.evaluate({ ...input, nowMs: input.nowMs + 1 })).toMatchObject({ shouldNotify: true });
+    const proposed = first.candidates[0]!;
+    expect(profiles.recordNotification({
+      profileId: input.profileId,
+      entityType: proposed.entityType,
+      entityId: proposed.entityId,
+      fingerprint: proposed.fingerprint,
+      reason: first.reason,
+      notifiedAtMs: input.nowMs + 2,
+    })).toBe(true);
+    expect(profiles.recordNotification({
+      profileId: input.profileId,
+      entityType: proposed.entityType,
+      entityId: proposed.entityId,
+      fingerprint: proposed.fingerprint,
+      reason: first.reason,
+      notifiedAtMs: input.nowMs + 3,
+    })).toBe(false);
+    expect(service.evaluate({ ...input, nowMs: input.nowMs + 4 })).toMatchObject({
       shouldNotify: false, reason: 'no_new_candidate_above_threshold',
     });
     db.close();
@@ -156,6 +175,29 @@ describe('CultureProactiveRecommendationService', () => {
       profileId: 'profile', candidates: [candidate('Theatre', 'theatre', ['classique'])],
       runtimeEnabled: true, responseStale: false, threshold: 0, cooldownMs: 0,
     })).toMatchObject({ shouldNotify: false, reason: 'no_new_candidate_above_threshold' });
+    db.close();
+  });
+
+  test('removes venue weights and historical venue feedback without affecting another profile', () => {
+    const db = createConversationDb(':memory:');
+    const profiles = new CultureProfileRepository(db);
+    profiles.updatePreferences('profile-a', { venueWeights: { 'venue-club': 3 } });
+    profiles.recordFeedback({
+      profileId: 'profile-a', entityType: 'agora.occurrence', entityId: 'occ-club',
+      signal: 'explicit_like', strength: 8, metadata: { venueId: 'venue-club' },
+    });
+    profiles.updatePreferences('profile-b', { venueWeights: { 'venue-club': 3 } });
+    const service = new CulturePersonalizationService(profiles, 0);
+    const club = candidate('Club', 'concert', ['jazz']);
+    club.venue.id = 'venue-club';
+    const before = service.rank({ profileId: 'profile-a', candidates: [club], limit: 1 })[0]!.personalizationScore;
+    profiles.forgetPreference('profile-a', { kind: 'venue', key: 'venue-club' });
+    const after = service.rank({ profileId: 'profile-a', candidates: [club], limit: 1 })[0]!.personalizationScore;
+    expect(before).toBeGreaterThan(after);
+    expect(after).toBe(100);
+    expect(profiles.getProfile('profile-a').venueWeights['venue-club']).toBeUndefined();
+    expect(profiles.listFeedback('profile-a')).toEqual([]);
+    expect(profiles.getProfile('profile-b').venueWeights['venue-club']).toBe(3);
     db.close();
   });
 });

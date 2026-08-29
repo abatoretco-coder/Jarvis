@@ -61,7 +61,11 @@ import {
   CultureMemoryService,
   inferCultureMemoryCommand,
 } from '../culture/CultureMemoryService';
-import { CultureProfileRepository, resolveCultureProfileId } from '../culture/CultureProfileRepository';
+import {
+  resolveTrustedCultureProfileId,
+  trustedCultureUserIdSchema,
+} from '../culture/CultureProfileIdentity';
+import { CultureProfileRepository } from '../culture/CultureProfileRepository';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -139,10 +143,7 @@ const ingestSchema = z.object({
   contextNote: z.string().max(8_000).optional(),
   clientContext: z.record(z.string(), z.unknown()).optional(),
   correlation_id: z.string().optional(),
-  user_id: z.string().trim().min(1).max(128).refine((value) => [...value].every((character) => {
-    const code = character.codePointAt(0) ?? 0;
-    return code >= 32 && code !== 127;
-  }), 'control characters are not allowed').optional(),
+  user_id: trustedCultureUserIdSchema.optional(),
   domain: z.enum(['spotify', 'culture']).optional(),
   action: z.union([spotifyActionSchema, cultureActionSchema]).optional(),
   slots: z.record(z.string(), z.unknown()).optional(),
@@ -1499,6 +1500,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const pendingMutationBodySchema = z.object({
     threadId: z.string().trim().min(1),
     clientChannel: z.string().trim().min(1).optional(),
+    user_id: trustedCultureUserIdSchema.optional(),
     candidateIndex: z.coerce.number().int().min(1).max(20).optional(),
     candidateEventId: z.string().trim().min(1).optional(),
   }).strict();
@@ -1542,6 +1544,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (!mutation) return reply.code(404).send({ error: 'pending_mutation_not_found' });
     if (mutation.threadId !== body.data.threadId || (mutation.clientChannel && mutation.clientChannel !== channel)) {
       return reply.code(409).send({ error: 'pending_mutation_context_mismatch' });
+    }
+    if (mutation.agent === 'culture') {
+      const requestingProfileId = resolveTrustedCultureProfileId(
+        body.data.user_id,
+        deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default',
+      );
+      if (mutation.payload.profileId !== requestingProfileId) {
+        return reply.code(409).send({ error: 'pending_mutation_profile_mismatch' });
+      }
     }
     if (mutation.agent === 'calendar' && mutation.action === 'disambiguate_event') {
       const responseText = await createCalendarMutationFromDisambiguation(mutation, '', {
@@ -1621,7 +1632,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       : null;
     const effectiveThreadId = detectEffectiveThreadId(threadId, activeThread);
     const defaultCultureProfileId = deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default';
-    const profileId = resolveCultureProfileId(parsed.data.user_id, defaultCultureProfileId);
+    const profileId = resolveTrustedCultureProfileId(parsed.data.user_id, defaultCultureProfileId);
     if (activeThread) {
       app.log.info(
         {
@@ -1663,8 +1674,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
 
-    const activePendingMutation = preflightPendingMutation
-      ?? await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+    const activePendingMutation = preflightPendingMutation;
     const pendingChannelMatches = !activePendingMutation?.clientChannel || activePendingMutation.clientChannel === clientChannel;
     const mentionsKnownProposal = Boolean(activePendingMutation && normalizeConfirmationText(text).includes(normalizeConfirmationText(activePendingMutation.proposalId)));
     const mentionsWrongProposal = /\b(?:cal|mail|todo|culture)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) && !mentionsKnownProposal;

@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 
+import { resolveTrustedCultureProfileId } from './CultureProfileIdentity';
+
 export const cultureSignalSchema = z.enum([
   'explicit_like',
   'explicit_dislike',
@@ -140,18 +142,6 @@ function mapSaved(row: Record<string, unknown>): CultureSavedEntity {
   };
 }
 
-export function resolveCultureProfileId(userId: string | undefined, defaultProfileId: string): string {
-  const profileId = userId?.trim() || defaultProfileId.trim();
-  const containsControlCharacter = [...profileId].some((character) => {
-    const code = character.codePointAt(0) ?? 0;
-    return code < 32 || code === 127;
-  });
-  if (!profileId || profileId.length > 128 || containsControlCharacter) {
-    throw new Error('invalid_culture_profile_id');
-  }
-  return profileId;
-}
-
 export class CultureProfileRepository {
   constructor(private readonly db: Database.Database, private readonly feedbackRetentionDays = 730) {}
 
@@ -255,23 +245,36 @@ export class CultureProfileRepository {
     }));
   }
 
-  forgetFeedback(profileId: string, preference: string): number {
-    const normalized = preference.trim().toLowerCase();
+  forgetPreference(
+    profileId: string,
+    preference: { kind: 'type' | 'tag' | 'venue' | 'entity'; key: string },
+  ): number {
+    const normalized = preference.key.trim().toLowerCase();
     if (!normalized) return 0;
-    const ids = this.listFeedback(profileId).filter((feedback) => {
-      const type = typeof feedback.metadata.type === 'string' ? feedback.metadata.type.toLowerCase() : '';
-      const categories = Array.isArray(feedback.metadata.categories)
-        ? feedback.metadata.categories.filter((value): value is string => typeof value === 'string').map((value) => value.toLowerCase())
-        : [];
-      return feedback.entityId.toLowerCase() === normalized || type === normalized || categories.includes(normalized);
-    }).map((feedback) => feedback.id);
-    if (!ids.length) return 0;
-    const remove = this.db.prepare('DELETE FROM culture_feedback WHERE profile_id=? AND id=?');
-    const transaction = this.db.transaction(() => {
+    const transaction = this.db.transaction((): number => {
+      const profile = this.getProfile(profileId);
+      this.updatePreferences(profileId, {
+        typeWeights: preference.kind === 'type' ? { [normalized]: -(profile.typeWeights[normalized] ?? 0) } : undefined,
+        tagWeights: preference.kind === 'tag' ? { [normalized]: -(profile.tagWeights[normalized] ?? 0) } : undefined,
+        venueWeights: preference.kind === 'venue' ? { [normalized]: -(profile.venueWeights[normalized] ?? 0) } : undefined,
+        removeExclusions: [`${preference.kind}:${normalized}`],
+      });
+      const ids = this.listFeedback(profileId).filter((feedback) => {
+        const type = typeof feedback.metadata.type === 'string' ? feedback.metadata.type.toLowerCase() : '';
+        const venueId = typeof feedback.metadata.venueId === 'string' ? feedback.metadata.venueId.toLowerCase() : '';
+        const categories = Array.isArray(feedback.metadata.categories)
+          ? feedback.metadata.categories.filter((value): value is string => typeof value === 'string').map((value) => value.toLowerCase())
+          : [];
+        if (preference.kind === 'entity') return feedback.entityId.toLowerCase() === normalized;
+        if (preference.kind === 'type') return type === normalized;
+        if (preference.kind === 'venue') return venueId === normalized;
+        return categories.includes(normalized);
+      }).map((feedback) => feedback.id);
+      const remove = this.db.prepare('DELETE FROM culture_feedback WHERE profile_id=? AND id=?');
       for (const id of ids) remove.run(profileId, id);
+      return ids.length;
     });
-    transaction();
-    return ids.length;
+    return transaction();
   }
 
   saveEntity(entity: Omit<CultureSavedEntity, 'savedAtMs'> & { savedAtMs?: number }): CultureSavedEntity {
@@ -380,7 +383,7 @@ export class CultureProfileRepository {
   }
 
   private ensureProfile(profileId: string): void {
-    resolveCultureProfileId(profileId, profileId);
+    resolveTrustedCultureProfileId(profileId, profileId);
     this.db.prepare(`
       INSERT OR IGNORE INTO culture_preference_profiles(profile_id,updated_at_ms) VALUES(?,?)
     `).run(profileId, Date.now());

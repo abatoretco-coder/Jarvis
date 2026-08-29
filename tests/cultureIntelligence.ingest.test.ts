@@ -6,13 +6,15 @@ import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globa
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
+import type { AgoraCandidate } from '../src/culture/contracts';
+import { CulturePersonalizationService } from '../src/culture/CulturePersonalizationService';
 import { CultureProfileRepository } from '../src/culture/CultureProfileRepository';
 import type { Env } from '../src/env';
 import { registerCultureProfileRoutes } from '../src/routes/cultureProfile';
 import { registerIngestRoute } from '../src/routes/ingest';
 import type { AppDeps } from '../src/server';
 
-const source = {
+const source: AgoraCandidate['source'] = {
   provider: 'openagenda', externalId: 'source', sourceUrl: 'https://example.test/source',
   fetchedAt: '2026-08-29T08:00:00.000Z', sourceModifiedAt: null,
   freshness: 'fresh', sourceType: 'open_data',
@@ -22,7 +24,12 @@ const responseMeta = {
   providers: [{ source: 'openagenda', status: 'fresh', lastSuccessAt: '2026-08-29T08:00:00.000Z' }],
 };
 
-function candidate(id: string, type: string, categories: string[], index: number) {
+function candidate(
+  id: string,
+  type: AgoraCandidate['item']['type'],
+  categories: string[],
+  index: number,
+): AgoraCandidate {
   return {
     item: {
       id: `item-${index}`, type, title: id, summary: `Résumé ${id}`, categories, contributors: [], attributes: {},
@@ -148,6 +155,7 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
   });
 
   afterEach(async () => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
     await app.close();
     rmSync(directory, { recursive: true, force: true });
@@ -293,6 +301,44 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
     expect(prompts.at(-1)?.indexOf('Concert jazz')).toBeLessThan(prompts.at(-1)?.indexOf('Expo photo') ?? 0);
   });
 
+  test('forgets a focused venue completely without changing another profile', async () => {
+    installFetchMock();
+    await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'forget-venue', user_id: 'forget-a', text: 'Qu’est-ce qu’on fait ce soir ?' },
+    });
+    await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'forget-venue', user_id: 'forget-a', text: 'Le premier' },
+    });
+    await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'forget-venue', user_id: 'forget-a', text: 'J’aime ce lieu.' },
+    });
+    const beforeDb = createConversationDb(dbPath);
+    const beforeRepository = new CultureProfileRepository(beforeDb);
+    beforeRepository.updatePreferences('forget-b', { venueWeights: { 'venue-0': 3 } });
+    const beforeScore = new CulturePersonalizationService(beforeRepository, 0).rank({
+      profileId: 'forget-a', candidates: [candidates[0]!], limit: 1,
+    })[0]!.personalizationScore;
+    beforeDb.close();
+    const forgotten = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'forget-venue', user_id: 'forget-a', text: 'Oublie que j’aime ce lieu.' },
+    });
+    expect(forgotten.statusCode).toBe(200);
+    const afterDb = createConversationDb(dbPath);
+    const afterRepository = new CultureProfileRepository(afterDb);
+    const afterScore = new CulturePersonalizationService(afterRepository, 0).rank({
+      profileId: 'forget-a', candidates: [candidates[0]!], limit: 1,
+    })[0]!.personalizationScore;
+    expect(beforeScore).toBeGreaterThan(afterScore);
+    expect(afterScore).toBe(100);
+    expect(afterRepository.listFeedback('forget-a')).toEqual([]);
+    expect(afterRepository.getProfile('forget-b').venueWeights['venue-0']).toBe(3);
+    afterDb.close();
+  });
+
   test('does not reuse another profile result set or reset confirmation on the same thread', async () => {
     installFetchMock();
     await app.inject({
@@ -352,6 +398,49 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
       payload: { threadId: 'fallback-favorite', user_id: 'fallback-profile', text: 'Le premier' },
     });
     expect(selected.json<{ responseText: string }>().responseText).toContain('Expo photo');
+  });
+
+  test('lists only future weekend favorites when requested on Sunday evening', async () => {
+    jest.useFakeTimers({
+      doNotFake: ['clearImmediate', 'clearTimeout', 'nextTick', 'queueMicrotask', 'setImmediate', 'setTimeout'],
+    }).setSystemTime(new Date('2026-09-06T16:00:00.000Z'));
+    const saturday = candidate('Favori samedi', 'concert', ['jazz'], 10);
+    saturday.occurrence.id = 'past-saturday';
+    saturday.occurrence.startsAt = '2026-09-05T13:00:00.000Z';
+    saturday.source.externalId = 'past-source';
+    const sunday = candidate('Favori dimanche', 'concert', ['jazz'], 11);
+    sunday.occurrence.id = 'future-sunday';
+    sunday.occurrence.startsAt = '2026-09-06T19:00:00.000Z';
+    sunday.source.externalId = 'future-source';
+    const db = createConversationDb(dbPath);
+    const repository = new CultureProfileRepository(db);
+    for (const entry of [saturday, sunday]) {
+      repository.saveEntity({
+        profileId: 'weekend-profile', entityType: 'agora.occurrence', entityId: entry.occurrence.id,
+        sourceRefs: [{ provider: entry.source.provider, externalId: entry.source.externalId }],
+        title: entry.item.title, categories: entry.item.categories,
+        venue: { id: entry.venue.id, name: entry.venue.name },
+        occurrenceDate: entry.occurrence.startsAt, metadata: { candidate: entry },
+      });
+    }
+    db.close();
+    const discoverUrls: URL[] = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname !== '/v1/discover') return new Response('not found', { status: 404 });
+      discoverUrls.push(url);
+      const data = url.searchParams.get('q')?.includes('samedi') ? [saturday] : [sunday];
+      return new Response(JSON.stringify({ data, meta: { ...responseMeta, nextCursor: null } }), { status: 200 });
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'weekend-favorites', user_id: 'weekend-profile', text: 'Montre-moi mes favoris pour ce week-end.' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('Favori dimanche');
+    expect(response.json<{ responseText: string }>().responseText).not.toContain('Favori samedi');
+    expect(discoverUrls).toHaveLength(2);
+    expect(discoverUrls.every((url) => url.searchParams.get('from') === '2026-09-06T16:00:00.000Z')).toBe(true);
   });
 
   test('requires confirmation before resetting the full Culture profile', async () => {
@@ -432,7 +521,7 @@ describe('Phase 5 Culture profile and proactive API', () => {
     expect(exported.json()).toMatchObject({ data: { profile: { profileId: 'a' }, savedEntities: [], feedback: [] } });
   });
 
-  test('evaluates a fresh high-affinity event once and suppresses the unchanged second evaluation', async () => {
+  test('only suppresses a proactive candidate after an idempotent delivery ack', async () => {
     const runtimeEnv = env(join(directory, 'conversation.sqlite'), true);
     registerCultureProfileRoutes(app, deps(runtimeEnv));
     const db = createConversationDb(runtimeEnv.CONVERSATION_DB_PATH);
@@ -444,10 +533,45 @@ describe('Phase 5 Culture profile and proactive API', () => {
     const first = await app.inject({
       method: 'POST', url: '/v1/culture/proactive/evaluate', payload: { user_id: 'proactive' },
     });
-    expect(first.json()).toMatchObject({ shouldNotify: true });
+    const firstBody = first.json<{
+      shouldNotify: boolean;
+      reason: string;
+      candidates: Array<{ fingerprint: string; entityType: string; entityId: string }>;
+    }>();
+    expect(firstBody).toMatchObject({ shouldNotify: true });
     const second = await app.inject({
       method: 'POST', url: '/v1/culture/proactive/evaluate', payload: { user_id: 'proactive' },
     });
-    expect(second.json()).toMatchObject({ shouldNotify: false, reason: 'no_new_candidate_above_threshold' });
+    expect(second.json()).toMatchObject({ shouldNotify: true });
+    const proposed = firstBody.candidates[0]!;
+    const acknowledgement = {
+      fingerprint: proposed.fingerprint,
+      entityType: proposed.entityType,
+      entityId: proposed.entityId,
+    };
+    const ack = await app.inject({
+      method: 'POST', url: '/v1/culture/proactive/ack',
+      payload: { user_id: 'proactive', ...acknowledgement, reason: firstBody.reason },
+    });
+    expect(ack.json()).toEqual({ acknowledged: true, duplicate: false });
+    const duplicateAck = await app.inject({
+      method: 'POST', url: '/v1/culture/proactive/ack',
+      payload: { user_id: 'proactive', ...acknowledgement, reason: firstBody.reason },
+    });
+    expect(duplicateAck.json()).toEqual({ acknowledged: false, duplicate: true });
+    const afterAck = await app.inject({
+      method: 'POST', url: '/v1/culture/proactive/evaluate', payload: { user_id: 'proactive' },
+    });
+    expect(afterAck.json()).toMatchObject({ shouldNotify: false, reason: 'no_new_candidate_above_threshold' });
+
+    const otherProfile = createConversationDb(runtimeEnv.CONVERSATION_DB_PATH);
+    const otherRepository = new CultureProfileRepository(otherProfile);
+    otherRepository.updatePreferences('other', { tagWeights: { jazz: 8 } });
+    otherRepository.setProactiveEnabled('other', true);
+    otherProfile.close();
+    const isolated = await app.inject({
+      method: 'POST', url: '/v1/culture/proactive/evaluate', payload: { user_id: 'other' },
+    });
+    expect(isolated.json()).toMatchObject({ shouldNotify: true });
   });
 });

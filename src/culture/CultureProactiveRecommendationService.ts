@@ -7,7 +7,11 @@ import { CultureProfileRepository } from './CultureProfileRepository';
 export type CultureProactiveEvaluation = {
   shouldNotify: boolean;
   reason: string;
-  candidates: PersonalizedCultureCandidate[];
+  candidates: Array<PersonalizedCultureCandidate & {
+    fingerprint: string;
+    entityType: 'agora.occurrence';
+    entityId: string;
+  }>;
 };
 
 function fingerprint(candidate: AgoraCandidate): string {
@@ -59,17 +63,12 @@ export class CultureProactiveRecommendationService {
     ));
     if (!eligible.length) return { shouldNotify: false, reason: 'no_new_candidate_above_threshold', candidates: [] };
 
-    const candidates = eligible.slice(0, 3).filter((entry) => (
-      this.profiles.recordNotification({
-        profileId: input.profileId,
-        entityType: 'agora.occurrence',
-        entityId: entry.candidate.occurrence.id,
-        fingerprint: fingerprint(entry.candidate),
-        reason: entry.personalizationReasons.join(','),
-        notifiedAtMs: nowMs,
-      })
-    ));
-    if (!candidates.length) return { shouldNotify: false, reason: 'already_notified', candidates: [] };
+    const candidates = eligible.slice(0, 3).map((entry) => ({
+      ...entry,
+      fingerprint: fingerprint(entry.candidate),
+      entityType: 'agora.occurrence' as const,
+      entityId: entry.candidate.occurrence.id,
+    }));
     const topReasons = candidates[0]!.personalizationReasons.filter((reason) => reason !== 'agora_base').slice(0, 3);
     return {
       shouldNotify: true,

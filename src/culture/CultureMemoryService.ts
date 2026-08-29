@@ -9,6 +9,7 @@ import {
 import { getParisLocalDateParts, getParisStartOfDayUtc } from '../time/parisTime';
 import { AgoraClient } from './AgoraClient';
 import { type AgoraCandidate, agoraCandidateSchema } from './contracts';
+import { matchSavedCultureCandidate } from './CultureFavoriteMatcher';
 import {
   type CultureFeedback,
   CultureProfileRepository,
@@ -191,6 +192,17 @@ function profileFromContext(result: ResolvedConversationResult | null): string |
   return typeof result?.resultSetContext?.profileId === 'string' ? result.resultSetContext.profileId : null;
 }
 
+function isCurrentOrFutureOccurrence(
+  occurrence: { startsAt: string; endsAt: string | null },
+  from: Date,
+): boolean {
+  const startsAtMs = Date.parse(occurrence.startsAt);
+  if (!Number.isFinite(startsAtMs)) return false;
+  if (startsAtMs >= from.getTime()) return true;
+  const endsAtMs = occurrence.endsAt ? Date.parse(occurrence.endsAt) : Number.NaN;
+  return Number.isFinite(endsAtMs) && endsAtMs > from.getTime();
+}
+
 function formatProfile(repository: CultureProfileRepository, profileId: string): string {
   const profile = repository.getProfile(profileId);
   const positiveTypes = Object.entries(profile.typeWeights).filter(([, weight]) => weight > 0)
@@ -367,18 +379,19 @@ export class CultureMemoryService {
       }
       case 'forget_preference': {
         const preference = normalize(input.command.preference);
-        const profile = this.repository.getProfile(input.profileId);
         const culturalType = typeFromText(preference);
-        const tag = tagFromText(preference) ?? preference;
-        this.repository.updatePreferences(input.profileId, {
-          typeWeights: culturalType ? { [culturalType]: -(profile.typeWeights[culturalType] ?? 0) } : undefined,
-          tagWeights: tag ? { [tag]: -(profile.tagWeights[tag] ?? 0) } : undefined,
-          removeExclusions: [
-            ...(culturalType ? [`type:${culturalType}`] : []),
-            ...(tag ? [`tag:${tag}`] : []),
-          ],
-        });
-        this.repository.forgetFeedback(input.profileId, tag || culturalType || preference);
+        const candidate = selectedCandidate(selected);
+        const venueReference = /\b(?:ce lieu|cet endroit|ce cinema|cette salle)\b/u.test(preference);
+        const entityReference = /\b(?:ce film|cette sortie|ce resultat|celui la|celle la)\b/u.test(preference);
+        const explicitTag = tagFromText(preference);
+        const target = venueReference && candidate
+          ? { kind: 'venue' as const, key: candidate.venue.id }
+          : entityReference && selected
+            ? { kind: 'entity' as const, key: selected.entityId }
+            : culturalType
+              ? { kind: 'type' as const, key: culturalType }
+              : { kind: 'tag' as const, key: explicitTag ?? preference };
+        this.repository.forgetPreference(input.profileId, target);
         return { text: `J’ai oublié localement la préférence « ${input.command.preference} ».` };
       }
       case 'preference': return { text: applyPreference(this.repository, input.profileId, input.command) };
@@ -412,7 +425,12 @@ export class CultureMemoryService {
       sourceRefs: sourceRefs(candidate),
       title: candidate.item.title,
       categories: candidate.item.categories,
-      venue: { id: candidate.venue.id, name: candidate.venue.name },
+      venue: {
+        id: candidate.venue.id,
+        name: candidate.venue.name,
+        ...(candidate.venue.latitude !== undefined ? { latitude: candidate.venue.latitude } : {}),
+        ...(candidate.venue.longitude !== undefined ? { longitude: candidate.venue.longitude } : {}),
+      },
       occurrenceDate: candidate.occurrence.startsAt,
       metadata: { candidate },
     });
@@ -451,7 +469,8 @@ export class CultureMemoryService {
       const parts = getParisLocalDateParts(now);
       const weekday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12)).getUTCDay();
       const saturdayOffset = weekday === 0 ? -1 : (6 - weekday + 7) % 7;
-      from = getParisStartOfDayUtc(now, saturdayOffset);
+      const requestedPeriodStart = getParisStartOfDayUtc(now, saturdayOffset);
+      from = new Date(Math.max(now.getTime(), requestedPeriodStart.getTime()));
       to = getParisStartOfDayUtc(now, saturdayOffset + 2);
     }
     const refreshed = await Promise.all(saved.map(async (entity) => this.refreshSaved(client, entity, from, to)));
@@ -518,7 +537,7 @@ export class CultureMemoryService {
             lon: this.env.CULTURE_HOME_LONGITUDE ?? this.env.AGORA_HOME_LON,
             radiusKm: this.env.CULTURE_DEFAULT_RADIUS_KM,
           });
-          const occurrence = detail.data.occurrences[0];
+          const occurrence = detail.data.occurrences.find((entry) => isCurrentOrFutureOccurrence(entry, from));
           return occurrence
             ? { entity, availability: 'available', nextOccurrence: occurrence.startsAt }
             : { entity, availability: 'no_future_occurrence' };
@@ -536,10 +555,8 @@ export class CultureMemoryService {
         q: entity.title,
         limit: 20,
       });
-      const sourceKeys = new Set(entity.sourceRefs.map((ref) => `${ref.provider}:${ref.externalId}`));
-      const candidate = discovered.data.find((entry) => entry.occurrence.id === entity.entityId)
-        ?? discovered.data.find((entry) => sourceKeys.has(`${entry.source.provider}:${entry.source.externalId}`))
-        ?? discovered.data.find((entry) => normalize(entry.item.title) === normalize(entity.title));
+      const eligibleCandidates = discovered.data.filter((candidate) => isCurrentOrFutureOccurrence(candidate.occurrence, from));
+      const candidate = matchSavedCultureCandidate(entity, eligibleCandidates)?.candidate;
       return candidate
         ? { entity, availability: 'available', nextOccurrence: candidate.occurrence.startsAt, candidate }
         : { entity, availability: 'no_future_occurrence' };

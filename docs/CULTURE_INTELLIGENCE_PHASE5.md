@@ -7,10 +7,11 @@ feedback, favorites and proactive notification history, then performs determinis
 personal reranking. Ollama receives only the bounded candidates and their computed
 reasons for presentation; it never selects entity IDs or computes the score.
 
-The persistent identity is `user_id`. Clients that do not provide it use
-`CULTURE_DEFAULT_PROFILE_ID` (`local-default` by default). `threadId` remains only
-conversation identity. A ResultSet records its profile ID so it cannot mutate a
-different local profile accidentally.
+The persistent identity is `user_id`. It is currently a trusted-client identity,
+not multi-user authentication. A central resolver validates and normalizes it;
+clients that do not provide it use `CULTURE_DEFAULT_PROFILE_ID` (`local-default` by
+default). `threadId` remains only conversation identity. A ResultSet and a pending
+reset record their profile ID so neither can mutate a different local profile.
 
 ## Persistent data
 
@@ -49,16 +50,20 @@ All routes use the existing Jarvis `/v1` API-key protection:
 - `PUT /v1/culture/profile/proactive`
 - `POST /v1/culture/profile/reset` with `confirm: true`
 - `POST /v1/culture/proactive/evaluate`
+- `POST /v1/culture/proactive/ack`
 
 The proactive runtime gate is disabled by default. A notification requires the
 runtime gate, profile opt-in, fresh Agora facts, a score above the configured
 threshold, no explicit rejection, no matching previous fingerprint and an elapsed
-cooldown.
+cooldown. Evaluation is read-only: it returns a stable fingerprint, and only an
+idempotent delivery ACK records the displayed candidate and starts the cooldown.
 
 Favorite API snapshots are marked `currentAvailability: not_refreshed`. Conversational
 favorite listing refreshes facts through Agora before claiming a future occurrence;
-if the primary Agora ID disappears, Jarvis performs a bounded lookup using saved
-source references and title. A historical snapshot is never reported as current.
+if the primary Agora ID disappears, Jarvis tries exact ID, exact provenance, then a
+deterministic multi-signal confidence match (title, type, categories, venue,
+coordinates, source compatibility and date). Title equality alone is insufficient.
+A historical snapshot is never reported as current.
 
 ## Privacy
 
