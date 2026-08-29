@@ -1,3 +1,4 @@
+import { LOCAL_WEATHER_ROUTING_CONFIG } from '../routing/deterministic/config/routingDeterministicConfig';
 import type { WeatherSnapshot } from './weatherSnapshot';
 
 function normalizeWeatherText(text: string): string {
@@ -41,18 +42,42 @@ export function isDeterministicWeatherQuestion(text: string): boolean {
   );
 }
 
-export function isClearlyLocalWeather(text: string): boolean {
-  const normalized = normalizeWeatherText(text);
-  const localIndicators = /chez.*moi|maison|local|actuellement|maintenant|ici|salon|cuisine|chambre|du moment/iu;
-  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome/iu;
+function normalizeRoutingPhrase(text: string): string {
+  return normalizeWeatherText(text).replace(/[^a-z0-9]+/giu, ' ').trim().replace(/\s+/gu, ' ');
+}
 
-  return localIndicators.test(normalized) || !externalLocations.test(normalized);
+function containsConfiguredPhrase(text: string, values: string[]): boolean {
+  const paddedText = ` ${normalizeRoutingPhrase(text)} `;
+  return values.some((value) => paddedText.includes(` ${normalizeRoutingPhrase(value)} `));
+}
+
+function isWeatherRoutingText(text: string): boolean {
+  return containsConfiguredPhrase(text, LOCAL_WEATHER_ROUTING_CONFIG.weatherLexemes)
+    || isTemperatureQuestion(text)
+    || isHumidityQuestion(text)
+    || isPrecipitationQuestion(text)
+    || isGeneralWeatherQuestion(text);
+}
+
+function hasExplicitLocalMarker(text: string): boolean {
+  return containsConfiguredPhrase(text, [
+    ...LOCAL_WEATHER_ROUTING_CONFIG.explicitLocalMarkers,
+    ...LOCAL_WEATHER_ROUTING_CONFIG.explicitLocalLocationTerms,
+  ]);
+}
+
+function hasExplicitExternalLocation(text: string): boolean {
+  return containsConfiguredPhrase(text, LOCAL_WEATHER_ROUTING_CONFIG.explicitExternalLocations);
+}
+
+export function isClearlyLocalWeather(text: string): boolean {
+  if (!isWeatherRoutingText(text)) return false;
+  return hasExplicitLocalMarker(text) || !hasExplicitExternalLocation(text);
 }
 
 export function isClearlyExternalWeather(text: string): boolean {
-  const normalized = normalizeWeatherText(text);
-  const externalLocations = /paris|lyon|marseille|london|londres|tokyo|france|italie|allemagne|espagne|florence|venise|rome|ville|externe|ailleurs|autre/iu;
-  return externalLocations.test(normalized);
+  if (!isWeatherRoutingText(text) || hasExplicitLocalMarker(text)) return false;
+  return hasExplicitExternalLocation(text);
 }
 
 function formatTemperature(value: number): string {

@@ -7,7 +7,11 @@
     "humidite",
     "vent",
     "prevision",
-    "previsions"
+    "previsions",
+    "temps",
+    "degre",
+    "pleut",
+    "dehors"
   ],
   "explicitLocalMarkers": [
     "chez moi",
@@ -55,7 +59,17 @@
     "lille",
     "nantes",
     "bordeaux",
-    "toulouse"
+    "toulouse",
+    "florence",
+    "venise",
+    "rome",
+    "france",
+    "italie",
+    "allemagne",
+    "espagne",
+    "externe",
+    "ailleurs",
+    "autre ville"
   ],
   "nonLocationWeatherTerms": [
     "demain",

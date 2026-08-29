@@ -36,6 +36,13 @@ function asFiniteNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function usableCondition(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const condition = value.trim();
+  if (!condition || /^(unknown|unavailable)$/iu.test(condition)) return undefined;
+  return condition;
+}
+
 export function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSnapshot | null {
   const weatherEntity = states.find((state) => state.entity_id === 'weather.maison')
     ?? states.find((state) => state.entity_id.startsWith('weather.'));
@@ -52,7 +59,9 @@ export function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSn
   const attributes = weatherEntity?.attributes ?? {};
   const forecast = Array.isArray(attributes.forecast) ? attributes.forecast as Array<Record<string, unknown>> : [];
   const location = String(attributes.friendly_name ?? weatherEntity?.entity_id.replace(/^weather\./, '') ?? 'Maison');
-  const currentCondition = String(weatherEntity?.state ?? attributes.condition ?? 'nuageux');
+  const currentCondition = weatherEntity?.state !== undefined
+    ? usableCondition(weatherEntity.state)
+    : usableCondition(attributes.condition);
   const currentTemperature = asFiniteNumber(attributes.temperature);
   const currentFeelsLike = asFiniteNumber(attributes.apparent_temperature);
   const currentHumidity = asFiniteNumber(attributes.humidity);
@@ -62,7 +71,7 @@ export function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSn
 
   return {
     location,
-    current: weatherEntity
+    current: weatherEntity && currentCondition
       ? {
           entityId: weatherEntity.entity_id,
           condition: currentCondition,
@@ -79,17 +88,21 @@ export function buildWeatherSnapshotFromStates(states: HaStateLike[]): WeatherSn
       label: typeof sensor.attributes?.friendly_name === 'string' ? sensor.attributes.friendly_name : undefined,
       value: asFiniteNumber(sensor.state) ?? asFiniteNumber(sensor.attributes?.state),
     })),
-    forecast: forecast.slice(0, 7).map((item, index) => ({
-      date: typeof item.datetime === 'string' ? item.datetime : new Date(Date.now() + index * 86_400_000).toISOString(),
-      condition: String(item.condition ?? currentCondition),
-      ...(asFiniteNumber(item.temperature) !== undefined ? { temperature: asFiniteNumber(item.temperature) } : {}),
-      ...(asFiniteNumber(item.templow) !== undefined ? { tempLow: asFiniteNumber(item.templow) } : {}),
-      ...(asFiniteNumber(item.precipitation_probability) !== undefined
-        ? { precipitation: asFiniteNumber(item.precipitation_probability) }
-        : asFiniteNumber(item.precipitation) !== undefined
-          ? { precipitation: asFiniteNumber(item.precipitation) }
-          : {}),
-      ...(asFiniteNumber(item.wind_speed) !== undefined ? { windSpeed: asFiniteNumber(item.wind_speed) } : {}),
-    })),
+    forecast: forecast.slice(0, 7).flatMap((item, index) => {
+      const condition = usableCondition(item.condition) ?? currentCondition;
+      if (!condition) return [];
+      return [{
+        date: typeof item.datetime === 'string' ? item.datetime : new Date(Date.now() + index * 86_400_000).toISOString(),
+        condition,
+        ...(asFiniteNumber(item.temperature) !== undefined ? { temperature: asFiniteNumber(item.temperature) } : {}),
+        ...(asFiniteNumber(item.templow) !== undefined ? { tempLow: asFiniteNumber(item.templow) } : {}),
+        ...(asFiniteNumber(item.precipitation_probability) !== undefined
+          ? { precipitation: asFiniteNumber(item.precipitation_probability) }
+          : asFiniteNumber(item.precipitation) !== undefined
+            ? { precipitation: asFiniteNumber(item.precipitation) }
+            : {}),
+        ...(asFiniteNumber(item.wind_speed) !== undefined ? { windSpeed: asFiniteNumber(item.wind_speed) } : {}),
+      }];
+    }),
   };
 }

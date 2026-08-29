@@ -17,7 +17,8 @@ Local weather from Home Assistant state snapshot (temperature, humidity, precipi
 ## Execution
 1. Build local weather snapshot from HA states.
 2. Try deterministic weather reply for simple current-state questions.
-3. Fallback to OpenAI synthesis for more complex local weather wording.
+3. Fallback to Ollama synthesis for more complex local weather wording.
+4. Home Assistant states `unknown` and `unavailable` are treated as missing facts and are never verbalized as weather conditions.
 
 ## Response Construction
 1. Weather returns plain assistant text.

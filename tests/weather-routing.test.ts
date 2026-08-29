@@ -151,11 +151,25 @@ describe('Weather Routing & Deterministic Responses', () => {
         'Comment sera la météo à Tokyo',
         'Météo externe',
         'Prévisions pour Florence',
+        'Météo à Bordeaux',
+        'Météo à Nantes',
+        'Quel temps à Toulouse demain',
       ];
 
       for (const q of externalQuestions) {
         expect(isClearlyExternalWeather(q)).toBe(true);
       }
+    });
+
+    it('should let an explicit home marker win over a city name', () => {
+      const question = 'Météo à la maison à Paris';
+      expect(isClearlyLocalWeather(question)).toBe(true);
+      expect(isClearlyExternalWeather(question)).toBe(false);
+    });
+
+    it('should not classify an unrelated voice request as local weather', () => {
+      expect(isClearlyLocalWeather('Allume la lumière du salon')).toBe(false);
+      expect(isClearlyExternalWeather('Allume la lumière du salon')).toBe(false);
     });
 
     it('should NOT misroute forecast queries to deterministic path', () => {
@@ -204,6 +218,22 @@ describe('Weather Routing & Deterministic Responses', () => {
       const snapshot = buildWeatherSnapshotFromStates(sensors);
       // Should return null if no weather.maison and no weather sensors
       expect(snapshot).toBeNull();
+    });
+
+    it.each(['unavailable', 'unknown'])('should not expose %s as a current weather condition', (state) => {
+      const snapshot = buildWeatherSnapshotFromStates([createWeatherState({ condition: undefined })].map((entity) => ({
+        ...entity,
+        state,
+        attributes: {
+          friendly_name: 'Maison', condition: 'sunny', temperature: 22,
+          forecast: [{ datetime: '2026-08-29T12:00:00Z', condition: 'unknown', temperature: 23 }],
+        },
+      })));
+      expect(snapshot).toMatchObject({ location: 'Maison' });
+      expect(snapshot?.current).toBeUndefined();
+      expect(snapshot?.forecast).toEqual([]);
+      expect(snapshot ? synthesizeDeterministicWeatherReply({ userText: 'Quel temps fait-il ?', weather: snapshot }) : null).toBeNull();
+      expect(snapshot ? synthesizeDeterministicWeatherReply({ userText: 'Il pleut ?', weather: snapshot }) : null).toBeNull();
     });
 
     it('should prioritize weather.maison over other weather entities', () => {
