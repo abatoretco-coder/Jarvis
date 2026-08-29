@@ -72,8 +72,16 @@ describe('cultureAgent', () => {
     });
     expect(inferCultureRequest('Pitche-moi les trois meilleurs')).toBeNull();
     expect(inferCultureRequest('Qu’est-ce qui pourrait être sympa ce soir ?')).toMatchObject({
-      action: 'recommend_candidates', slots: { types: ['movie'] },
+      action: 'recommend_candidates', slots: { types: undefined },
     });
+  });
+
+  test.each([
+    'Qu’est-ce qu’on pourrait faire ce soir ?',
+    'Un truc sympa demain ?',
+    'Quelque chose d’intéressant ce week-end ?',
+  ])('keeps implicit recommendation %s generic across cultural types', (text) => {
+    expect(inferCultureRequest(text)).toMatchObject({ action: 'recommend_candidates', slots: { types: undefined } });
   });
 
   test('recognizes generic outings, type, tags, price and venue constraints', () => {
@@ -112,6 +120,72 @@ describe('cultureAgent', () => {
     });
     expect(resolveCultureWindow('cette semaine', summerNow)).toEqual({
       from: '2026-08-26T22:00:00.000Z', to: '2026-09-02T22:00:00.000Z',
+    });
+  });
+
+  test('resolves every explicit weekday to its next logical Paris occurrence', () => {
+    const tuesday = new Date('2026-08-25T10:00:00.000Z');
+    const expectedStarts: Record<string, string> = {
+      lundi: '2026-08-30T22:00:00.000Z',
+      mardi: '2026-08-24T22:00:00.000Z',
+      mercredi: '2026-08-25T22:00:00.000Z',
+      jeudi: '2026-08-26T22:00:00.000Z',
+      vendredi: '2026-08-27T22:00:00.000Z',
+      samedi: '2026-08-28T22:00:00.000Z',
+      dimanche: '2026-08-29T22:00:00.000Z',
+    };
+    for (const [weekday, from] of Object.entries(expectedStarts)) {
+      expect(resolveCultureWindow(`sortie ${weekday}`, tuesday).from).toBe(from);
+    }
+    expect(resolveCultureWindow('concert vendredi soir', tuesday)).toEqual({
+      from: '2026-08-28T16:00:00.000Z', to: '2026-08-29T00:00:00.000Z',
+    });
+    expect(resolveCultureWindow('concert vendredi vers 20h', tuesday)).toEqual({
+      from: '2026-08-28T17:00:00.000Z', to: '2026-08-28T20:00:00.000Z',
+    });
+    expect(resolveCultureWindow('sortie dimanche', tuesday)).toEqual({
+      from: '2026-08-29T22:00:00.000Z', to: '2026-08-30T22:00:00.000Z',
+    });
+  });
+
+  test('moves a passed same-day window to next week and handles weekend boundaries', () => {
+    const saturdayEvening = new Date('2026-08-29T17:30:00.000Z');
+    expect(resolveCultureWindow('samedi après-midi', saturdayEvening)).toEqual({
+      from: '2026-09-05T10:00:00.000Z', to: '2026-09-05T16:00:00.000Z',
+    });
+    expect(resolveCultureWindow('dimanche soir', saturdayEvening)).toEqual({
+      from: '2026-08-30T16:00:00.000Z', to: '2026-08-31T00:00:00.000Z',
+    });
+  });
+
+  test('keeps explicit Sunday boundaries correct across Europe/Paris DST changes', () => {
+    expect(resolveCultureWindow('sortie dimanche', new Date('2026-03-24T10:00:00.000Z'))).toEqual({
+      from: '2026-03-28T23:00:00.000Z', to: '2026-03-29T22:00:00.000Z',
+    });
+    expect(resolveCultureWindow('sortie dimanche', new Date('2026-10-20T10:00:00.000Z'))).toEqual({
+      from: '2026-10-24T22:00:00.000Z', to: '2026-10-25T23:00:00.000Z',
+    });
+  });
+
+  test('combines weekday, price, free and generic multi-source intentions', () => {
+    const tuesday = new Date('2026-08-25T10:00:00.000Z');
+    expect(inferCultureRequest('Un concert vendredi soir à moins de 30 €')).toMatchObject({
+      action: 'discover', slots: { types: ['concert'], maxPrice: 30, currency: 'EUR' },
+    });
+    expect(inferCultureRequest('Un concert vendredi soir, budget 30 €')).toMatchObject({
+      action: 'discover', slots: { types: ['concert'], maxPrice: 30, currency: 'EUR' },
+    });
+    expect(resolveCultureWindow('Un concert vendredi soir à moins de 30 €', tuesday)).toEqual({
+      from: '2026-08-28T16:00:00.000Z', to: '2026-08-29T00:00:00.000Z',
+    });
+    expect(inferCultureRequest('Une sortie gratuite dimanche')).toMatchObject({
+      action: 'discover', slots: { freeOnly: true, types: undefined },
+    });
+    expect(resolveCultureWindow('Une sortie gratuite dimanche', tuesday)).toEqual({
+      from: '2026-08-29T22:00:00.000Z', to: '2026-08-30T22:00:00.000Z',
+    });
+    expect(inferCultureRequest('Qu’est-ce qu’on fait ce soir ?')).toMatchObject({
+      action: 'discover', slots: { types: undefined },
     });
   });
 

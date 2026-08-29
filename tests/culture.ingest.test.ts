@@ -447,6 +447,54 @@ describe('Culture through /v1/ingest', () => {
     expect(prompt).not.toContain('Galerie B');
   });
 
+  test('preserves combined weekday, budget, free and generic multi-source constraints through ingest', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-natural-multisource-'));
+    registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
+    const mixed = [
+      candidate('item_concert', 'Concert accessible', 18, 'occ_concert', 'Salle Concert', {
+        type: 'concert', price: { min: 20, max: 50, currency: 'EUR' },
+      }),
+      candidate('item_expo', 'Expo gratuite', 19, 'occ_expo', 'Galerie Expo', { type: 'exhibition', isFree: true }),
+      candidate('item_theatre', 'Pièce du soir', 20, 'occ_theatre', 'Théâtre Test', { type: 'theatre' }),
+    ];
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'ollama') {
+        return new Response(JSON.stringify({ message: { content: 'Voici plusieurs sorties possibles.' } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: mixed,
+        meta: {
+          generatedAt: '2026-08-29T09:00:00.000Z', stale: false, partial: true, nextCursor: null,
+          providers: [
+            { source: 'paris_data', status: 'fresh', lastSuccessAt: '2026-08-29T08:00:00.000Z' },
+            { source: 'ticketmaster', status: 'unavailable', lastSuccessAt: null },
+          ],
+        },
+      }), { status: 200 });
+    });
+
+    for (const [threadId, text] of [
+      ['natural-concert', 'Un concert vendredi soir à moins de 30 €'],
+      ['natural-expo', 'Une expo gratuite dimanche'],
+      ['natural-generic', 'Qu’est-ce qu’on fait ce soir ?'],
+    ]) {
+      const response = await app.inject({ method: 'POST', url: '/v1/ingest', payload: { threadId, text } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).not.toMatchObject({ error: 'ha_not_configured' });
+    }
+
+    const agoraUrls = fetchMock.mock.calls
+      .map(([input]) => new URL(String(input)))
+      .filter((url) => url.hostname === 'agora');
+    expect(agoraUrls).toHaveLength(3);
+    expect(agoraUrls[0]?.searchParams.get('types')).toBe('concert');
+    expect(agoraUrls[0]?.searchParams.get('maxPrice')).toBe('30');
+    expect(agoraUrls[1]?.searchParams.get('types')).toBe('exhibition');
+    expect(agoraUrls[1]?.searchParams.get('freeOnly')).toBe('true');
+    expect(agoraUrls[2]?.searchParams.has('types')).toBe(false);
+  });
+
   test('uses the focused item for a factual after-21h occurrence refresh', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-focus-refinement-'));
     const dbPath = join(tempDir, 'conversation.sqlite');

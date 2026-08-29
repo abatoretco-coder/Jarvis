@@ -72,47 +72,68 @@ function parisWeekday(date: Date): number {
   return new Date(Date.UTC(year, month - 1, day, 12)).getUTCDay();
 }
 
+const WEEKDAYS: Array<{ day: number; pattern: RegExp }> = [
+  { day: 1, pattern: /\blundi\b/u },
+  { day: 2, pattern: /\bmardi\b/u },
+  { day: 3, pattern: /\bmercredi\b/u },
+  { day: 4, pattern: /\bjeudi\b/u },
+  { day: 5, pattern: /\bvendredi\b/u },
+  { day: 6, pattern: /\bsamedi\b/u },
+  { day: 0, pattern: /\bdimanche\b/u },
+];
+
 export function resolveCultureWindow(text: string, now = new Date()): { from: string; to: string } {
   const value = normalize(text);
   const tomorrow = /\bdemain\b/u.test(value);
   let startOffset = tomorrow ? 1 : 0;
   let dayCount = 1;
+  const explicitWeekday = WEEKDAYS.find(({ pattern }) => pattern.test(value));
 
-  if (/\bce(?:tte)? week[ -]?end\b/u.test(value)) {
+  if (explicitWeekday) {
+    startOffset = (explicitWeekday.day - parisWeekday(now) + 7) % 7;
+  } else if (/\bce(?:tte)? week[ -]?end\b/u.test(value)) {
     const weekday = parisWeekday(now);
     startOffset = weekday === 0 ? 0 : (6 - weekday + 7) % 7;
     dayCount = weekday === 0 ? 1 : 2;
-  } else if (/\bsamedi\b/u.test(value)) {
-    startOffset = (6 - parisWeekday(now) + 7) % 7;
   } else if (/\bcette semaine\b/u.test(value)) {
     dayCount = 7;
   }
 
   const requestedHour = value.match(/\bvers\s+([01]?\d|2[0-3])\s*h(?:([0-5]\d))?\b/u);
-  if (requestedHour) {
-    const hour = Number(requestedHour[1]);
-    const minute = Number(requestedHour[2] ?? 0);
+  const windowAt = (offset: number): { from: string; to: string } => {
+    if (requestedHour) {
+      const hour = Number(requestedHour[1]);
+      const minute = Number(requestedHour[2] ?? 0);
+      const endHour = hour + 2;
+      return {
+        from: getParisDateTimeUtc(now, offset, Math.max(0, hour - 1), minute).toISOString(),
+        to: getParisDateTimeUtc(now, offset + (endHour >= 24 ? 1 : 0), endHour % 24, minute).toISOString(),
+      };
+    }
+    if (/\bsoir\b/u.test(value)) {
+      return {
+        from: getParisDateTimeUtc(now, offset, 18).toISOString(),
+        to: getParisDateTimeUtc(now, offset + 1, 2).toISOString(),
+      };
+    }
+    if (/\bapres midi\b/u.test(value)) {
+      return {
+        from: getParisDateTimeUtc(now, offset, 12).toISOString(),
+        to: getParisDateTimeUtc(now, offset, 18).toISOString(),
+      };
+    }
     return {
-      from: getParisDateTimeUtc(now, startOffset, Math.max(0, hour - 1), minute).toISOString(),
-      to: getParisDateTimeUtc(now, startOffset, Math.min(23, hour + 2), minute).toISOString(),
+      from: getParisStartOfDayUtc(now, offset).toISOString(),
+      to: getParisStartOfDayUtc(now, offset + dayCount).toISOString(),
     };
-  }
-  if (/\bsoir\b/u.test(value)) {
-    return {
-      from: getParisDateTimeUtc(now, startOffset, 18).toISOString(),
-      to: getParisDateTimeUtc(now, startOffset + 1, 2).toISOString(),
-    };
-  }
-  if (/\b(apres midi|apres-midi)\b/u.test(value)) {
-    return {
-      from: getParisDateTimeUtc(now, startOffset, 12).toISOString(),
-      to: getParisDateTimeUtc(now, startOffset, 18).toISOString(),
-    };
-  }
-  return {
-    from: getParisStartOfDayUtc(now, startOffset).toISOString(),
-    to: getParisStartOfDayUtc(now, startOffset + dayCount).toISOString(),
   };
+
+  let window = windowAt(startOffset);
+  if (explicitWeekday && startOffset === 0 && Date.parse(window.to) <= now.getTime()) {
+    startOffset += 7;
+    window = windowAt(startOffset);
+  }
+  return window;
 }
 
 export function resolveEffectiveCultureWindow(
@@ -389,13 +410,13 @@ function requestedLimit(text: string): number | undefined {
 export function inferCultureRequest(text: string): { action: CultureAction; slots: Record<string, unknown> } | null {
   const value = normalize(text);
   if (/\b(?:mets|joue|lance|ecoute)\b.*\b(?:musique|jazz|rock|rap|playlist|spotify)\b/u.test(value)) return null;
-  const implicitMovieRecommendation = /\bpourrait etre\b.*\b(sympa|leger|interessant)\b.*\b(ce soir|demain|week[ -]?end)\b/u.test(value);
-  const implicitRecommendation = /\b(?:quelque chose|un truc|pourrait etre)\b.*\b(sympa|leger|interessant)\b/u.test(value);
+  const implicitRecommendation = /\b(?:quelque chose|un truc|pourrait etre)\b.*\b(sympa|leger|interessant)\b/u.test(value)
+    || /\bqu est ce qu on pourrait faire\b/u.test(value);
   const implicitFreeOuting = /\b(?:quelque chose|un truc)\b.*\bgratuit(?:e|es|s)?\b/u.test(value);
   const qualitativeMovieRequest = /\bfilms?\b.*\b(sympa|leger|interessant|pas idiot)\b/u.test(value);
-  const cultureTerms = /\b(films?|cinemas?|seances?|sorties?|concerts?|jazz|expos?|expositions?|theatre|spectacles?|humour|comedie|festivals?|activites?|que faire|qu est ce qu on (?:fait|peut faire)|qu est ce qu il y a)\b/u;
+  const cultureTerms = /\b(films?|cinemas?|seances?|sorties?|concerts?|jazz|expos?|expositions?|theatre|spectacles?|humour|comedie|festivals?|activites?|que faire|qu est ce qu on (?:fait|peut faire|pourrait faire)|qu est ce qu il y a)\b/u;
   if (!cultureTerms.test(value) && !implicitRecommendation && !implicitFreeOuting) return null;
-  const types = implicitMovieRecommendation || /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie']
+  const types = /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie']
     : /\bconcerts?|jazz\b/u.test(value) ? ['concert']
       : /\bexpos?|expositions?\b/u.test(value) ? ['exhibition']
         : /\bhumour|comedie\b/u.test(value) ? ['comedy']
@@ -416,7 +437,7 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
   const venueQuery = value.match(/\bqu est ce qu il y a (?:au|a la|aux)\s+(.+?)(?=\s+(?:ce soir|demain|ce week|vendredi|samedi|dimanche)|[?.!,]|$)/u)?.[1]?.trim();
   const tags = ['jazz', 'photo', 'art contemporain', 'famille', 'danse', 'plein air'].filter((tag) => value.includes(tag));
   const freeOnly = /\bgratuit(?:e|es|s)?\b/u.test(value) || undefined;
-  const priceMatch = value.match(/\bmoins de\s+(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|euros?)/u);
+  const priceMatch = value.match(/\b(?:moins de|budget\s+(?:de\s+)?)\s*(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:€|euros?)/u);
   const maxPrice = priceMatch ? Number(priceMatch[1]?.replace(',', '.')) : undefined;
   const radiusMatch = value.match(/\bmoins de\s+(\d{1,3}(?:[.,]\d+)?)\s*km\b/u);
   const radiusKm = radiusMatch ? Number(radiusMatch[1]?.replace(',', '.')) : undefined;
