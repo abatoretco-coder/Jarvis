@@ -5,6 +5,8 @@ import {
   agoraDiscoverResponseSchema,
   type AgoraItemResponse,
   agoraItemResponseSchema,
+  type AgoraVenueResponse,
+  agoraVenueResponseSchema,
   type AgoraVenuesResponse,
   agoraVenuesResponseSchema,
 } from './contracts';
@@ -75,5 +77,10 @@ export class AgoraClient {
 
   findVenues(params: Record<string, QueryValue>): Promise<AgoraVenuesResponse> {
     return this.request('/v1/venues', agoraVenuesResponseSchema, params);
+  }
+
+  async getVenue(id: string): Promise<AgoraVenueResponse> {
+    if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(id)) throw new AgoraClientError('invalid_response');
+    return this.request(`/v1/venues/${encodeURIComponent(id)}`, agoraVenueResponseSchema);
   }
 }

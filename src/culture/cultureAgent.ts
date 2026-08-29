@@ -52,7 +52,7 @@ const cultureResultContextSchema = z.object({
   version: z.string().max(32).optional(),
   format: z.string().max(32).optional(),
   maxPrice: z.number().nonnegative().optional(),
-  currency: z.string().length(3).optional(),
+  currency: z.string().regex(/^[A-Za-z]{3}$/u).optional(),
   freeOnly: z.boolean().optional(),
   recommendationMode: z.enum([
     'discover',
@@ -67,14 +67,6 @@ const cultureResultContextSchema = z.object({
 });
 
 const candidateMetadataSchema = z.object({ candidate: agoraCandidateSchema });
-const venueMetadataSchema = z.object({
-  venue: z.object({
-    id: z.string(),
-    name: z.string(),
-    city: z.string().nullable(),
-    distanceKm: z.number().optional(),
-  }),
-});
 
 function normalize(value: string): string {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/['’_-]+/gu, ' ').toLowerCase();
@@ -245,7 +237,8 @@ function formatItemDetail(response: AgoraItemResponse): string {
   const occurrences = item.occurrences.slice(0, 5).map((occurrence, index) => (
     `${index + 1}. ${occurrence.venue.name}, ${PARIS_FORMATTER.format(new Date(occurrence.startsAt))}`
   ));
-  return `${item.title} — ${summary}${occurrences.length ? `\n${occurrences.join('\n')}` : '\nAucune occurrence future connue.'}`;
+  const detail = `${item.title} — ${summary}${occurrences.length ? `\n${occurrences.join('\n')}` : '\nAucune occurrence future connue.'}`;
+  return [detail, ...freshnessWarnings(response.meta.stale, response.meta.partial)].join('\n');
 }
 
 function formatSelectedOccurrence(candidate: AgoraCandidate): string {
@@ -258,15 +251,41 @@ function formatSelectedOccurrence(candidate: AgoraCandidate): string {
 
 function queryFromResultContext(
   context: Record<string, unknown> | null,
-): Record<string, string | number | undefined> | undefined {
+  now = new Date(),
+): Record<string, string | number | undefined> | null | undefined {
   const parsed = cultureResultContextSchema.safeParse(context);
   if (!parsed.success) return undefined;
+  const window = resolveEffectiveCultureWindow({ from: parsed.data.from, to: parsed.data.to }, now);
+  if (!window) return null;
   return {
     lat: parsed.data.latitude,
     lon: parsed.data.longitude,
     radiusKm: parsed.data.radiusKm,
-    from: parsed.data.from,
-    to: parsed.data.to,
+    from: window.from,
+    to: window.to,
+  };
+}
+
+function refreshSelectedCandidate(candidate: AgoraCandidate, response: AgoraItemResponse): AgoraCandidate | null {
+  const occurrence = response.data.occurrences.find((entry) => entry.id === candidate.occurrence.id);
+  if (!occurrence) return null;
+  return {
+    ...candidate,
+    item: {
+      ...candidate.item,
+      title: response.data.title,
+      summary: response.data.summary,
+      categories: response.data.categories,
+      contributors: response.data.contributors,
+      attributes: response.data.attributes,
+    },
+    occurrence,
+    venue: {
+      ...occurrence.venue,
+      distanceKm: occurrence.venue.distanceKm ?? candidate.venue.distanceKm,
+    },
+    source: occurrence.source,
+    sources: [occurrence.source],
   };
 }
 
@@ -409,10 +428,11 @@ export function inferCultureRefinement(input: {
 
 function formatVenues(response: AgoraVenuesResponse): string {
   if (!response.data.length) return 'Je n’ai trouvé aucun lieu culturel correspondant dans ce rayon.';
-  return response.data.slice(0, 20).map((venue, index) => {
+  const lines = response.data.slice(0, 20).map((venue, index) => {
     const distance = venue.distanceKm === undefined ? '' : ` · ${venue.distanceKm.toFixed(1)} km`;
     return `${index + 1}. ${venue.name} — ${venue.city ?? 'ville non communiquée'}${distance}`;
-  }).join('\n');
+  });
+  return [...lines, ...freshnessWarnings(response.meta.stale, response.meta.partial)].join('\n');
 }
 
 function requestedLimit(text: string): number | undefined {
@@ -551,6 +571,7 @@ export async function executeCulture(input: {
     token: input.env.AGORA_API_TOKEN,
     timeoutMs: input.env.AGORA_TIMEOUT_MS,
   });
+  const now = input.now ?? new Date();
 
   if (
     input.selectedResult
@@ -559,14 +580,30 @@ export async function executeCulture(input: {
   ) {
     const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
     if (parsed.success) {
+      const itemQuery = queryFromResultContext(input.selectedResult.resultSetContext, now);
+      if (itemQuery === null) {
+        return { text: 'La période de cette liste est terminée. Relance la recherche pour obtenir des sorties encore à venir.' };
+      }
+      const details = await client.getItem(parsed.data.candidate.item.id, itemQuery);
+      const selected = input.selectedResult.entityType === 'agora.occurrence'
+        ? refreshSelectedCandidate(parsed.data.candidate, details)
+        : null;
+      if (input.selectedResult.entityType === 'agora.occurrence' && !selected) {
+        return { text: 'Cette séance n’apparaît plus parmi les séances à venir. Relance la recherche pour actualiser la liste.' };
+      }
+      const facts = selected ?? boundedItemDetail(details);
+      const warnings = freshnessWarnings(details.meta.stale, details.meta.partial);
       try {
         return {
-          text: await synthesize([parsed.data.candidate], input.text, input.env, 1),
+          text: [await synthesize([facts], input.text, input.env, 1), ...warnings].join('\n'),
           resultSetId: input.selectedResult.resultSetId,
         };
       } catch {
+        const fallback = selected
+          ? [formatSelectedOccurrence(selected), ...warnings].join('\n')
+          : formatItemDetail(details);
         return {
-          text: `${formatSelectedOccurrence(parsed.data.candidate)}\nJe n’ai pas pu générer le pitch local.`,
+          text: `${fallback}\nJe n’ai pas pu générer le pitch local.`,
           resultSetId: input.selectedResult.resultSetId,
         };
       }
@@ -574,22 +611,42 @@ export async function executeCulture(input: {
   }
 
   if (input.selectedResult?.entityType === 'agora.venue') {
-    const parsed = venueMetadataSchema.safeParse(input.selectedResult.metadata);
-    if (parsed.success) {
-      const distance = parsed.data.venue.distanceKm === undefined ? '' : ` · ${parsed.data.venue.distanceKm.toFixed(1)} km`;
-      return { text: `${parsed.data.venue.name} — ${parsed.data.venue.city ?? 'ville non communiquée'}${distance}` };
-    }
+    const response = await client.getVenue(input.selectedResult.entityId);
+    const distance = response.data.distanceKm === undefined ? '' : ` · ${response.data.distanceKm.toFixed(1)} km`;
+    return {
+      text: [
+        `${response.data.name} — ${response.data.city ?? 'ville non communiquée'}${distance}`,
+        ...freshnessWarnings(response.meta.stale, response.meta.partial),
+      ].join('\n'),
+      resultSetId: input.selectedResult.resultSetId,
+    };
   }
 
   if (input.action === 'get_item' && input.selectedResult?.entityType === 'agora.occurrence') {
     const parsed = candidateMetadataSchema.safeParse(input.selectedResult.metadata);
-    if (parsed.success) return { text: formatSelectedOccurrence(parsed.data.candidate) };
+    if (parsed.success) {
+      const itemQuery = queryFromResultContext(input.selectedResult.resultSetContext, now);
+      if (itemQuery === null) {
+        return { text: 'La période de cette liste est terminée. Relance la recherche pour obtenir des séances encore à venir.' };
+      }
+      const details = await client.getItem(parsed.data.candidate.item.id, itemQuery);
+      const selected = refreshSelectedCandidate(parsed.data.candidate, details);
+      if (!selected) return { text: 'Cette séance n’apparaît plus parmi les séances à venir. Relance la recherche pour actualiser la liste.' };
+      return {
+        text: [formatSelectedOccurrence(selected), ...freshnessWarnings(details.meta.stale, details.meta.partial)].join('\n'),
+        resultSetId: input.selectedResult.resultSetId,
+      };
+    }
     return { text: 'Je ne peux plus retrouver précisément cette séance. Relance la recherche pour actualiser la liste.' };
   }
 
   if (input.action === 'get_item' && slots.itemId) {
     const context = input.selectedResult?.resultSetContext ?? null;
-    return { text: formatItemDetail(await client.getItem(slots.itemId, queryFromResultContext(context))) };
+    const itemQuery = queryFromResultContext(context, now);
+    if (itemQuery === null) {
+      return { text: 'La période de cette liste est terminée. Relance la recherche pour obtenir des sorties encore à venir.' };
+    }
+    return { text: formatItemDetail(await client.getItem(slots.itemId, itemQuery)) };
   }
 
   if (slots.resultSetId && (input.action === 'compare_candidates' || input.action === 'recommend_candidates')) {
@@ -597,16 +654,44 @@ export async function executeCulture(input: {
     if (active?.id === slots.resultSetId) {
       const limit = slots.limit ?? 10;
       const allowedPositions = slots.candidatePositions ? new Set(slots.candidatePositions) : null;
-      const storedCandidates = active.items
-        .filter((item) => !allowedPositions || allowedPositions.has(item.position))
-        .map((item) => candidateMetadataSchema.safeParse(item.metadata))
-        .filter((parsed) => parsed.success)
-        .map((parsed) => parsed.data.candidate)
-        .slice(0, limit);
-      if (storedCandidates.length) {
-        return { text: await synthesize(storedCandidates, input.text, input.env, limit), resultSetId: active.id };
+      const itemQuery = queryFromResultContext(active.context, now);
+      if (itemQuery === null) {
+        return { text: 'La période de cette liste est terminée. Relance la recherche avant de comparer les résultats.' };
       }
-      const itemQuery = queryFromResultContext(active.context);
+      const storedEntries = active.items
+        .filter((item) => !allowedPositions || allowedPositions.has(item.position))
+        .map((item) => ({ item, parsed: candidateMetadataSchema.safeParse(item.metadata) }))
+        .filter((entry) => entry.parsed.success)
+        .slice(0, limit);
+      if (storedEntries.length) {
+        const detailsByItem = new Map<string, Promise<AgoraItemResponse>>();
+        const detailFor = (itemId: string) => {
+          const existing = detailsByItem.get(itemId);
+          if (existing) return existing;
+          const pending = client.getItem(itemId, itemQuery);
+          detailsByItem.set(itemId, pending);
+          return pending;
+        };
+        const refreshed = await Promise.all(storedEntries.map(async ({ item, parsed }) => {
+          if (!parsed.success) return null;
+          const details = await detailFor(parsed.data.candidate.item.id);
+          const facts = item.entityType === 'agora.occurrence'
+            ? refreshSelectedCandidate(parsed.data.candidate, details)
+            : boundedItemDetail(details);
+          return { facts, meta: details.meta };
+        }));
+        const usable = refreshed.filter((entry) => entry?.facts);
+        if (usable.length) {
+          const warnings = freshnessWarnings(
+            usable.some((entry) => entry?.meta.stale),
+            usable.some((entry) => entry?.meta.partial),
+          );
+          return {
+            text: [await synthesize(usable.map((entry) => entry?.facts), input.text, input.env, limit), ...warnings].join('\n'),
+            resultSetId: active.id,
+          };
+        }
+      }
       const ids = [...new Set(active.items
         .filter((item) => item.entityType === 'agora.item')
         .map((item) => item.entityId))].slice(0, limit);
@@ -655,7 +740,6 @@ export async function executeCulture(input: {
     return { text: formatVenues(venues), ...(resultSet ? { resultSetId: resultSet.id } : {}) };
   }
 
-  const now = input.now ?? new Date();
   const window = resolveCultureWindow(input.text, now);
   const effectiveWindow = resolveEffectiveCultureWindow({
     from: slots.from ?? window.from,

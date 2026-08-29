@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals';
 
 import { createConversationDb, SqliteThreadRepository } from '../src/conversation/repositories/SqliteRepositories';
+import { cultureSlotsSchema } from '../src/culture/contracts';
 import {
   executeCulture,
   inferCultureRequest,
@@ -52,7 +53,39 @@ function discoverResponse(data = [candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Fi
   };
 }
 
+function itemDetailResponse(selected: ReturnType<typeof candidate>, stale = false, partial = false) {
+  return {
+    data: {
+      ...selected.item,
+      originalTitle: null,
+      description: null,
+      contributors: [],
+      durationMinutes: null,
+      imageUrl: null,
+      imageCredit: null,
+      source,
+      occurrences: [{
+        ...selected.occurrence,
+        itemId: selected.item.id,
+        venueId: selected.venue.id,
+        timezone: 'Europe/Paris',
+        venue: { ...selected.venue, latitude: 48.85, longitude: 2.35 },
+        source,
+      }],
+    },
+    meta: {
+      generatedAt: '2026-08-27T12:00:00.000Z', stale, partial,
+      providers: [{ source: 'scare', status: stale ? 'stale' : 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
+    },
+  };
+}
+
 describe('cultureAgent', () => {
+  test('keeps the currency slot aligned with the Agora three-letter contract', () => {
+    expect(cultureSlotsSchema.safeParse({ currency: 'EUR' }).success).toBe(true);
+    expect(cultureSlotsSchema.safeParse({ currency: '123' }).success).toBe(false);
+  });
+
   test('recognizes deterministic cinema constraints and title searches', () => {
     expect(inferCultureRequest('Quels films passent demain en VO ?')).toMatchObject({
       action: 'discover', slots: { types: ['movie'], version: 'VO' },
@@ -393,6 +426,65 @@ describe('cultureAgent', () => {
     const result = await executeCulture({ action: 'discover', slots: {}, text: 'films', threadId: 'empty-thread', env, resultSets });
     expect(result.text).toContain('aucune séance');
     expect(resultSets.findActive('empty-thread')).toBeNull();
+    db.close();
+  });
+
+  test('does not reuse a selected occurrence after its ResultSet window has passed', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const db = createConversationDb(':memory:');
+    const env = loadEnv({ REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32) });
+    const selected = candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film expiré');
+    const result = await executeCulture({
+      action: 'get_item',
+      slots: { itemId: selected.item.id },
+      text: 'Le premier',
+      threadId: 'expired-follow-up',
+      env,
+      resultSets: new ConversationResultSetRepository(db),
+      selectedResult: {
+        position: 1, entityType: 'agora.occurrence', entityId: selected.occurrence.id,
+        displayLabel: selected.item.title, metadata: { candidate: selected }, resultSetId: 'set-expired',
+        resultSetContext: { from: '2026-08-26T18:00:00.000Z', to: '2026-08-26T22:00:00.000Z' },
+      },
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    expect(result.text).toContain('période de cette liste est terminée');
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+    db.close();
+  });
+
+  test('revalidates the exact selected occurrence and preserves stale and partial warnings', async () => {
+    const selected = candidate('item_aaaaaaaaaaaaaaaaaaaaaaaa', 'Film actualisé');
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify(
+      itemDetailResponse(selected, true, true),
+    ), { status: 200 }));
+    const db = createConversationDb(':memory:');
+    const env = loadEnv({ REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32) });
+    const result = await executeCulture({
+      action: 'get_item',
+      slots: { itemId: selected.item.id },
+      text: 'Le premier',
+      threadId: 'stale-follow-up',
+      env,
+      resultSets: new ConversationResultSetRepository(db),
+      selectedResult: {
+        position: 1, entityType: 'agora.occurrence', entityId: selected.occurrence.id,
+        displayLabel: selected.item.title, metadata: { candidate: selected }, resultSetId: 'set-stale',
+        resultSetContext: {
+          latitude: 48.85, longitude: 2.35, radiusKm: 5,
+          from: '2026-08-27T10:00:00.000Z', to: '2026-08-29T00:00:00.000Z',
+        },
+      },
+      now: new Date('2026-08-27T12:00:00.000Z'),
+    });
+    expect(result.text).toContain('Film actualisé');
+    expect(result.text).toContain('données servies par Agora sont anciennes');
+    expect(result.text).toContain('liste peut être incomplète');
+    const calledUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(calledUrl.searchParams.get('from')).toBe('2026-08-27T12:00:00.000Z');
+    expect(calledUrl.searchParams.get('radiusKm')).toBe('5');
+    fetchMock.mockRestore();
     db.close();
   });
 

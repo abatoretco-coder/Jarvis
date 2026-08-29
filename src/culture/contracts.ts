@@ -26,7 +26,7 @@ export const cultureSlotsSchema = z.object({
   version: z.string().max(32).optional(),
   format: z.string().max(32).optional(),
   maxPrice: z.number().nonnegative().optional(),
-  currency: z.string().length(3).optional(),
+  currency: z.string().regex(/^[A-Za-z]{3}$/u).optional(),
   freeOnly: z.boolean().optional(),
   limit: z.number().int().min(1).max(20).optional(),
   candidatePosition: z.number().int().positive().optional(),
@@ -116,14 +116,17 @@ const providerMetaSchema = z.object({
   disabledReason: z.string().optional(),
 });
 
+const responseMetaSchema = z.object({
+  generatedAt: z.string().datetime({ offset: true }),
+  stale: z.boolean(),
+  partial: z.boolean(),
+  providers: z.array(providerMetaSchema),
+});
+
 export const agoraDiscoverResponseSchema = z.object({
   data: z.array(agoraCandidateSchema),
-  meta: z.object({
-    generatedAt: z.string().datetime({ offset: true }),
-    stale: z.boolean(),
-    partial: z.boolean(),
+  meta: responseMetaSchema.extend({
     nextCursor: z.string().nullable(),
-    providers: z.array(providerMetaSchema),
   }),
 });
 export type AgoraDiscoverResponse = z.infer<typeof agoraDiscoverResponseSchema>;
@@ -149,11 +152,18 @@ const detailedOccurrenceSchema = occurrenceCoreSchema.extend({
 
 export const agoraItemResponseSchema = z.object({
   data: itemSchema.extend({ source: sourceSchema, occurrences: z.array(detailedOccurrenceSchema) }),
+  meta: responseMetaSchema,
 });
 export type AgoraItemResponse = z.infer<typeof agoraItemResponseSchema>;
 
 export const agoraVenuesResponseSchema = z.object({
   data: z.array(detailedVenueSchema),
-  meta: z.object({ generatedAt: z.string().datetime({ offset: true }) }),
+  meta: responseMetaSchema,
 });
 export type AgoraVenuesResponse = z.infer<typeof agoraVenuesResponseSchema>;
+
+export const agoraVenueResponseSchema = z.object({
+  data: detailedVenueSchema,
+  meta: responseMetaSchema,
+});
+export type AgoraVenueResponse = z.infer<typeof agoraVenueResponseSchema>;

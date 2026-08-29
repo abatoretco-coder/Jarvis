@@ -17,18 +17,22 @@ const source = {
   fetchedAt: '2026-08-29T08:00:00.000Z', sourceModifiedAt: null,
   freshness: 'fresh', sourceType: 'open_data',
 };
+const responseMeta = {
+  generatedAt: '2026-08-29T09:00:00.000Z', stale: false, partial: false,
+  providers: [{ source: 'openagenda', status: 'fresh', lastSuccessAt: '2026-08-29T08:00:00.000Z' }],
+};
 
 function candidate(id: string, type: string, categories: string[], index: number) {
   return {
     item: {
-      id: `item-${id}`, type, title: id, summary: `Résumé ${id}`, categories, contributors: [], attributes: {},
+      id: `item-${index}`, type, title: id, summary: `Résumé ${id}`, categories, contributors: [], attributes: {},
     },
     occurrence: {
-      id: `occ-${id}`, startsAt: `2026-09-05T${18 + index}:00:00.000Z`, endsAt: null,
+      id: `occ-${index}`, startsAt: `2026-09-05T${18 + index}:00:00.000Z`, endsAt: null,
       status: 'scheduled', price: { min: 10 + index * 10, max: 20 + index * 10, currency: 'EUR' },
       isFree: false, bookingUrl: null, attributes: {},
     },
-    venue: { id: `venue-${id}`, name: `Lieu ${id}`, distanceKm: 2 + index },
+    venue: { id: `venue-${index}`, name: `Lieu ${id}`, distanceKm: 2 + index },
     source: { ...source, externalId: `source-${id}` },
     rankReasons: ['date_match'],
   };
@@ -60,6 +64,7 @@ function itemResponse(id: string) {
         source,
       }],
     },
+    meta: responseMeta,
   };
 }
 

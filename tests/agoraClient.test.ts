@@ -31,9 +31,10 @@ describe('AgoraClient', () => {
     await expect(client().discover({})).rejects.toMatchObject({ code: 'unavailable', message: 'agora_unavailable' });
   });
 
-  test('rejects an unsafe item id before any request', async () => {
+  test('rejects unsafe item and venue ids before any request', async () => {
     const fetchMock = jest.spyOn(global, 'fetch');
     await expect(client().getItem('../private')).rejects.toMatchObject({ code: 'invalid_response' });
+    await expect(client().getVenue('../private')).rejects.toMatchObject({ code: 'invalid_response' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

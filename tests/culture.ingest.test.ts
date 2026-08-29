@@ -13,6 +13,10 @@ const source = {
   provider: 'scare', externalId: 'show', sourceUrl: null, fetchedAt: '2026-08-27T08:00:00.000Z',
   sourceModifiedAt: null, freshness: 'fresh', sourceType: 'open_data',
 };
+const responseMeta = {
+  generatedAt: '2026-08-29T09:00:00.000Z', stale: false, partial: false,
+  providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-29T08:00:00.000Z' }],
+};
 
 function candidate(
   id: string,
@@ -40,7 +44,7 @@ function candidate(
       attributes: {},
     },
     occurrence: {
-      id: occurrenceId, startsAt: `2026-08-27T${hour}:00:00.000Z`, endsAt: null, status: 'scheduled',
+      id: occurrenceId, startsAt: `2026-08-30T${hour}:00:00.000Z`, endsAt: null, status: 'scheduled',
       price: options.price ?? null,
       isFree: options.isFree ?? null,
       bookingUrl: null,
@@ -95,12 +99,32 @@ function itemResponse(id: string, title: string) {
       categories: ['drama'], contributors: [], durationMinutes: 100, imageUrl: null, imageCredit: null,
       attributes: {}, source,
       occurrences: [{
-        id: `occ_${id}`, itemId: id, venueId: `venue_${id}`, startsAt: '2026-08-28T18:30:00.000Z',
+        id: `occ_${id}`, itemId: id, venueId: `venue_${id}`, startsAt: '2026-08-30T18:30:00.000Z',
         endsAt: null, timezone: 'Europe/Paris', status: 'scheduled', price: null, isFree: null,
         bookingUrl: null, attributes: { version: 'VOSTFR' },
         venue: { id: `venue_${id}`, name: `Cinéma ${title}`, latitude: 48.86, longitude: 2.34, distanceKm: 2 }, source,
       }],
     },
+    meta: responseMeta,
+  };
+}
+
+function itemResponseForCandidates(id: string, title: string, entries: ReturnType<typeof candidate>[]) {
+  return {
+    data: {
+      id, type: 'movie', title, originalTitle: null, summary: `Synopsis de ${title}`, description: null,
+      categories: ['drama'], contributors: [], durationMinutes: 100, imageUrl: null, imageCredit: null,
+      attributes: {}, source,
+      occurrences: entries.map((entry) => ({
+        ...entry.occurrence,
+        itemId: id,
+        venueId: entry.venue.id,
+        timezone: 'Europe/Paris',
+        venue: { ...entry.venue, latitude: 48.86, longitude: 2.34 },
+        source,
+      })),
+    },
+    meta: responseMeta,
   };
 }
 
@@ -213,24 +237,26 @@ describe('Culture through /v1/ingest', () => {
 
     const filmBCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/items/item_bbbbbbbbbbbbbbbbbbbbbbbb'));
     const filmCCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/v1/items/item_cccccccccccccccccccccccc'));
-    expect(filmBCalls).toHaveLength(3);
+    expect(filmBCalls).toHaveLength(4);
     expect(filmCCalls).toHaveLength(2);
   });
 
-  test('keeps distinct Dune showtimes and resolves time and version attributes without a broad item query', async () => {
+  test('keeps distinct Dune showtimes and revalidates the exact selected occurrence', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-showtimes-'));
     registerIngestRoute(app, makeDeps(makeEnv(join(tempDir, 'conversation.sqlite'))));
     const showtimes = [
       candidate('item_dune', 'Dune', 17, 'occ_showtime_1', 'Cinéma A', { version: 'VF' }),
       candidate('item_dune', 'Dune', 18, 'occ_showtime_2', 'Cinéma B', { version: 'VOSTFR' }),
     ];
-    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      data: showtimes,
-      meta: {
-        generatedAt: '2026-08-27T09:00:00.000Z', stale: false, partial: false, nextCursor: null,
-        providers: [{ source: 'scare', status: 'fresh', lastSuccessAt: '2026-08-27T08:00:00.000Z' }],
-      },
-    }), { status: 200 }));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      return new Response(JSON.stringify(url.pathname.startsWith('/v1/items/')
+        ? itemResponseForCandidates('item_dune', 'Dune', showtimes)
+        : {
+            data: showtimes,
+            meta: { ...responseMeta, nextCursor: null },
+          }), { status: 200 });
+    });
 
     const first = await app.inject({
       method: 'POST', url: '/v1/ingest', payload: { threadId: 'showtime-conversation', text: 'Séances de Dune demain ?' },
@@ -261,7 +287,10 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(explicitShowtime.statusCode).toBe(200);
     expect(explicitShowtime.json<{ responseText: string }>().responseText).toContain('Cinéma B');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const itemCalls = fetchMock.mock.calls.map(([url]) => new URL(String(url))).filter((url) => url.pathname.startsWith('/v1/items/'));
+    expect(itemCalls).toHaveLength(3);
+    expect(itemCalls.every((url) => Date.parse(url.searchParams.get('from') ?? '') >= Date.now() - 1_000)).toBe(true);
   });
 
   test('refetches Agora while preserving structured constraints across successive refinements', async () => {
@@ -314,7 +343,7 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(last.statusCode).toBe(200);
     expect(last.json<{ responseText: string }>().responseText).toContain('Film C');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   test('reuses the active voice-hub Culture thread before the Home Assistant preflight', async () => {
@@ -377,6 +406,14 @@ describe('Culture through /v1/ingest', () => {
       const url = new URL(String(input));
       if (url.hostname === 'ollama') {
         return new Response(JSON.stringify({ message: { content: 'Je choisirais la première option.' } }), { status: 200 });
+      }
+      if (url.pathname.startsWith('/v1/items/')) {
+        const itemId = decodeURIComponent(url.pathname.split('/').at(-1) ?? '');
+        const entries = [...mixed, ...expoTomorrow].filter((entry) => entry.item.id === itemId);
+        const selected = entries[0];
+        return selected
+          ? new Response(JSON.stringify(itemResponseForCandidates(itemId, selected.item.title, entries)), { status: 200 })
+          : new Response('not found', { status: 404 });
       }
       const data = url.searchParams.get('q') === 'Expo photo'
         ? expoTomorrow
@@ -575,10 +612,13 @@ describe('Culture through /v1/ingest', () => {
       distanceKm: 2.4,
       source,
     }];
-    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      data: venues,
-      meta: { generatedAt: '2026-08-27T09:00:00.000Z' },
-    }), { status: 200 }));
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      return new Response(JSON.stringify({
+        data: url.pathname === '/v1/venues' ? venues : venues[0],
+        meta: responseMeta,
+      }), { status: 200 });
+    });
 
     const search = await app.inject({
       method: 'POST', url: '/v1/ingest', payload: { threadId: 'venue-reference', text: 'Quels cinémas sont proches ?' },
@@ -597,7 +637,9 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(focusedVenue.statusCode).toBe(200);
     expect(focusedVenue.json<{ responseText: string }>().responseText).toContain('Cinéma X — Paris · 2.4 km');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
+    expect(new URL(String(fetchMock.mock.calls[2]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
   });
 
   test('returns a bounded clarification for an ambiguous venue reference without guessing an ID', async () => {
