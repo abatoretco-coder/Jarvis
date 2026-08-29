@@ -107,6 +107,15 @@ const envSchema = z
   CULTURE_HOME_LATITUDE: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
   CULTURE_HOME_LONGITUDE: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),
   CULTURE_DEFAULT_RADIUS_KM: z.coerce.number().positive().max(200).default(15),
+  CULTURE_DEFAULT_PROFILE_ID: z.string().trim().min(1).max(128).default('local-default'),
+  CULTURE_EXPLORATION_RATIO: z.coerce.number().min(0).max(0.5).default(0.25),
+  CULTURE_FEEDBACK_RETENTION_DAYS: numberFromEnv.pipe(z.number().min(30).max(3650)).default(730),
+  CULTURE_PROACTIVE_ENABLED: booleanFromEnv.default(false),
+  CULTURE_PROACTIVE_THRESHOLD: z.coerce.number().min(0).max(200).default(92),
+  CULTURE_PROACTIVE_COOLDOWN_MS: numberFromEnv
+    .pipe(z.number().min(3_600_000).max(604_800_000))
+    .default(86_400_000),
+  CULTURE_PROACTIVE_LOOKAHEAD_HOURS: numberFromEnv.pipe(z.number().min(1).max(168)).default(48),
   // Compatibility aliases for existing NAS deployments.
   AGORA_HOME_LAT: optionalNumberFromEnv.pipe(z.number().min(-90).max(90).optional()),
   AGORA_HOME_LON: optionalNumberFromEnv.pipe(z.number().min(-180).max(180).optional()),

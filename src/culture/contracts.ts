@@ -32,6 +32,12 @@ export const cultureSlotsSchema = z.object({
   candidatePosition: z.number().int().positive().optional(),
   candidatePositions: z.array(z.number().int().positive()).min(2).max(2).optional(),
   resultSetId: z.string().max(128).optional(),
+  recommendationMode: z.enum([
+    'discover',
+    'recommend_for_profile',
+    'recommend_similar',
+    'recommend_exploration',
+  ]).optional(),
 }).passthrough().superRefine((value, context) => {
   if ((value.latitude === undefined) !== (value.longitude === undefined)) {
     context.addIssue({

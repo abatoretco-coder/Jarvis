@@ -18,6 +18,8 @@ import {
   cultureActionSchema,
   cultureSlotsSchema,
 } from './contracts';
+import { CulturePersonalizationService } from './CulturePersonalizationService';
+import type { CultureProfileRepository } from './CultureProfileRepository';
 
 const PARIS_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
   timeZone: 'Europe/Paris',
@@ -36,9 +38,10 @@ const PARIS_TIME_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
 });
 
 const cultureResultContextSchema = z.object({
-  latitude: z.number().min(-90).max(90),
-  longitude: z.number().min(-180).max(180),
-  radiusKm: z.number().positive().max(200),
+  profileId: z.string().min(1).max(128).optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  radiusKm: z.number().positive().max(200).optional(),
   from: z.string().datetime({ offset: true }),
   to: z.string().datetime({ offset: true }),
   types: z.array(z.string()).max(10).optional(),
@@ -51,6 +54,16 @@ const cultureResultContextSchema = z.object({
   maxPrice: z.number().nonnegative().optional(),
   currency: z.string().length(3).optional(),
   freeOnly: z.boolean().optional(),
+  recommendationMode: z.enum([
+    'discover',
+    'recommend_for_profile',
+    'recommend_similar',
+    'recommend_exploration',
+  ]).optional(),
+}).superRefine((value, context) => {
+  if ((value.latitude === undefined) !== (value.longitude === undefined)) {
+    context.addIssue({ code: 'custom', path: ['latitude'], message: 'latitude and longitude must be provided together' });
+  }
 });
 
 const candidateMetadataSchema = z.object({ candidate: agoraCandidateSchema });
@@ -316,6 +329,7 @@ function slotsFromResultContext(context: Record<string, unknown> | null): Record
     maxPrice: parsed.data.maxPrice,
     currency: parsed.data.currency,
     freeOnly: parsed.data.freeOnly,
+    recommendationMode: parsed.data.recommendationMode,
   };
 }
 
@@ -369,6 +383,7 @@ export function inferCultureRefinement(input: {
     slots.types = [selectedCandidate.data.candidate.item.type];
     slots.tags = selectedCandidate.data.candidate.item.categories.slice(0, 5);
     delete slots.query;
+    slots.recommendationMode = 'recommend_similar';
     refined = true;
   }
   if (/\bdemain\b/u.test(value)) {
@@ -401,7 +416,7 @@ function formatVenues(response: AgoraVenuesResponse): string {
 function requestedLimit(text: string): number | undefined {
   const value = normalize(text);
   const words: Record<string, number> = { un: 1, deux: 2, trois: 3, quatre: 4, cinq: 5 };
-  const match = value.match(/\b(?:les\s+)?(un|deux|trois|quatre|cinq|\d{1,2})\s+(?:meilleurs?|films?|choix)/u);
+  const match = value.match(/\b(?:les\s+)?(un|deux|trois|quatre|cinq|\d{1,2})\s+(?:meilleurs?|films?|choix|trucs?|sorties?|recommandations?)/u);
   if (!match) return undefined;
   const limit = words[match[1] ?? ''] ?? Number(match[1]);
   return Number.isInteger(limit) ? Math.min(20, Math.max(1, limit)) : undefined;
@@ -412,10 +427,13 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
   if (/\b(?:mets|joue|lance|ecoute)\b.*\b(?:musique|jazz|rock|rap|playlist|spotify)\b/u.test(value)) return null;
   const implicitRecommendation = /\b(?:quelque chose|un truc|pourrait etre)\b.*\b(sympa|leger|interessant)\b/u.test(value)
     || /\bqu est ce qu on pourrait faire\b/u.test(value);
+  const personalRecommendation = /\b(?:qu est ce que tu me conseilles|devrai(?:t|ent) me plaire|recommande moi|conseille moi|trouve moi .*qui (?:devrai(?:t|ent)|pourrai(?:t|ent)) me plaire)\b/u.test(value);
+  const explorationRecommendation = /\b(?:quelque chose|un truc).*(?:different|nouveau)|\b(?:decouvrir|exploration)\b/u.test(value);
+  const similarRecommendation = /\b(?:meme style|similaire|comme (?:celui|celle))\b/u.test(value);
   const implicitFreeOuting = /\b(?:quelque chose|un truc)\b.*\bgratuit(?:e|es|s)?\b/u.test(value);
   const qualitativeMovieRequest = /\bfilms?\b.*\b(sympa|leger|interessant|pas idiot)\b/u.test(value);
   const cultureTerms = /\b(films?|cinemas?|seances?|sorties?|concerts?|jazz|expos?|expositions?|theatre|spectacles?|humour|comedie|festivals?|activites?|que faire|qu est ce qu on (?:fait|peut faire|pourrait faire)|qu est ce qu il y a)\b/u;
-  if (!cultureTerms.test(value) && !implicitRecommendation && !implicitFreeOuting) return null;
+  if (!cultureTerms.test(value) && !implicitRecommendation && !implicitFreeOuting && !personalRecommendation && !explorationRecommendation && !similarRecommendation) return null;
   const types = /\b(films?|cinemas?|seances?)\b/u.test(value) ? ['movie']
     : /\bconcerts?|jazz\b/u.test(value) ? ['concert']
       : /\bexpos?|expositions?\b/u.test(value) ? ['exhibition']
@@ -424,7 +442,7 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
             : /\btheatre|spectacles?\b/u.test(value) ? ['theatre']
               : undefined;
   const version = /\bvostfr\b/u.test(value) ? 'VOSTFR' : /\bvo\b/u.test(value) ? 'VO' : /\bvf\b/u.test(value) ? 'VF' : undefined;
-  let action: CultureAction = implicitRecommendation || implicitFreeOuting || qualitativeMovieRequest || /\b(compare|choisir|choisirais|prefere|recommand\w*|conseille|pitch\w*)\b/u.test(value)
+  let action: CultureAction = implicitRecommendation || implicitFreeOuting || qualitativeMovieRequest || personalRecommendation || explorationRecommendation || similarRecommendation || /\b(compare|choisir|choisirais|prefere|recommand\w*|conseille|pitch\w*)\b/u.test(value)
     ? 'recommend_candidates'
     : 'discover';
   if (/\bcinemas?\b/u.test(value) && /\b(proche\w*|pres|autour|moins de|rayon)\b/u.test(value)) {
@@ -450,6 +468,13 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
       ...(maxPrice !== undefined ? { maxPrice, currency: 'EUR' } : {}),
       ...(radiusKm !== undefined ? { radiusKm } : {}),
       ...(limit ? { limit } : {}),
+      recommendationMode: explorationRecommendation
+        ? 'recommend_exploration'
+        : similarRecommendation
+          ? 'recommend_similar'
+          : personalRecommendation || action === 'recommend_candidates'
+            ? 'recommend_for_profile'
+            : 'discover',
     },
   };
 }
@@ -502,8 +527,21 @@ export async function executeCulture(input: {
   env: Env;
   resultSets: ConversationResultSetRepository;
   selectedResult?: ResolvedConversationResult | null;
+  profiles?: CultureProfileRepository;
+  profileId?: string;
   now?: Date;
-}): Promise<{ text: string; resultSetId?: string }> {
+}): Promise<{
+  text: string;
+  resultSetId?: string;
+  candidates?: Array<{
+    position: number;
+    entityType: 'agora.item' | 'agora.occurrence';
+    entityId: string;
+    title: string;
+    personalizationScore: number;
+    personalizationReasons: string[];
+  }>;
+}> {
   if (!input.env.AGORA_BASE_URL || !input.env.AGORA_API_TOKEN) throw new Error('agora_not_configured');
   const slots = cultureSlotsSchema.parse(input.slots ?? {});
   const client = new AgoraClient({
@@ -594,7 +632,8 @@ export async function executeCulture(input: {
           sourceAgent: 'culture',
           sourceAction: input.action,
           ttlMs: input.env.CONVERSATION_RESULT_SET_TTL_MS,
-          context: {
+        context: {
+          profileId: input.profileId,
             latitude: location.lat,
             longitude: location.lon,
             radiusKm: location.radiusKm,
@@ -625,7 +664,11 @@ export async function executeCulture(input: {
   }
   const { from, to } = effectiveWindow;
   const resultLimit = slots.limit ?? 20;
-  const agoraLimit = input.action === 'find_occurrences' ? resultLimit : Math.min(50, resultLimit * 3);
+  const agoraLimit = input.action === 'find_occurrences'
+    ? resultLimit
+    : input.action === 'recommend_candidates'
+      ? 50
+      : Math.min(50, resultLimit * 3);
   const result = await client.discover({
     lat: location.lat,
     lon: location.lon,
@@ -645,7 +688,24 @@ export async function executeCulture(input: {
     limit: agoraLimit,
   });
 
-  const presentedCandidates = candidatesForPresentation(input.action, result.data, resultLimit);
+  const rankedInput = candidatesForPresentation(input.action, result.data, Math.min(50, result.data.length));
+  const personalized = input.profiles && input.profileId && input.action !== 'find_occurrences'
+    ? new CulturePersonalizationService(input.profiles, input.env.CULTURE_EXPLORATION_RATIO).rank({
+        profileId: input.profileId,
+        candidates: rankedInput,
+        limit: resultLimit,
+        mode: slots.recommendationMode ?? (input.action === 'recommend_candidates' ? 'recommend_for_profile' : 'discover'),
+        explicitTypes: slots.types,
+        explicitCategories: [...(slots.categories ?? []), ...(slots.tags ?? [])],
+        nowMs: now.getTime(),
+      })
+    : rankedInput.slice(0, resultLimit).map((candidate) => ({
+        candidate,
+        personalizationScore: 0,
+        personalizationReasons: [] as string[],
+        exploration: false,
+      }));
+  const presentedCandidates = personalized.map((entry) => entry.candidate);
 
   const occurrenceIdentity = input.action === 'find_occurrences'
     || presentedCandidates.some((candidate) => candidate.item.type !== 'movie');
@@ -655,7 +715,8 @@ export async function executeCulture(input: {
         sourceAgent: 'culture',
         sourceAction: input.action,
         ttlMs: input.env.CONVERSATION_RESULT_SET_TTL_MS,
-        context: {
+          context: {
+            profileId: input.profileId,
           latitude: location.lat,
           longitude: location.lon,
           radiusKm: location.radiusKm,
@@ -671,13 +732,16 @@ export async function executeCulture(input: {
           maxPrice: slots.maxPrice,
           currency: slots.currency,
           freeOnly: slots.freeOnly,
+          recommendationMode: slots.recommendationMode,
         },
-        items: presentedCandidates.map((candidate) => ({
+        items: personalized.map(({ candidate, personalizationScore, personalizationReasons }) => ({
           entityType: occurrenceIdentity ? 'agora.occurrence' : 'agora.item',
           entityId: occurrenceIdentity ? candidate.occurrence.id : candidate.item.id,
           displayLabel: `${candidate.item.title} — ${candidate.venue.name}`,
           metadata: {
             candidate,
+            personalizationScore,
+            personalizationReasons,
             referenceLabels: candidateReferenceLabels(
               candidate,
               occurrenceIdentity ? 'occurrence' : 'item',
@@ -689,10 +753,25 @@ export async function executeCulture(input: {
   let text = displayCandidates(presentedCandidates, result.meta.stale, result.meta.partial);
   if ((input.action === 'compare_candidates' || input.action === 'recommend_candidates') && presentedCandidates.length) {
     try {
-      text = await synthesize(presentedCandidates, input.text, input.env, resultLimit);
+      text = await synthesize(personalized.map(({ candidate, personalizationScore, personalizationReasons }) => ({
+        candidate,
+        personalizationScore,
+        personalizationReasons,
+      })), input.text, input.env, resultLimit);
     } catch {
       text = `${text}\nJe n’ai pas pu générer la comparaison locale, mais les données factuelles ci-dessus restent disponibles.`;
     }
   }
-  return { text, ...(resultSet ? { resultSetId: resultSet.id } : {}) };
+  return {
+    text,
+    ...(resultSet ? { resultSetId: resultSet.id } : {}),
+    candidates: personalized.map(({ candidate, personalizationScore, personalizationReasons }, index) => ({
+      position: index + 1,
+      entityType: occurrenceIdentity ? 'agora.occurrence' : 'agora.item',
+      entityId: occurrenceIdentity ? candidate.occurrence.id : candidate.item.id,
+      title: candidate.item.title,
+      personalizationScore,
+      personalizationReasons,
+    })),
+  };
 }

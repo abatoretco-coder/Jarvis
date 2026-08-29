@@ -58,6 +58,11 @@ import { AgoraClientError } from '../culture/AgoraClient';
 import { cultureActionSchema } from '../culture/contracts';
 import { executeCulture, inferCultureComparisonPositions, inferCultureRefinement, inferCultureRequest } from '../culture/cultureAgent';
 import {
+  CultureMemoryService,
+  inferCultureMemoryCommand,
+} from '../culture/CultureMemoryService';
+import { CultureProfileRepository, resolveCultureProfileId } from '../culture/CultureProfileRepository';
+import {
   buildMailAccounts,
   callMailAgent,
   executeMailAgentAction,
@@ -70,6 +75,7 @@ import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
 import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
 import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
 import {
+  type ConversationResultSet,
   ConversationResultSetRepository,
   isConversationResultSetReferenceText,
 } from '../resultSets/ConversationResultSetRepository';
@@ -133,7 +139,10 @@ const ingestSchema = z.object({
   contextNote: z.string().max(8_000).optional(),
   clientContext: z.record(z.string(), z.unknown()).optional(),
   correlation_id: z.string().optional(),
-  user_id: z.string().optional(),
+  user_id: z.string().trim().min(1).max(128).refine((value) => [...value].every((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code >= 32 && code !== 127;
+  }), 'control characters are not allowed').optional(),
   domain: z.enum(['spotify', 'culture']).optional(),
   action: z.union([spotifyActionSchema, cultureActionSchema]).optional(),
   slots: z.record(z.string(), z.unknown()).optional(),
@@ -151,6 +160,14 @@ const responseSchema = z.object({
   responseText: z.string().min(1),
   usedSummaryVersion: z.string().min(1).optional(),
   sources: z.array(z.string().url()).optional(),
+  cultureCandidates: z.array(z.object({
+    position: z.number().int().min(1).max(20),
+    entityType: z.enum(['agora.item', 'agora.occurrence']),
+    entityId: z.string().min(1).max(128),
+    title: z.string().min(1).max(500),
+    personalizationScore: z.number(),
+    personalizationReasons: z.array(z.string().max(150)).max(20),
+  })).max(20).optional(),
   voiceAudio: z.object({
     contentType: z.string().min(1),
     base64Audio: z.string().min(1),
@@ -177,6 +194,18 @@ const responseSchema = z.object({
     }).optional(),
   }).optional(),
 });
+
+function resultSetBelongsToCultureProfile(
+  resultSet: ConversationResultSet | null,
+  profileId: string,
+  defaultProfileId: string,
+): boolean {
+  if (!resultSet || resultSet.sourceAgent !== 'culture') return true;
+  const storedProfileId = resultSet.context?.profileId;
+  return typeof storedProfileId === 'string'
+    ? storedProfileId === profileId
+    : profileId === defaultProfileId;
+}
 
 const historyQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
@@ -862,6 +891,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const messageRepository = new SqliteMessageRepository(db);
   const pendingMutationRepository = new PendingMutationRepository(db);
   const resultSetRepository = new ConversationResultSetRepository(db);
+  const cultureProfileRepository = new CultureProfileRepository(db, deps.env.CULTURE_FEEDBACK_RETENTION_DAYS);
+  const cultureMemoryService = new CultureMemoryService(cultureProfileRepository, resultSetRepository, deps.env);
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -1119,6 +1150,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         clientChannel?: string;
         expiresAtMs: number;
         routeKey?: string;
+      }
+    | {
+        agent: 'culture';
+        action: 'reset_profile';
+        effect: 'destructive';
+        preview: string;
+        payload: { profileId: string };
+        proposalId: string;
+        threadId: string;
+        clientChannel?: string;
+        expiresAtMs: number;
+        routeKey: 'culture.reset_profile';
       };
   type PendingCalendarMutation = Extract<PendingMutation, { agent: 'calendar' }>;
   type PendingCalendarAction = PendingCalendarMutation['action'];
@@ -1297,6 +1340,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }) as PendingMutation;
   };
 
+  const createPendingCultureReset = async (input: {
+    threadId: string;
+    clientChannel?: string;
+    profileId: string;
+  }): Promise<PendingMutation> => {
+    return await pendingMutationRepository.create({
+      agent: 'culture',
+      action: 'reset_profile',
+      effect: 'destructive',
+      preview: 'Je vais supprimer les préférences, feedbacks, favoris et notifications Culture de ce profil local.',
+      payload: { profileId: input.profileId },
+      routeKey: 'culture.reset_profile',
+      proposalId: `culture${randomUUID().slice(0, 8)}`,
+      threadId: input.threadId,
+      clientChannel: input.clientChannel,
+      expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
+    }) as PendingMutation;
+  };
+
   const parseCalendarCandidateSelection = (value: string, candidates: Array<{ index: number; start: string }>): number | null => {
     const normalized = normalizeConfirmationText(value);
     if (/\b(premier|premiere|1|numero 1)\b/u.test(normalized)) return 1;
@@ -1413,6 +1475,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
   const executePendingMutation = async (mutation: PendingMutation): Promise<string> => {
+    if (mutation.agent === 'culture') {
+      cultureProfileRepository.resetProfile(mutation.payload.profileId);
+      return 'Le profil Culture local a été réinitialisé.';
+    }
     if (mutation.agent === 'calendar') {
       if (!mutation.payload.plan) throw new Error('pending_calendar_missing_plan');
       return executeCalendarAgentAction(mutation.payload.plan, buildCalendarEnv());
@@ -1554,6 +1620,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ? await threadRepository.getActiveConversationThread(clientChannel)
       : null;
     const effectiveThreadId = detectEffectiveThreadId(threadId, activeThread);
+    const defaultCultureProfileId = deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default';
+    const profileId = resolveCultureProfileId(parsed.data.user_id, defaultCultureProfileId);
     if (activeThread) {
       app.log.info(
         {
@@ -1565,23 +1633,41 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       );
     }
 
-    const existingCultureResultSet = resultSetRepository.findActive(effectiveThreadId)?.sourceAgent === 'culture';
+    const preflightResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const existingCultureResultSet = preflightResultSet?.sourceAgent === 'culture'
+      && resultSetBelongsToCultureProfile(preflightResultSet, profileId, defaultCultureProfileId);
     const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
     const resultSetRefinement = existingCultureResultSet
       && /\b(seulement|vo|vf|vostfr|gratuit|budget|moins de|apres|demain|meme style)\b/u.test(normalizedRawText);
     const resultSetFollowup = resultSetReference || resultSetRefinement;
-    const rawCultureRequest = parsed.data.domain === 'culture' || Boolean(inferCultureRequest(rawText)) || resultSetFollowup;
-    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest) {
+    await pendingMutationRepository.expirePending();
+    const foundPreflightPendingMutation = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+    const preflightPendingMutation = foundPreflightPendingMutation?.agent === 'culture'
+      && foundPreflightPendingMutation.payload.profileId !== profileId
+      ? null
+      : foundPreflightPendingMutation;
+    const pendingCultureConfirmation = preflightPendingMutation?.agent === 'culture';
+    const preflightCultureMemoryCommand = inferCultureMemoryCommand(rawText);
+    const memoryCommandNeedsResultSet = preflightCultureMemoryCommand
+      && ['save', 'remove_saved', 'feedback', 'explain'].includes(preflightCultureMemoryCommand.type);
+    const routableCultureMemoryCommand = Boolean(
+      preflightCultureMemoryCommand && (!memoryCommandNeedsResultSet || existingCultureResultSet),
+    );
+    const rawCultureRequest = parsed.data.domain === 'culture'
+      || Boolean(inferCultureRequest(rawText))
+      || routableCultureMemoryCommand
+      || resultSetFollowup;
+    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest && !pendingCultureConfirmation) {
       return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
     await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
 
-    await pendingMutationRepository.expirePending();
-    const activePendingMutation = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+    const activePendingMutation = preflightPendingMutation
+      ?? await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
     const pendingChannelMatches = !activePendingMutation?.clientChannel || activePendingMutation.clientChannel === clientChannel;
     const mentionsKnownProposal = Boolean(activePendingMutation && normalizeConfirmationText(text).includes(normalizeConfirmationText(activePendingMutation.proposalId)));
-    const mentionsWrongProposal = /\b(?:cal|mail|todo)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) && !mentionsKnownProposal;
+    const mentionsWrongProposal = /\b(?:cal|mail|todo|culture)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) && !mentionsKnownProposal;
     if (activePendingMutation && text && pendingChannelMatches && mentionsWrongProposal) {
       return reply.code(409).send({
         error: 'proposal_id_mismatch',
@@ -1638,7 +1724,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       } else {
         await pendingMutationRepository.cancel(activePendingMutation.proposalId, 'voice_rejected');
       }
-      const responseDomain = activePendingMutation.agent;
+      const responseDomain = activePendingMutation.agent === 'culture' ? 'general' : activePendingMutation.agent;
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: mutationText, domain: responseDomain, mode: voiceMode })
         : mutationText;
@@ -1891,18 +1977,39 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     );
 
     const inferredCulture = inferCultureRequest(assistantInputText);
-    const referenceResolution = resultSetRepository.resolveReferenceDetailed(effectiveThreadId, text);
+    const cultureMemoryCommand = inferCultureMemoryCommand(assistantInputText);
+    const foundActiveResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const activeResultSetBelongsToProfile = resultSetBelongsToCultureProfile(
+      foundActiveResultSet,
+      profileId,
+      defaultCultureProfileId,
+    );
+    const activeResultSet = activeResultSetBelongsToProfile ? foundActiveResultSet : null;
+    const referenceResolution = !foundActiveResultSet || activeResultSetBelongsToProfile
+      ? resultSetRepository.resolveReferenceDetailed(effectiveThreadId, text)
+      : { status: 'not_reference' as const };
     const referencedResult = referenceResolution.status === 'resolved' ? referenceResolution.result : null;
-    const activeResultSet = resultSetRepository.findActive(effectiveThreadId);
+    const focusedResult = !referencedResult && activeResultSet && activeResultSet.focusedPosition !== null
+      ? activeResultSet.items.find((item) => item.position === activeResultSet.focusedPosition)
+      : null;
+    const contextualSelectedResult = referencedResult ?? (focusedResult && activeResultSet
+      ? { ...focusedResult, resultSetId: activeResultSet.id, resultSetContext: activeResultSet.context }
+      : null);
     const cultureRefinement = inferCultureRefinement({
       text: assistantInputText,
       activeResultSet,
-      selectedResult: referencedResult,
+      selectedResult: contextualSelectedResult,
     });
     const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
       && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|tu conseilles|compare|hesite|pitche)\b/u.test(normalizeIntentText(text));
     const comparisonPositions = contextualCultureRequest ? inferCultureComparisonPositions(text) : undefined;
-    const referencedCultureResult = referencedResult?.entityType.startsWith('agora.') ? referencedResult : null;
+    const referencedProfileId = typeof referencedResult?.resultSetContext?.profileId === 'string'
+      ? referencedResult.resultSetContext.profileId
+      : null;
+    const referencedCultureResult = referencedResult?.entityType.startsWith('agora.')
+      && (!referencedProfileId || referencedProfileId === profileId)
+      ? referencedResult
+      : null;
     const unresolvedReferenceText = referenceResolution.status === 'ambiguous'
       ? `Je ne peux pas déterminer lequel tu désignes. Précise le numéro parmi : ${referenceResolution.candidates.map((candidate) => `${candidate.position}. ${candidate.displayLabel}`).join(' ; ')}.`
       : referenceResolution.status === 'not_found'
@@ -1919,6 +2026,56 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(200).send({
         threadId: effectiveThreadId,
         responseText: unresolvedReferenceText,
+      });
+    }
+    const activeCultureResultSet = activeResultSet?.sourceAgent === 'culture';
+    const activeMemoryCommandNeedsResultSet = cultureMemoryCommand
+      && ['save', 'remove_saved', 'feedback', 'explain'].includes(cultureMemoryCommand.type);
+    const actionableCultureMemoryCommand = cultureMemoryCommand
+      && (!activeMemoryCommandNeedsResultSet || activeCultureResultSet)
+      ? cultureMemoryCommand
+      : null;
+    if (actionableCultureMemoryCommand) {
+      if (actionableCultureMemoryCommand.type === 'reset_profile') {
+        const mutation = await createPendingCultureReset({
+          threadId: effectiveThreadId,
+          clientChannel: clientChannel ?? undefined,
+          profileId,
+        });
+        const responseText = buildMutationProposalText(mutation);
+        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+        return reply.code(200).send({
+          threadId: effectiveThreadId,
+          responseText,
+          replyMeta: {
+            kind: 'culture',
+            source: 'local_profile',
+            routeKey: 'culture.reset_profile',
+            semanticDecision: 'confirmation_required',
+            proposalId: mutation.proposalId,
+            pendingAction: mutation.action,
+          },
+        });
+      }
+      const memory = await cultureMemoryService.execute({
+        command: actionableCultureMemoryCommand,
+        profileId,
+        threadId: effectiveThreadId,
+        selectedResult: referencedResult,
+        activeResultSet,
+      });
+      await conversationService.persistMessages(effectiveThreadId, text, memory.text);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText: toSingleParagraphPlainText(memory.text),
+        replyMeta: {
+          kind: 'culture',
+          source: 'local_profile',
+          routeKey: `culture.${actionableCultureMemoryCommand.type}`,
+          semanticDecision: 'deterministic_profile',
+        },
       });
     }
     if (parsed.data.domain === 'culture' || inferredCulture || cultureRefinement || referencedCultureResult || contextualCultureRequest) {
@@ -1943,6 +2100,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         ...(comparisonPositions ? { candidatePositions: comparisonPositions } : {}),
       };
       try {
+        if (referencedCultureResult) {
+          cultureMemoryService.recordImplicitSelection(
+            profileId,
+            referencedCultureResult,
+            /\b(?:parle|detail|pitch|quoi|ou|heure|coute)\b/u.test(normalizedRawText),
+          );
+        }
+        cultureMemoryService.recordQuery(profileId, requestedSlots);
         const culture = await executeCulture({
           action: requestedAction,
           slots: requestedSlots,
@@ -1952,6 +2117,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           env: deps.env,
           resultSets: resultSetRepository,
           selectedResult: referencedCultureResult,
+          profiles: cultureProfileRepository,
+          profileId,
         });
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
@@ -1961,6 +2128,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(200).send({
           threadId: effectiveThreadId,
           responseText: toSingleParagraphPlainText(responseText),
+          cultureCandidates: culture.candidates,
           replyMeta: {
             kind: 'culture',
             source: 'agora',

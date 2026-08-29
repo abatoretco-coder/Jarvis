@@ -7,6 +7,7 @@ import { NasStatusClient } from './nas/NasStatusClient';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
 import { registerContextCacheRoute } from './routes/contextCache';
+import { registerCultureProfileRoutes } from './routes/cultureProfile';
 import { registerDashboardRoute } from './routes/dashboard';
 import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
@@ -93,6 +94,7 @@ export function buildApp(env: Env): FastifyInstance {
 
   registerCapabilitiesRoute(app, deps);
   registerContextCacheRoute(app, deps);
+  registerCultureProfileRoutes(app, deps);
   registerDashboardRoute(app, deps);
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);

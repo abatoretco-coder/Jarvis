@@ -589,6 +589,71 @@ export function createConversationDb(dbPath: string): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_conversation_result_sets_expiry
       ON conversation_result_sets(thread_id, expires_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS culture_preference_profiles (
+      profile_id TEXT PRIMARY KEY,
+      type_weights_json TEXT NOT NULL DEFAULT '{}',
+      tag_weights_json TEXT NOT NULL DEFAULT '{}',
+      venue_weights_json TEXT NOT NULL DEFAULT '{}',
+      daypart_weights_json TEXT NOT NULL DEFAULT '{}',
+      weekday_weights_json TEXT NOT NULL DEFAULT '{}',
+      price_affinity REAL NOT NULL DEFAULT 0,
+      distance_affinity REAL NOT NULL DEFAULT 0,
+      free_affinity REAL NOT NULL DEFAULT 0,
+      indoor_outdoor_affinity REAL NOT NULL DEFAULT 0,
+      explicit_exclusions_json TEXT NOT NULL DEFAULT '[]',
+      proactive_enabled INTEGER NOT NULL DEFAULT 0 CHECK (proactive_enabled IN (0,1)),
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS culture_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      signal TEXT NOT NULL CHECK (signal IN (
+        'explicit_like','explicit_dislike','save','selection','details','dismiss','query'
+      )),
+      strength REAL NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_culture_feedback_profile_created
+      ON culture_feedback(profile_id, created_at_ms DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_culture_feedback_profile_entity
+      ON culture_feedback(profile_id, entity_type, entity_id, created_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS culture_saved_entities (
+      profile_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      source_refs_json TEXT NOT NULL DEFAULT '[]',
+      title TEXT NOT NULL,
+      categories_json TEXT NOT NULL DEFAULT '[]',
+      venue_json TEXT,
+      occurrence_date TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      saved_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(profile_id, entity_type, entity_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_culture_saved_profile_date
+      ON culture_saved_entities(profile_id, saved_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS culture_proactive_notifications (
+      profile_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      notified_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(profile_id, fingerprint)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_culture_proactive_profile_notified
+      ON culture_proactive_notifications(profile_id, notified_at_ms DESC);
   `);
 
   const resultSetColumns = db.prepare('PRAGMA table_info(conversation_result_sets)').all() as Array<{ name: string }>;

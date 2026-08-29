@@ -84,6 +84,13 @@ describe('cultureAgent', () => {
     expect(inferCultureRequest(text)).toMatchObject({ action: 'recommend_candidates', slots: { types: undefined } });
   });
 
+  test('recognizes a plural personal recommendation and its requested limit', () => {
+    expect(inferCultureRequest('Trouve-moi trois trucs qui devraient me plaire cette semaine.')).toMatchObject({
+      action: 'recommend_candidates',
+      slots: { limit: 3, recommendationMode: 'recommend_for_profile', types: undefined },
+    });
+  });
+
   test('recognizes generic outings, type, tags, price and venue constraints', () => {
     expect(inferCultureRequest('Mets du jazz au salon')).toBeNull();
     expect(inferCultureRequest('Quelque chose de gratuit.')).toMatchObject({
