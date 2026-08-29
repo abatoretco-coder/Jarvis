@@ -249,6 +249,31 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
     expect(availability.json<{ responseText: string }>().responseText).toContain('Expo photo');
   });
 
+  test('records genre feedback and favorite for a combined focused command', async () => {
+    installFetchMock();
+    const profile = { user_id: 'combined-save-profile' };
+    await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'combined-save', text: 'Qu’est-ce qu’on fait ce soir ?', ...profile },
+    });
+    await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'combined-save', text: 'Le deuxième.', ...profile },
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'combined-save', text: 'J’aime bien ce genre, garde-le.', ...profile },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ responseText: string }>().responseText).toContain('sauvegardé localement');
+    const db = createConversationDb(dbPath);
+    const repository = new CultureProfileRepository(db);
+    expect(repository.listSaved(profile.user_id)).toHaveLength(1);
+    expect(repository.listFeedback(profile.user_id).some((entry) => entry.signal === 'explicit_like')).toBe(true);
+    db.close();
+  });
+
   test('penalizes theatre generically but honors an explicit theatre request', async () => {
     const fetchMock = installFetchMock();
     const profile = { user_id: 'profile-negative' };

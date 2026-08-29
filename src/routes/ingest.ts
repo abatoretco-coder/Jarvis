@@ -1660,7 +1660,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const pendingCultureConfirmation = preflightPendingMutation?.agent === 'culture';
     const preflightCultureMemoryCommand = inferCultureMemoryCommand(rawText);
     const memoryCommandNeedsResultSet = preflightCultureMemoryCommand
-      && ['save', 'remove_saved', 'feedback', 'explain'].includes(preflightCultureMemoryCommand.type);
+      && ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(preflightCultureMemoryCommand.type);
     const routableCultureMemoryCommand = Boolean(
       preflightCultureMemoryCommand && (!memoryCommandNeedsResultSet || existingCultureResultSet),
     );
@@ -2040,7 +2040,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
     const activeCultureResultSet = activeResultSet?.sourceAgent === 'culture';
     const activeMemoryCommandNeedsResultSet = cultureMemoryCommand
-      && ['save', 'remove_saved', 'feedback', 'explain'].includes(cultureMemoryCommand.type);
+      && ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(cultureMemoryCommand.type);
     const actionableCultureMemoryCommand = cultureMemoryCommand
       && (!activeMemoryCommandNeedsResultSet || activeCultureResultSet)
       ? cultureMemoryCommand

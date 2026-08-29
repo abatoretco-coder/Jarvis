@@ -29,6 +29,7 @@ const savedMetadataSchema = z.object({
 
 export type CultureMemoryCommand =
   | { type: 'save' }
+  | { type: 'save_with_genre_feedback' }
   | { type: 'remove_saved' }
   | { type: 'list_saved'; period?: 'weekend' }
   | { type: 'inspect_profile' }
@@ -99,7 +100,10 @@ export function inferCultureMemoryCommand(text: string): CultureMemoryCommand | 
   if (/\b(?:montre|liste|qu est ce que).*(?:favoris|sorties? sauvegardees?|mis(?:e)?s? de cote)\b/u.test(value)) {
     return { type: 'list_saved', period: /\bweek ?end\b/u.test(value) ? 'weekend' : undefined };
   }
-  if (/\b(?:garde|sauvegarde|mets? de cote|ajoute aux favoris)\b/u.test(value)) return { type: 'save' };
+  const saveRequested = /\b(?:garde|sauvegarde|mets? de cote|ajoute aux favoris)\b/u.test(value);
+  const genreLikeRequested = /\b(?:bonne idee|j adore ce genre|j en veux plus comme ca|j aime bien ce genre)\b/u.test(value);
+  if (saveRequested && genreLikeRequested) return { type: 'save_with_genre_feedback' };
+  if (saveRequested) return { type: 'save' };
   if (
     /\b(?:retire|enleve|supprime)\b.*\b(?:favoris|sauvegard|mis de cote)\b/u.test(value)
     || /^(?:supprime|retire|enleve) (?:le |la )?(?:premier|premiere|deuxieme|second|seconde|troisieme|dernier|derniere)$/u.test(value)
@@ -108,7 +112,7 @@ export function inferCultureMemoryCommand(text: string): CultureMemoryCommand | 
   const forgotten = value.match(/\boublie (?:que j aime |ma preference pour |le gout pour )?(.+)$/u)?.[1]?.trim();
   if (forgotten) return { type: 'forget_preference', preference: forgotten.slice(0, 100) };
 
-  if (/\b(?:bonne idee|j adore ce genre|j en veux plus comme ca|j aime bien ce genre)\b/u.test(value)) {
+  if (genreLikeRequested) {
     return { type: 'feedback', signal: 'explicit_like', scope: 'genre' };
   }
   if (/\b(?:j aime|j adore|je prefere)\b.*\b(?:ce lieu|cet endroit|ce cinema|cette salle)\b/u.test(value)) {
@@ -408,6 +412,19 @@ export class CultureMemoryService {
         ) };
       }
       case 'save': return this.save(input.profileId, selected);
+      case 'save_with_genre_feedback': {
+        if (!selected) return { text: 'Je n’ai pas de résultat Culture focalisé à sauvegarder.' };
+        const feedback = recordCandidateFeedback(
+          this.repository,
+          input.profileId,
+          selected,
+          'explicit_like',
+          8,
+          'genre',
+        );
+        const saved = this.save(input.profileId, selected);
+        return { text: `${feedback} ${saved.text}` };
+      }
       case 'remove_saved': return this.removeSaved(input.profileId, selected);
       case 'list_saved': return this.listSaved(input.profileId, input.threadId, input.command.period);
       case 'reset_profile': return { text: 'La réinitialisation complète nécessite une confirmation.' };
