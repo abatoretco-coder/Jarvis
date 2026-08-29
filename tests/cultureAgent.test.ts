@@ -396,6 +396,47 @@ describe('cultureAgent', () => {
     db.close();
   });
 
+  test('preserves stale and partial warnings after an Ollama pitch and for an empty result', async () => {
+    const degraded = {
+      ...discoverResponse(),
+      meta: { ...discoverResponse().meta, stale: true, partial: true },
+    };
+    const emptyDegraded = {
+      ...discoverResponse([]),
+      meta: { ...discoverResponse([]).meta, stale: true, partial: true },
+    };
+    const fetchMock = jest.spyOn(global, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify(degraded), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: 'Pitch local.' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(emptyDegraded), { status: 200 }));
+    const db = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(db);
+    await threads.getOrCreate('degraded-pitch');
+    await threads.getOrCreate('degraded-empty');
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35', OLLAMA_BASE_URL: 'http://ollama:11434/v1',
+    });
+
+    const pitched = await executeCulture({
+      action: 'recommend_candidates', slots: { limit: 3 }, text: 'Recommande-moi une sortie',
+      threadId: 'degraded-pitch', env, resultSets: new ConversationResultSetRepository(db),
+    });
+    expect(pitched.text).toContain('Pitch local.');
+    expect(pitched.text).toContain('données servies par Agora sont anciennes');
+    expect(pitched.text).toContain('liste peut être incomplète');
+
+    const empty = await executeCulture({
+      action: 'discover', slots: {}, text: 'Que faire ?', threadId: 'degraded-empty', env,
+      resultSets: new ConversationResultSetRepository(db),
+    });
+    expect(empty.text).toContain('aucune séance');
+    expect(empty.text).toContain('données servies par Agora sont anciennes');
+    expect(empty.text).toContain('liste peut être incomplète');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    db.close();
+  });
+
   test('bounds an Ollama pitch to the requested three candidates', async () => {
     const candidates = Array.from({ length: 5 }, (_, index) => candidate(`item_${String(index).padStart(24, 'a')}`, `Film ${index + 1}`));
     const fetchMock = jest.spyOn(global, 'fetch')

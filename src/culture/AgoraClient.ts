@@ -68,7 +68,7 @@ export class AgoraClient {
     return this.request('/v1/discover', agoraDiscoverResponseSchema, params);
   }
 
-  getItem(id: string, params?: Record<string, QueryValue>): Promise<AgoraItemResponse> {
+  async getItem(id: string, params?: Record<string, QueryValue>): Promise<AgoraItemResponse> {
     if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(id)) throw new AgoraClientError('invalid_response');
     return this.request(`/v1/items/${encodeURIComponent(id)}`, agoraItemResponseSchema, params);
   }

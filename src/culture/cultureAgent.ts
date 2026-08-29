@@ -171,19 +171,21 @@ function formatPrice(candidate: AgoraCandidate): string {
   return `${amount} ${price?.currency ?? ''}`.trim();
 }
 
+function freshnessWarnings(stale: boolean, partial: boolean): string[] {
+  return [
+    stale ? 'Les données servies par Agora sont anciennes mais encore dans leur fenêtre autorisée.' : '',
+    partial ? 'Certaines sources Agora sont temporairement indisponibles ; la liste peut être incomplète.' : '',
+  ].filter(Boolean);
+}
+
 function displayCandidates(candidates: AgoraCandidate[], stale: boolean, partial: boolean): string {
-  if (!candidates.length) return 'Je n’ai trouvé aucune séance ou sortie correspondant à ces critères dans les données Agora.';
-  const lines = candidates.slice(0, 20).map((candidate, index) => {
+  const lines = candidates.length ? candidates.slice(0, 20).map((candidate, index) => {
     const version = typeof candidate.occurrence.attributes.version === 'string'
       ? ` · ${candidate.occurrence.attributes.version}`
       : '';
     return `${index + 1}. ${candidate.item.title} — ${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))}${version} · ${formatPrice(candidate)}`;
-  });
-  const warnings = [
-    stale ? 'Les données servies par Agora sont anciennes mais encore dans leur fenêtre autorisée.' : '',
-    partial ? 'Certaines sources Agora sont temporairement indisponibles ; la liste peut être incomplète.' : '',
-  ].filter(Boolean);
-  return [...lines, ...warnings].join('\n');
+  }) : ['Je n’ai trouvé aucune séance ou sortie correspondant à ces critères dans les données Agora.'];
+  return [...lines, ...freshnessWarnings(stale, partial)].join('\n');
 }
 
 function candidatesForPresentation(action: CultureAction, candidates: AgoraCandidate[], limit: number): AgoraCandidate[] {
@@ -758,6 +760,8 @@ export async function executeCulture(input: {
         personalizationScore,
         personalizationReasons,
       })), input.text, input.env, resultLimit);
+      const warnings = freshnessWarnings(result.meta.stale, result.meta.partial);
+      if (warnings.length) text = `${text}\n${warnings.join('\n')}`;
     } catch {
       text = `${text}\nJe n’ai pas pu générer la comparaison locale, mais les données factuelles ci-dessus restent disponibles.`;
     }
