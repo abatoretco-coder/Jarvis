@@ -473,7 +473,10 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
     action = 'find_occurrences';
   }
   const titleMatch = value.match(/\b(?:seances?\s+(?:du film\s+|de\s+|pour\s+)?|ou\s+(?:(?:est ce que\s+)?je\s+(?:peux|puis)|puis\s+je)?\s*voir\s+)(.+?)(?=\s+(?:aujourd hui|demain|ce soir|demain soir|en vo|en vf|en vostfr|pres de|autour)|[?.!,]|$)/u);
-  const query = titleMatch?.[1]?.trim();
+  const extractedQuery = titleMatch?.[1]?.trim();
+  const query = extractedQuery && !/^(?:films?|cinemas?|cine|sorties?)(?:\s+(?:pour|autour|proches?))*$/u.test(extractedQuery)
+    ? extractedQuery
+    : undefined;
   const venueQuery = value.match(/\bqu est ce qu il y a (?:au|a la|aux)\s+(.+?)(?=\s+(?:ce soir|demain|ce week|vendredi|samedi|dimanche)|[?.!,]|$)/u)?.[1]?.trim();
   const tags = ['jazz', 'photo', 'art contemporain', 'famille', 'danse', 'plein air'].filter((tag) => value.includes(tag));
   const freeOnly = /\bgratuit(?:e|es|s)?\b/u.test(value) || undefined;

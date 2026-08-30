@@ -155,7 +155,7 @@ describe('Culture through /v1/ingest', () => {
       url: '/v1/ingest',
       payload: {
         threadId: 'client-location',
-        text: 'Quelles séances autour de moi ce soir ?',
+        text: 'Trouve-moi des séances de ciné pour ce soir autour de chez moi',
         clientContext: {
           channel: 'desktop',
           location: { latitude: 48.8282838, longitude: 2.3079543, accuracyM: 25 },
@@ -167,6 +167,7 @@ describe('Culture through /v1/ingest', () => {
     const agoraUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
     expect(agoraUrl.searchParams.get('lat')).toBe('48.8282838');
     expect(agoraUrl.searchParams.get('lon')).toBe('2.3079543');
+    expect(agoraUrl.searchParams.get('q')).toBeNull();
 
     const invalid = await app.inject({
       method: 'POST',

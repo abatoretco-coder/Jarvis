@@ -93,6 +93,9 @@ describe('cultureAgent', () => {
     expect(inferCultureRequest('Séances de Dune demain soir en VOSTFR')).toMatchObject({
       action: 'find_occurrences', slots: { query: 'dune', version: 'VOSTFR' },
     });
+    const genericCinema = inferCultureRequest('Trouve-moi des séances de ciné pour ce soir autour de chez moi');
+    expect(genericCinema).toMatchObject({ action: 'find_occurrences', slots: { types: ['movie'] } });
+    expect(genericCinema?.slots).not.toHaveProperty('query');
     expect(inferCultureRequest('Où voir Film X demain ?')).toMatchObject({
       action: 'find_occurrences', slots: { query: 'film x' },
     });
