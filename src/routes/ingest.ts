@@ -2154,9 +2154,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           selectedResult: referencedCultureResult,
           profiles: cultureProfileRepository,
           profileId,
+          presentationLimit: voiceEnabled ? (voiceMode === 'detailed' ? 5 : 3) : 5,
         });
         const responseText = voiceEnabled
-          ? formatVoiceResponse({ text: culture.text, domain: 'general', mode: voiceMode })
+          ? formatVoiceResponse({ text: culture.text, domain: 'culture', mode: voiceMode })
           : culture.text;
         await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());

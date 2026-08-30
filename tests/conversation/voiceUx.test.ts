@@ -51,14 +51,15 @@ describe('voiceUx', () => {
     expect(text).toContain('Alice');
   });
 
-  it('formats mail response with action-oriented structure', () => {
+  it('formats mail responses as a concise spoken summary', () => {
     const out = formatVoiceResponse({
       text: 'Tu as 5 emails non lu : Alice : Sujet A ; Bob : Sujet B ; Carol : Sujet C.',
       domain: 'mail',
       mode: 'normal',
     });
-    expect(out).toContain('Actions proposees');
     expect(out).toContain('Tu as 5 non lus');
+    expect(out).toContain('Premier : Alice');
+    expect(out).not.toContain('Tu veux');
   });
 
   it('removes web source labels outside the search agent', () => {
@@ -79,6 +80,15 @@ describe('voiceUx', () => {
 
     expect(out).toContain('pour demain');
     expect(out).not.toContain('prochaine echeance');
+  });
+
+  it('does not append unsolicited follow-up prompts to search or executor replies', () => {
+    expect(formatVoiceResponse({
+      text: 'La réponse tient en une phrase.', domain: 'search', mode: 'normal',
+    })).toBe('La réponse tient en une phrase.');
+    expect(formatVoiceResponse({
+      text: 'Le minuteur est lancé.', domain: 'executor', mode: 'normal',
+    })).toBe('Le minuteur est lancé.');
   });
 
   it('removes web source labels for search-agent responses', () => {
@@ -106,6 +116,26 @@ describe('voiceUx', () => {
     expect(out).toContain('Tu peux continuer.');
     expect(out).toContain("Je peux t'aider");
     expect(out).toContain('si tu veux');
+  });
+
+  it('turns Culture result lists into concise spoken choices', () => {
+    const out = formatVoiceResponse({
+      text: [
+        'Voici les meilleurs choix disponibles :',
+        '1. Film A — Pathé Convention, ven. 28 août, 20:00 · VF · 15 EUR',
+        '2. Film B — UGC Lyon, ven. 28 août, 20:30 · VO · prix non communiqué',
+        '3. Film C — Cinéma X, ven. 28 août, 21:00 · VOSTFR · 12 EUR',
+        '4. Film D — Cinéma Y, ven. 28 août, 21:15 · VF · 11 EUR',
+      ].join('\n'),
+      domain: 'culture',
+      mode: 'normal',
+    });
+
+    expect(out).toContain('Premier choix, Film A, à Pathé Convention');
+    expect(out).toContain('Deuxième, Film B, à UGC Lyon');
+    expect(out).toContain('Troisième, Film C');
+    expect(out).not.toContain('Film D');
+    expect(out).not.toContain('1.');
   });
 
   it('detects resume-last-mail intents', () => {

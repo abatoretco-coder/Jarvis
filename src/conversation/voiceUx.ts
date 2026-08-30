@@ -1,6 +1,6 @@
 export type VoiceResponseMode = 'short' | 'normal' | 'detailed';
 
-export type VoiceResponseDomain = 'mail' | 'todo' | 'calendar' | 'search' | 'executor' | 'weather' | 'spotify' | 'general';
+export type VoiceResponseDomain = 'mail' | 'todo' | 'calendar' | 'search' | 'executor' | 'weather' | 'spotify' | 'culture' | 'general';
 
 export type VoiceThreadState = {
   lastMailCount?: number;
@@ -145,7 +145,7 @@ export function buildLastMailSummaryFromState(state: VoiceThreadState | undefine
     ? `Tu as ${state.lastMailCount} non lus.`
     : 'Voici le dernier point email.';
 
-  return `${countTxt} Le plus recent: ${first}. Tu veux que je te fasse le top 3 ou seulement les urgents ?`;
+  return `${countTxt} Le plus récent : ${first}.`;
 }
 
 function countLikelyImportantItems(items: string[]): number {
@@ -156,8 +156,7 @@ function formatMailOral(text: string, mode: VoiceResponseMode): string {
   const state = extractMailStateFromReply(text);
   if (!state) {
     if (mode === 'short') return firstSentence(text);
-    if (mode === 'detailed') return `${capSentences(text, 4)} Tu veux ensuite que je te propose la prochaine action ?`;
-    return `${capSentences(text, 2)} Tu veux le plus urgent ou un resume global ?`;
+    return capSentences(text, mode === 'detailed' ? 4 : 2);
   }
 
   const top = state.lastMailTop ?? [];
@@ -168,27 +167,20 @@ function formatMailOral(text: string, mode: VoiceResponseMode): string {
     return `Tu as ${count} non lus. ${top[0] ? `Dernier: ${top[0]}.` : ''}`.trim();
   }
 
-  const topLines = top.slice(0, mode === 'detailed' ? 3 : 2).map((item, idx) => `${idx + 1}, ${item}.`).join(' ');
-  const actions = 'Actions proposees: repondre, archiver, marquer lu.';
-  const question = 'Tu veux que je traite le plus urgent ou que je continue le resume ?';
-
-  return `Tu as ${count} non lus, dont ${important} potentiellement importants. ${topLines} ${actions} ${question}`;
+  const topLines = top.slice(0, mode === 'detailed' ? 3 : 2)
+    .map((item, idx) => `${idx === 0 ? 'Premier' : idx === 1 ? 'Deuxième' : 'Troisième'} : ${item}.`)
+    .join(' ');
+  const importantText = important > 0 ? ` ${important} semble${important > 1 ? 'nt' : ''} important${important > 1 ? 's' : ''}.` : '';
+  return `Tu as ${count} non lus.${importantText} ${topLines}`;
 }
 
 function formatExecutorOral(text: string, mode: VoiceResponseMode): string {
-  const base = capSentences(text, mode === 'short' ? 1 : 2);
-  if (mode === 'short') return base;
-  return `${base} Si tu veux, je peux annuler ou ajuster cette action.`;
+  return capSentences(text, mode === 'short' ? 1 : mode === 'detailed' ? 4 : 2);
 }
 
 function formatSearchOral(text: string, mode: VoiceResponseMode): string {
   if (mode === 'short') return firstSentence(text);
-  const capped = capSentences(text, mode === 'detailed' ? 4 : 2);
-  const sourced = /\bsource\s*:\s*(?:synth[eè]se\s+)?web\b/iu.test(capped)
-    ? capped
-    : `${capped} Source : web.`;
-  void sourced;
-  return mode === 'detailed' ? capped : `${capped} Je peux detailler si tu veux.`;
+  return capSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
 function formatTodoOral(text: string, mode: VoiceResponseMode): string {
@@ -196,12 +188,36 @@ function formatTodoOral(text: string, mode: VoiceResponseMode): string {
   return capSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
+function formatCultureOral(text: string, mode: VoiceResponseMode): string {
+  const items = [...text.matchAll(/(?:^|\n)\d+\.\s+(.+?)(?=\n\d+\.|\n(?:Les données|Certaines sources)|$)/gsu)]
+    .map((match) => match[1]?.trim())
+    .filter((item): item is string => Boolean(item));
+  if (!items.length) return capSentences(compact(text), mode === 'detailed' ? 4 : 2);
+
+  const limit = mode === 'short' ? 2 : mode === 'detailed' ? 5 : 3;
+  const ordinal = ['Premier choix', 'Deuxième', 'Troisième', 'Quatrième', 'Cinquième'];
+  const choices = items.slice(0, limit).map((item, index) => {
+    const natural = item
+      .replace(/\s+—\s+/u, ', à ')
+      .replace(/\s+·\s+/gu, ', ')
+      .replace(/\b(\d{1,2}):(\d{2})\b/gu, '$1 h $2');
+    return `${ordinal[index]}, ${natural}.`;
+  });
+  const warning = /Certaines sources/u.test(text)
+    ? ' Certaines sources sont temporairement indisponibles.'
+    : /Les données/u.test(text)
+      ? ' Les données peuvent dater un peu.'
+      : '';
+  return `${choices.join(' ')}${warning}`;
+}
+
 export function formatVoiceResponse(input: {
   text: string;
   domain: VoiceResponseDomain;
   mode: VoiceResponseMode;
 }): string {
-  const clean = compact(sanitizeResponseAttribution(input.text, input.domain));
+  const sanitized = sanitizeResponseAttribution(input.text, input.domain);
+  const clean = compact(sanitized);
   if (!clean) return clean;
 
   let body: string;
@@ -217,6 +233,9 @@ export function formatVoiceResponse(input: {
       break;
     case 'executor':
       body = formatExecutorOral(clean, input.mode);
+      break;
+    case 'culture':
+      body = formatCultureOral(sanitized, input.mode);
       break;
     default:
       body = input.mode === 'short' ? firstSentence(clean) : capSentences(clean, input.mode === 'detailed' ? 4 : 2);

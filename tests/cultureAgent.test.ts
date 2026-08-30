@@ -94,7 +94,9 @@ describe('cultureAgent', () => {
       action: 'find_occurrences', slots: { query: 'dune', version: 'VOSTFR' },
     });
     const genericCinema = inferCultureRequest('Trouve-moi des séances de ciné pour ce soir autour de chez moi');
-    expect(genericCinema).toMatchObject({ action: 'find_occurrences', slots: { types: ['movie'] } });
+    expect(genericCinema).toMatchObject({
+      action: 'find_occurrences', slots: { types: ['movie'], audience: 'mainstream' },
+    });
     expect(genericCinema?.slots).not.toHaveProperty('query');
     expect(inferCultureRequest('Où voir Film X demain ?')).toMatchObject({
       action: 'find_occurrences', slots: { query: 'film x' },
@@ -108,7 +110,7 @@ describe('cultureAgent', () => {
     });
     expect(inferCultureRequest('Pitche-moi les trois meilleurs')).toBeNull();
     expect(inferCultureRequest('Qu’est-ce qui pourrait être sympa ce soir ?')).toMatchObject({
-      action: 'recommend_candidates', slots: { types: undefined },
+      action: 'recommend_candidates', slots: { types: undefined, audience: 'mainstream' },
     });
   });
 
@@ -142,6 +144,8 @@ describe('cultureAgent', () => {
     expect(inferCultureRequest('Un concert jazz vendredi soir à moins de 30 €.')).toMatchObject({
       action: 'discover', slots: { types: ['concert'], tags: ['jazz'], maxPrice: 30, currency: 'EUR' },
     });
+    expect(inferCultureRequest('Un concert jazz vendredi soir')?.slots).not.toHaveProperty('audience');
+    expect(inferCultureRequest('Séances de Dune demain')?.slots).not.toHaveProperty('audience');
     expect(inferCultureRequest('Qu’est-ce qu’il y a au Centquatre ce week-end ?')).toMatchObject({
       action: 'discover', slots: { query: 'centquatre' },
     });
@@ -429,6 +433,32 @@ describe('cultureAgent', () => {
     const result = await executeCulture({ action: 'discover', slots: {}, text: 'films', threadId: 'empty-thread', env, resultSets });
     expect(result.text).toContain('aucune séance');
     expect(resultSets.findActive('empty-thread')).toBeNull();
+    db.close();
+  });
+
+  test('keeps the concise displayed list aligned with the ResultSet', async () => {
+    const responseCandidates = Array.from({ length: 7 }, (_, index) => candidate(
+      `item_${String(index).padStart(24, 'a')}`,
+      `Film ${index + 1}`,
+    ));
+    jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify(discoverResponse(responseCandidates)), { status: 200 }));
+    const db = createConversationDb(':memory:');
+    await new SqliteThreadRepository(db).getOrCreate('concise-list');
+    const resultSets = new ConversationResultSetRepository(db);
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false', AGORA_BASE_URL: 'http://agora:8092', AGORA_API_TOKEN: 'a'.repeat(32),
+      CULTURE_HOME_LATITUDE: '48.85', CULTURE_HOME_LONGITUDE: '2.35',
+    });
+
+    const result = await executeCulture({
+      action: 'discover', slots: { types: ['movie'] }, text: 'films ce soir', threadId: 'concise-list',
+      env, resultSets, presentationLimit: 5,
+    });
+
+    expect(result.text).toContain('Film 5');
+    expect(result.text).not.toContain('Film 6');
+    expect(resultSets.findActive('concise-list')?.items).toHaveLength(5);
+    expect(result.candidates).toHaveLength(5);
     db.close();
   });
 

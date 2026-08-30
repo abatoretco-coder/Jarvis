@@ -54,6 +54,7 @@ const cultureResultContextSchema = z.object({
   maxPrice: z.number().nonnegative().optional(),
   currency: z.string().regex(/^[A-Za-z]{3}$/u).optional(),
   freeOnly: z.boolean().optional(),
+  audience: z.enum(['mainstream']).optional(),
   recommendationMode: z.enum([
     'discover',
     'recommend_for_profile',
@@ -171,13 +172,19 @@ function freshnessWarnings(stale: boolean, partial: boolean): string[] {
 }
 
 function displayCandidates(candidates: AgoraCandidate[], stale: boolean, partial: boolean): string {
-  const lines = candidates.length ? candidates.slice(0, 20).map((candidate, index) => {
+  if (!candidates.length) {
+    return [
+      'Je n’ai trouvé aucune séance ou sortie correspondant à tes critères.',
+      ...freshnessWarnings(stale, partial),
+    ].join('\n');
+  }
+  const lines = candidates.map((candidate, index) => {
     const version = typeof candidate.occurrence.attributes.version === 'string'
       ? ` · ${candidate.occurrence.attributes.version}`
       : '';
     return `${index + 1}. ${candidate.item.title} — ${candidate.venue.name}, ${PARIS_FORMATTER.format(new Date(candidate.occurrence.startsAt))}${version} · ${formatPrice(candidate)}`;
-  }) : ['Je n’ai trouvé aucune séance ou sortie correspondant à ces critères dans les données Agora.'];
-  return [...lines, ...freshnessWarnings(stale, partial)].join('\n');
+  });
+  return ['Voici les meilleurs choix disponibles :', ...lines, ...freshnessWarnings(stale, partial)].join('\n');
 }
 
 function candidatesForPresentation(action: CultureAction, candidates: AgoraCandidate[], limit: number): AgoraCandidate[] {
@@ -207,7 +214,7 @@ async function synthesize(candidates: unknown[], request: string, env: Env, limi
       messages: [
         {
           role: 'system',
-          content: 'Tu es Jarvis. Utilise uniquement les candidats JSON fournis. N’invente jamais prix, disponibilité, horaire, synopsis, séance, cinéma ou qualité. Une information absente reste inconnue. Réponds brièvement en français et cite les numéros des candidats.',
+          content: 'Tu es Jarvis. Utilise uniquement les candidats JSON fournis. N’invente jamais prix, disponibilité, horaire, synopsis, séance, cinéma ou qualité. Une information absente reste inconnue. Réponds en français naturel, en trois phrases courtes maximum sauf demande explicite de détail, et cite les numéros des candidats.',
         },
         { role: 'user', content: `Demande: ${request}\nCandidats structurés Agora (${bounded.length} maximum):\n${JSON.stringify(bounded)}` },
       ],
@@ -350,6 +357,7 @@ function slotsFromResultContext(context: Record<string, unknown> | null): Record
     maxPrice: parsed.data.maxPrice,
     currency: parsed.data.currency,
     freeOnly: parsed.data.freeOnly,
+    audience: parsed.data.audience,
     recommendationMode: parsed.data.recommendationMode,
   };
 }
@@ -485,6 +493,9 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
   const radiusMatch = value.match(/\bmoins de\s+(\d{1,3}(?:[.,]\d+)?)\s*km\b/u);
   const radiusKm = radiusMatch ? Number(radiusMatch[1]?.replace(',', '.')) : undefined;
   const limit = requestedLimit(value);
+  const audience = !query && !venueQuery && tags.length === 0 && !explorationRecommendation && !similarRecommendation
+    ? 'mainstream' as const
+    : undefined;
   return {
     action,
     slots: {
@@ -493,6 +504,7 @@ export function inferCultureRequest(text: string): { action: CultureAction; slot
       ...(maxPrice !== undefined ? { maxPrice, currency: 'EUR' } : {}),
       ...(radiusKm !== undefined ? { radiusKm } : {}),
       ...(limit ? { limit } : {}),
+      ...(audience ? { audience } : {}),
       recommendationMode: explorationRecommendation
         ? 'recommend_exploration'
         : similarRecommendation
@@ -554,6 +566,7 @@ export async function executeCulture(input: {
   selectedResult?: ResolvedConversationResult | null;
   profiles?: CultureProfileRepository;
   profileId?: string;
+  presentationLimit?: number;
   now?: Date;
 }): Promise<{
   text: string;
@@ -714,7 +727,8 @@ export async function executeCulture(input: {
       radiusKm: location.radiusKm,
       q: slots.query,
       type: slots.types?.includes('movie') ? 'cinema' : undefined,
-      limit: slots.limit ?? 20,
+      audience: slots.audience,
+      limit: slots.limit ?? input.presentationLimit ?? 5,
     });
     const resultSet = venues.data.length
       ? input.resultSets.create({
@@ -752,12 +766,12 @@ export async function executeCulture(input: {
     return { text: 'La fenêtre demandée est déjà passée. Je n’ai aucune séance future à proposer pour cette période.' };
   }
   const { from, to } = effectiveWindow;
-  const resultLimit = slots.limit ?? 20;
+  const resultLimit = slots.limit ?? input.presentationLimit ?? 5;
   const agoraLimit = input.action === 'find_occurrences'
-    ? resultLimit
+    ? Math.max(20, resultLimit)
     : input.action === 'recommend_candidates'
       ? 50
-      : Math.min(50, resultLimit * 3);
+      : 50;
   const result = await client.discover({
     lat: location.lat,
     lon: location.lon,
@@ -774,6 +788,7 @@ export async function executeCulture(input: {
     maxPrice: slots.maxPrice,
     currency: slots.currency,
     freeOnly: slots.freeOnly ? 'true' : undefined,
+    audience: slots.audience,
     limit: agoraLimit,
   });
 
@@ -821,6 +836,7 @@ export async function executeCulture(input: {
           maxPrice: slots.maxPrice,
           currency: slots.currency,
           freeOnly: slots.freeOnly,
+          audience: slots.audience,
           recommendationMode: slots.recommendationMode,
         },
         items: personalized.map(({ candidate, personalizationScore, personalizationReasons }) => ({

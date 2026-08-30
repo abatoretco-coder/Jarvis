@@ -168,6 +168,7 @@ describe('Culture through /v1/ingest', () => {
     expect(agoraUrl.searchParams.get('lat')).toBe('48.8282838');
     expect(agoraUrl.searchParams.get('lon')).toBe('2.3079543');
     expect(agoraUrl.searchParams.get('q')).toBeNull();
+    expect(agoraUrl.searchParams.get('audience')).toBe('mainstream');
 
     const invalid = await app.inject({
       method: 'POST',

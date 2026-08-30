@@ -28,6 +28,7 @@ export const cultureSlotsSchema = z.object({
   maxPrice: z.number().nonnegative().optional(),
   currency: z.string().regex(/^[A-Za-z]{3}$/u).optional(),
   freeOnly: z.boolean().optional(),
+  audience: z.enum(['mainstream']).optional(),
   limit: z.number().int().min(1).max(20).optional(),
   candidatePosition: z.number().int().positive().optional(),
   candidatePositions: z.array(z.number().int().positive()).min(2).max(2).optional(),
