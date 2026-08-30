@@ -137,11 +137,36 @@ import {
 
 const threadIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 
+const clientLocationSchema = z.object({
+  latitude: z.number().finite().min(-90).max(90).optional(),
+  longitude: z.number().finite().min(-180).max(180).optional(),
+  lat: z.number().finite().min(-90).max(90).optional(),
+  lon: z.number().finite().min(-180).max(180).optional(),
+  accuracyM: z.number().finite().nonnegative().max(100_000).optional(),
+  accuracy: z.number().finite().nonnegative().max(100_000).optional(),
+}).passthrough().superRefine((value, context) => {
+  const hasCanonicalCoordinate = value.latitude !== undefined || value.longitude !== undefined;
+  const hasLegacyCoordinate = value.lat !== undefined || value.lon !== undefined;
+  if (hasCanonicalCoordinate && (value.latitude === undefined || value.longitude === undefined)) {
+    context.addIssue({ code: 'custom', message: 'latitude and longitude must be provided together' });
+  }
+  if (hasLegacyCoordinate && (value.lat === undefined || value.lon === undefined)) {
+    context.addIssue({ code: 'custom', message: 'lat and lon must be provided together' });
+  }
+  if (!hasCanonicalCoordinate && !hasLegacyCoordinate) {
+    context.addIssue({ code: 'custom', message: 'a complete coordinate pair is required' });
+  }
+});
+
+const clientContextSchema = z.object({
+  location: clientLocationSchema.optional(),
+}).passthrough();
+
 const ingestSchema = z.object({
   threadId: threadIdSchema,
   text: z.string().min(1).max(32_000).optional(),
   contextNote: z.string().max(8_000).optional(),
-  clientContext: z.record(z.string(), z.unknown()).optional(),
+  clientContext: clientContextSchema.optional(),
   correlation_id: z.string().optional(),
   user_id: trustedCultureUserIdSchema.optional(),
   domain: z.enum(['spotify', 'culture']).optional(),

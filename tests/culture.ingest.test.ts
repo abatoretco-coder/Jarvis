@@ -137,6 +137,50 @@ describe('Culture through /v1/ingest', () => {
     expect(ingestSource.match(/selectedResult: referencedCultureResult/gu)).toHaveLength(1);
   });
 
+  test('uses the calling client location and rejects incomplete coordinates', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'jarvis-culture-client-location-'));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    env.CULTURE_HOME_LATITUDE = undefined;
+    env.CULTURE_HOME_LONGITUDE = undefined;
+    env.AGORA_HOME_LAT = undefined;
+    env.AGORA_HOME_LON = undefined;
+    registerIngestRoute(app, makeDeps(env));
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [candidate('item_location', 'Signes', 20)],
+      meta: { ...responseMeta, nextCursor: null },
+    }), { status: 200 }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'client-location',
+        text: 'Quelles séances autour de moi ce soir ?',
+        clientContext: {
+          channel: 'desktop',
+          location: { latitude: 48.8282838, longitude: 2.3079543, accuracyM: 25 },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const agoraUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(agoraUrl.searchParams.get('lat')).toBe('48.8282838');
+    expect(agoraUrl.searchParams.get('lon')).toBe('2.3079543');
+
+    const invalid = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'client-location-invalid',
+        text: 'Quelles séances autour de moi ?',
+        clientContext: { location: { latitude: 48.8282838 } },
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json<{ error: string }>().error).toBe('invalid_body');
+  });
+
   beforeEach(() => {
     app = Fastify({ logger: false });
   });
