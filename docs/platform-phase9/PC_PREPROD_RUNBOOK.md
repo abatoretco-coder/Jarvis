@@ -11,7 +11,21 @@ Copy-Item ops/pc/env/pc-preprod.env.example ops/pc/env/pc-preprod.env
 npm run pc -- config -Profile pc-preprod -EnvFile ops/pc/env/pc-preprod.env
 ```
 
-Pour le profil avec Keycloak, utiliser `pc-preprod-full.env.example` et définir également `KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD` dans la session PowerShell.
+Pour le profil avec Keycloak, provisionner une fois les secrets locaux. La
+commande génère le fichier d’environnement ignoré par Git, un jeton de service,
+la clé de chiffrement OAuth, le mot de passe d’administration Keycloak et la
+phrase de sauvegarde. Les deux derniers sont protégés par Windows DPAPI et ne
+sont jamais affichés :
+
+```powershell
+npm run pc -- provision -Profile pc-preprod-full
+npm run pc -- config -Profile pc-preprod-full -EnvFile ops/pc/env/pc-preprod-full.env
+```
+
+Après l’inscription du premier compte dans Keycloak, renseigner son `subject`
+dans `OIDC_BOOTSTRAP_OWNER_SUBJECT`, puis redémarrer Jarvis. À sa connexion
+suivante, ce compte devient l’unique propriétaire initial. Ne jamais exposer le
+profil tant que ce bootstrap n’est pas terminé.
 
 ## Exploiter Jarvis
 
@@ -23,6 +37,9 @@ npm run pc -- restart -Profile pc-preprod -EnvFile ops/pc/env/pc-preprod.env
 npm run pc -- stop -Profile pc-preprod
 ```
 
+Pour la validation multi-utilisateur locale, remplacer `pc-preprod` par
+`pc-preprod-full` et utiliser son fichier d’environnement.
+
 L’API doit répondre sur `http://127.0.0.1:8090`. `GET /ready` doit retourner `status=ready`.
 
 ## Tester dans Docker
@@ -33,7 +50,8 @@ npm run pc -- test -Profile test
 
 ## Sauvegarder
 
-La phrase n’est jamais passée en argument ni enregistrée dans le dépôt :
+La phrase n’est jamais passée en argument ni enregistrée dans le dépôt. Après
+`provision`, le script la recharge automatiquement depuis le secret DPAPI :
 
 ```powershell
 $env:JARVIS_BACKUP_PASSPHRASE = '<phrase unique de 32 caractères minimum>'

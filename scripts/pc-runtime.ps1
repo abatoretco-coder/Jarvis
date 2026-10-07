@@ -1,15 +1,17 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('config', 'start', 'stop', 'restart', 'status', 'logs', 'backup', 'restore', 'drill', 'test')]
+  [ValidateSet('provision', 'config', 'start', 'stop', 'restart', 'status', 'logs', 'backup', 'restore', 'drill', 'test')]
   [string]$Command,
   [ValidateSet('dev', 'test', 'pc-preprod', 'pc-preprod-full')]
   [string]$Profile = 'pc-preprod',
   [string]$EnvFile = '',
-  [string]$BackupPath = ''
+  [string]$BackupPath = '',
+  [string]$OwnerSubject = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.Security
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $composeFile = Join-Path $repositoryRoot 'compose.pc.yaml'
 $runtimeRoot = Join-Path $repositoryRoot 'runtime'
@@ -18,6 +20,135 @@ $databasePath = Join-Path $dataRoot 'conversation-memory.sqlite'
 $homesDataRoot = Join-Path $dataRoot 'homes'
 $identityDataRoot = Join-Path $runtimeRoot 'pc-preprod\identity'
 $backupRoot = Join-Path $runtimeRoot 'backups'
+$secretsRoot = Join-Path $runtimeRoot 'pc-preprod\secrets'
+$protectedIdentitySecret = Join-Path $secretsRoot 'keycloak-bootstrap-admin.dpapi'
+$protectedBackupSecret = Join-Path $secretsRoot 'backup-passphrase.dpapi'
+
+function New-RandomSecret([int]$Bytes = 48) {
+  $buffer = [byte[]]::new($Bytes)
+  $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $generator.GetBytes($buffer)
+  } finally {
+    $generator.Dispose()
+  }
+  return [Convert]::ToBase64String($buffer).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-RandomBytes([int]$Bytes) {
+  $buffer = [byte[]]::new($Bytes)
+  $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $generator.GetBytes($buffer)
+  } finally {
+    $generator.Dispose()
+  }
+  return $buffer
+}
+
+function Assert-SafeEnvironmentValue([string]$Name, [string]$Value, [int]$MaxLength, [bool]$AllowEmpty = $false) {
+  if ((-not $AllowEmpty -and [string]::IsNullOrWhiteSpace($Value)) -or $Value.Length -gt $MaxLength) {
+    throw "$Name has an invalid length."
+  }
+  if ($Value -match '[\r\n\x00-\x1F]') {
+    throw "$Name contains forbidden control characters."
+  }
+}
+
+function Save-ProtectedSecret([string]$Path, [string]$Value) {
+  New-Item -ItemType Directory -Path $secretsRoot -Force | Out-Null
+  $plainBytes = [Text.Encoding]::UTF8.GetBytes($Value)
+  try {
+    $encryptedBytes = [Security.Cryptography.ProtectedData]::Protect(
+      $plainBytes,
+      $null,
+      [Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    [IO.File]::WriteAllText(
+      $Path,
+      [Convert]::ToBase64String($encryptedBytes),
+      [Text.UTF8Encoding]::new($false)
+    )
+  } finally {
+    [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+  }
+}
+
+function Read-ProtectedSecret([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+  $encryptedBytes = [Convert]::FromBase64String([IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8))
+  $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+    $encryptedBytes,
+    $null,
+    [Security.Cryptography.DataProtectionScope]::CurrentUser
+  )
+  try {
+    return [Text.Encoding]::UTF8.GetString($plainBytes)
+  } finally {
+    [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+  }
+}
+
+function Import-ProtectedRuntimeSecrets() {
+  if (-not $env:KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD) {
+    $env:KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD = Read-ProtectedSecret $protectedIdentitySecret
+  }
+  if (-not $env:JARVIS_BACKUP_PASSPHRASE) {
+    $env:JARVIS_BACKUP_PASSPHRASE = Read-ProtectedSecret $protectedBackupSecret
+  }
+}
+
+function Initialize-FullProfile() {
+  $target = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'ops\pc\env\pc-preprod-full.env'))
+  $allowedRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'ops\pc\env')).TrimEnd('\') + '\'
+  if (-not $target.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Full-profile environment file must remain under ops/pc/env.'
+  }
+  if (Test-Path -LiteralPath $target) {
+    throw "Environment file already exists; refusing to overwrite: $target"
+  }
+  if (-not $env:OPENAI_API_KEY) {
+    throw 'OPENAI_API_KEY must be present in the current process before provisioning.'
+  }
+  $normalizedOwnerSubject = $OwnerSubject.Trim()
+  Assert-SafeEnvironmentValue 'OPENAI_API_KEY' $env:OPENAI_API_KEY 512
+  Assert-SafeEnvironmentValue 'OwnerSubject' $normalizedOwnerSubject 512 $true
+  $serviceToken = New-RandomSecret
+  $oauthKey = [Convert]::ToBase64String((New-RandomBytes 32))
+  $identityPassword = New-RandomSecret
+  $backupPassphrase = New-RandomSecret
+  $lines = @(
+    'LOG_LEVEL=info',
+    'REQUIRE_API_KEY=true',
+    'ALLOW_LEGACY_API_KEYS=false',
+    "SERVICE_API_KEYS_JSON=[{`"id`":`"desktop-local`",`"token`":`"$serviceToken`",`"permissions`":[`"chat`",`"history`",`"home`",`"mail`",`"calendar`",`"todo`",`"nas.operations`"]}]",
+    'OIDC_ENABLED=true',
+    'OIDC_ISSUER_URL=http://127.0.0.1:8180/realms/jarvis',
+    'OIDC_JWKS_URL=http://identity:8080/realms/jarvis/protocol/openid-connect/certs',
+    'OIDC_AUDIENCE=jarvis-api',
+    "OIDC_BOOTSTRAP_OWNER_SUBJECT=$normalizedOwnerSubject",
+    'OIDC_ALLOW_INSECURE_HTTP=true',
+    "OPENAI_API_KEY=$($env:OPENAI_API_KEY)",
+    'LLM_PROVIDER=openai',
+    'TTS_PROVIDER=none',
+    "OAUTH_TOKEN_ENCRYPTION_KEY=$oauthKey",
+    'OAUTH_TOKEN_KEY_VERSION=1'
+  )
+  try {
+    Save-ProtectedSecret $protectedIdentitySecret $identityPassword
+    Save-ProtectedSecret $protectedBackupSecret $backupPassphrase
+    [IO.File]::WriteAllLines($target, $lines, [Text.UTF8Encoding]::new($false))
+  } catch {
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+    if (Test-Path -LiteralPath $protectedIdentitySecret) { Remove-Item -LiteralPath $protectedIdentitySecret -Force }
+    if (Test-Path -LiteralPath $protectedBackupSecret) { Remove-Item -LiteralPath $protectedBackupSecret -Force }
+    throw
+  }
+  $env:KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD = $identityPassword
+  $env:JARVIS_BACKUP_PASSPHRASE = $backupPassphrase
+  Write-Host "Full PC profile provisioned: $target" -ForegroundColor Green
+  Write-Host "Runtime secrets protected with Windows DPAPI under: $secretsRoot" -ForegroundColor Green
+}
 
 function Assert-WithinRuntime([string]$Path) {
   $resolved = [IO.Path]::GetFullPath($Path)
@@ -78,7 +209,12 @@ if ($EnvFile) {
 
 Push-Location $repositoryRoot
 try {
+  Import-ProtectedRuntimeSecrets
   switch ($Command) {
+    'provision' {
+      if ($Profile -ne 'pc-preprod-full') { throw 'Provisioning is only available for pc-preprod-full.' }
+      Initialize-FullProfile
+    }
     'config' { Invoke-Compose @('config', '--quiet') }
     'start' {
       Assert-IdentityBootstrapSecret
