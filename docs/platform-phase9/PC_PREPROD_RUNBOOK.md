@@ -27,6 +27,14 @@ dans `OIDC_BOOTSTRAP_OWNER_SUBJECT`, puis redémarrer Jarvis. À sa connexion
 suivante, ce compte devient l’unique propriétaire initial. Ne jamais exposer le
 profil tant que ce bootstrap n’est pas terminé.
 
+Le script peut effectuer la mise à jour sans afficher ni réécrire les autres
+secrets du fichier :
+
+```powershell
+npm run pc -- set-owner -Profile pc-preprod-full -EnvFile ops/pc/env/pc-preprod-full.env -OwnerSubject '<subject-keycloak>'
+npm run pc -- restart -Profile pc-preprod-full -EnvFile ops/pc/env/pc-preprod-full.env
+```
+
 ## Exploiter Jarvis
 
 ```powershell

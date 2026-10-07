@@ -28,12 +28,12 @@ Le Desktop Tauri release a été reconstruit, les installateurs MSI et NSIS ont
 - Desktop release et deux installateurs : produits ;
 - processus Desktop : lancé et réactif.
 
-## Bootstrap restant
+## Bootstrap propriétaire
 
-Le premier compte humain doit encore être inscrit dans Keycloak. Tant que son
-`subject` n’est pas placé dans `OIDC_BOOTSTRAP_OWNER_SUBJECT` et que Jarvis
-n’est pas redémarré, aucun compte n’obtient le rôle propriétaire. Cette étape
-interactive est volontaire : aucun mot de passe utilisateur ou propriétaire
-n’est généré par le déploiement.
+Le compte nominatif propriétaire a été créé dans Keycloak, son adresse a été
+marquée comme vérifiée et son `subject` a été placé dans
+`OIDC_BOOTSTRAP_OWNER_SUBJECT`. Un mot de passe temporaire impose son
+remplacement à la première connexion. Jarvis attribuera alors le rôle
+propriétaire, créera le foyer initial et rattachera les données historiques.
 
 Le profil reste strictement local et ne doit pas être exposé sur Internet.

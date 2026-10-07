@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('provision', 'config', 'start', 'stop', 'restart', 'status', 'logs', 'backup', 'restore', 'drill', 'test')]
+  [ValidateSet('provision', 'set-owner', 'config', 'start', 'stop', 'restart', 'status', 'logs', 'backup', 'restore', 'drill', 'test')]
   [string]$Command,
   [ValidateSet('dev', 'test', 'pc-preprod', 'pc-preprod-full')]
   [string]$Profile = 'pc-preprod',
@@ -214,6 +214,24 @@ try {
     'provision' {
       if ($Profile -ne 'pc-preprod-full') { throw 'Provisioning is only available for pc-preprod-full.' }
       Initialize-FullProfile
+    }
+    'set-owner' {
+      if ($Profile -ne 'pc-preprod-full') { throw 'Owner bootstrap is only available for pc-preprod-full.' }
+      if (-not $EnvFile) { throw 'Provide -EnvFile for owner bootstrap.' }
+      $normalizedOwnerSubject = $OwnerSubject.Trim()
+      Assert-SafeEnvironmentValue 'OwnerSubject' $normalizedOwnerSubject 512
+      $lines = [IO.File]::ReadAllLines($resolvedEnvFile, [Text.Encoding]::UTF8)
+      $matches = @($lines | Where-Object { $_ -like 'OIDC_BOOTSTRAP_OWNER_SUBJECT=*' })
+      if ($matches.Count -ne 1) { throw 'Environment file must contain exactly one owner subject entry.' }
+      $updated = @($lines | ForEach-Object {
+        if ($_ -like 'OIDC_BOOTSTRAP_OWNER_SUBJECT=*') {
+          "OIDC_BOOTSTRAP_OWNER_SUBJECT=$normalizedOwnerSubject"
+        } else {
+          $_
+        }
+      })
+      [IO.File]::WriteAllLines($resolvedEnvFile, $updated, [Text.UTF8Encoding]::new($false))
+      Write-Host 'Bootstrap owner subject updated.' -ForegroundColor Green
     }
     'config' { Invoke-Compose @('config', '--quiet') }
     'start' {
