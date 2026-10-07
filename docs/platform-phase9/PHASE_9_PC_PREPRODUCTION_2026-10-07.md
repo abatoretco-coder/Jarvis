@@ -1,6 +1,6 @@
 # Phase 9 — Préproduction PC durable
 
-Statut au 2026-10-07 : **socle logiciel PC livré et vérifié**. La validation Android sur appareil réel reste en attente de l’autorisation USB du téléphone. La semaine représentative d’usage reste un critère temporel avant toute publication NAS.
+Statut au 2026-10-07 : **partie PC logicielle clôturée, recette terrain planifiée**. La validation Android sur appareil réel reste en attente de l’autorisation USB du téléphone. L’accès Internet réel et les équipements physiques seront testés après l’arrivée du réseau du logement ; ils ne sont pas assimilés à une preuve locale.
 
 ## Périmètre livré
 
@@ -32,7 +32,7 @@ Les fichiers sous `ops/pc/env/*.example` ne contiennent que des valeurs de démo
 - drill chiffré : sauvegarde, déchiffrement, restauration, `quick_check` et contraintes étrangères réussis, puis artefacts temporaires supprimés ;
 - profil `pc-preprod-full` : realm Keycloak importé, discovery OIDC disponible et JWKS joignable depuis Jarvis (`2` clés) ;
 - Desktop : 23 fichiers/94 tests unitaires, build, puis 12 scénarios Playwright réussis et 1 scénario runtime optionnel ignoré ;
-- Android : build/tests JVM réussis ; validation sur téléphone en attente de la résolution ADB et de l’autorisation USB.
+- Android : cockpit Domicile et OIDC-only livrés ; build propre, lint, APK et 34 tests JVM réussis ; validation sur téléphone en attente de l’autorisation USB.
 
 ## Décisions et limites
 
@@ -45,5 +45,5 @@ Les fichiers sous `ops/pc/env/*.example` ne contiennent que des valeurs de démo
 ## Conditions de clôture opérationnelle
 
 1. Rendre ADB disponible, autoriser le téléphone dans la fenêtre de débogage USB, puis installer et lancer l’APK de debug. Le projet ne contient actuellement aucune source `androidTest`, donc `connectedDebugAndroidTest` serait `NO-SOURCE` et ne constitue pas une preuve suffisante à lui seul.
-2. Utiliser Jarvis sur une semaine représentative et consigner tout redémarrage, erreur OAuth ou perte de données.
+2. Exécuter la recette Wi‑Fi/Internet et matériel décrite dans `FRIDAY_PC_ACCEPTANCE_2026-10-09.md`, puis utiliser Jarvis sur une semaine représentative en consignant tout redémarrage, erreur OAuth ou perte de données.
 3. Créer une vraie phrase de sauvegarde, hors dépôt, et conserver au moins une sauvegarde chiffrée hors du disque de données.

@@ -1,6 +1,6 @@
 # Phase 10 — Cockpit spatial Desktop et Android
 
-Statut : **en cours — slice de validation PC déployée** le 2026-10-07. Le contrat spatial writable, le catalogue de presets et le cockpit Desktop 2D/3D/liste sont actifs en préproduction PC. La clôture reste conditionnée aux lots Android, sauvegarde/restauration intégrée, assets bornés, scènes et équipements Home Assistant réels.
+Statut : **logiciel PC et Android livré — recette matérielle en attente** le 2026-10-07. Le contrat spatial writable, le catalogue de presets et le cockpit Desktop 2D/3D/liste sont actifs en préproduction PC. Android consomme désormais le même snapshot et les mêmes actions avec carte 2D tactile, navigation par pièce, liste accessible et confirmations de risque. La clôture physique reste conditionnée au téléphone USB et aux équipements Home Assistant réels.
 
 ## Preuve de validation PC — 2026-10-07
 
@@ -140,6 +140,13 @@ Chaque preset définit seulement les domaines/capacités compatibles, les contr�
 - Les commandes sensibles utilisent la confirmation et l’authentification renforcée déjà définies.
 
 ## Lot 10C — Android, cockpit opérationnel
+
+Statut logiciel : **terminé**. L’APK fournit la vue Domicile, la sélection tactile
+des pièces, le fallback liste, les commandes compatibles et la réconciliation
+périodique avec le backend. Il n’embarque aucune règle d’autorisation locale et
+n’utilise plus de clé API de repli. Le build propre, le lint et 34 tests JVM sont
+verts. L’installation, l’authentification et la reprise réseau restent à valider
+sur le téléphone réel.
 
 - Réutiliser le contrat spatial et les actions backend, sans logique d’autorisation locale concurrente.
 - Livrer d’abord sélection du domicile, navigation par pièce, carte 2D, liste, fiches et scènes.

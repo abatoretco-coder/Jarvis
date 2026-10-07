@@ -7,5 +7,4 @@ module.exports = {
     '^.+\\.tsx?$': ['ts-jest', { diagnostics: false }],
   },
   clearMocks: true,
-  forceExit: true,
 };

@@ -19,3 +19,9 @@
 - MUSIC_ROUTING_DECISION_MATRIX.md
 - MUSIC_ROUTING_BUSINESS_MAP.md
 - agents/README.md
+
+## Plateforme
+
+- `platform-phase9/PHASE_9_PC_PREPRODUCTION_2026-10-07.md`
+- `platform-phase9/FRIDAY_PC_ACCEPTANCE_2026-10-09.md`
+- `platform-phase10/PHASE_10_SPATIAL_COCKPIT_PLAN_2026-10-07.md`
