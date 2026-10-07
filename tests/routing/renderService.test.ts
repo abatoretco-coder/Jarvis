@@ -101,7 +101,7 @@ describe('renderService', () => {
   it('uses LLM multi synthesis when configured', async () => {
     const originalFetch = global.fetch;
     global.fetch = jest.fn(async () => new Response(JSON.stringify({
-      choices: [{ message: { content: 'Synthese courte.' } }],
+      status: 'completed', output_text: 'Synthese courte.',
     }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
 
     try {

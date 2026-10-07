@@ -12,6 +12,7 @@ export type SearchAgentCallParams = {
   text: string;
   openAiApiKey: string;
   openAiBaseUrl: string;
+  openAiModel?: string;
   perplexityApiKey?: string;
   perplexityBaseUrl?: string;
   timeoutMs: number;

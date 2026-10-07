@@ -3,6 +3,8 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 
 import type { Env } from '../env';
+import type { PermissionKey } from '../identity/IdentityRepository';
+import type { ServicePrincipal } from '../identity/requestIdentity';
 
 export function normalizeHeaderValue(value: string | string[] | undefined): string | undefined {
   if (typeof value === 'string') {
@@ -25,6 +27,7 @@ export function parseAuthorizationBearer(authorizationHeader: string | undefined
 }
 
 function allowedApiKeys(env: Env): string[] {
+  if (!env.ALLOW_LEGACY_API_KEYS) return [];
   return [
     env.API_KEY,
     ...(env.API_KEYS
@@ -43,10 +46,30 @@ function safeTokenEquals(left: string, right: string): boolean {
 }
 
 export function isAuthorizedApiKey(req: FastifyRequest, env: Env): boolean {
+  return Boolean(getAuthorizedServicePrincipal(req, env));
+}
+
+export function getAuthorizedServicePrincipal(req: FastifyRequest, env: Env): ServicePrincipal | undefined {
   const providedApiKey = normalizeHeaderValue(req.headers['x-api-key']);
   const providedBearer = parseAuthorizationBearer(normalizeHeaderValue(req.headers.authorization));
   const provided = [providedApiKey, providedBearer].filter((item): item is string => Boolean(item));
-  if (provided.length === 0) return false;
+  if (provided.length === 0) return undefined;
 
-  return allowedApiKeys(env).some((allowed) => provided.some((token) => safeTokenEquals(allowed, token)));
+  if (env.SERVICE_API_KEYS_JSON) {
+    const services = JSON.parse(env.SERVICE_API_KEYS_JSON) as Array<{
+      id: string;
+      token: string;
+      permissions: PermissionKey[];
+    }>;
+    for (const service of services) {
+      if (provided.some((token) => safeTokenEquals(service.token, token))) {
+        return { kind: 'service', serviceId: service.id, permissions: [...new Set(service.permissions)] };
+      }
+    }
+  }
+
+  if (allowedApiKeys(env).some((allowed) => provided.some((token) => safeTokenEquals(allowed, token)))) {
+    return { kind: 'service' };
+  }
+  return undefined;
 }

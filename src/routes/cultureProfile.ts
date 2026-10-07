@@ -6,7 +6,7 @@ import { AgoraClient } from '../culture/AgoraClient';
 import { CulturePersonalizationService } from '../culture/CulturePersonalizationService';
 import { CultureProactiveRecommendationService } from '../culture/CultureProactiveRecommendationService';
 import {
-  resolveTrustedCultureProfileId,
+  resolveRequestCultureProfileId,
   trustedCultureUserIdSchema,
 } from '../culture/CultureProfileIdentity';
 import { CultureProfileRepository } from '../culture/CultureProfileRepository';
@@ -17,7 +17,8 @@ const profileQuerySchema = z.object({ user_id: trustedCultureUserIdSchema.option
 export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps): void {
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const profiles = new CultureProfileRepository(db, deps.env.CULTURE_FEEDBACK_RETENTION_DAYS);
-  const profileIdFrom = (userId?: string) => resolveTrustedCultureProfileId(
+  const profileIdFrom = (request: Parameters<typeof resolveRequestCultureProfileId>[0], userId?: string) => resolveRequestCultureProfileId(
+    request,
     userId,
     deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default',
   );
@@ -26,19 +27,19 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
   app.get('/v1/culture/profile', async (req, reply) => {
     const query = profileQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
-    return reply.send({ data: profiles.getProfile(profileIdFrom(query.data.user_id)) });
+    return reply.send({ data: profiles.getProfile(profileIdFrom(req, query.data.user_id)) });
   });
 
   app.get('/v1/culture/profile/export', async (req, reply) => {
     const query = profileQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
-    return reply.send({ data: profiles.exportProfile(profileIdFrom(query.data.user_id)) });
+    return reply.send({ data: profiles.exportProfile(profileIdFrom(req, query.data.user_id)) });
   });
 
   app.get('/v1/culture/favorites', async (req, reply) => {
     const query = profileQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
-    const data = profiles.listSaved(profileIdFrom(query.data.user_id)).map((entity) => ({
+    const data = profiles.listSaved(profileIdFrom(req, query.data.user_id)).map((entity) => ({
       ...entity,
       currentAvailability: 'not_refreshed',
     }));
@@ -53,7 +54,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
     const query = profileQuerySchema.safeParse(req.query);
     if (!params.success || !query.success) return reply.code(400).send({ error: 'invalid_request' });
     const removed = profiles.removeSaved(
-      profileIdFrom(query.data.user_id),
+      profileIdFrom(req, query.data.user_id),
       params.data.entityType,
       params.data.entityId,
     );
@@ -63,7 +64,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
   app.put('/v1/culture/profile/proactive', async (req, reply) => {
     const body = z.object({ user_id: trustedCultureUserIdSchema.optional(), enabled: z.boolean() }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
-    return reply.send({ data: profiles.setProactiveEnabled(profileIdFrom(body.data.user_id), body.data.enabled) });
+    return reply.send({ data: profiles.setProactiveEnabled(profileIdFrom(req, body.data.user_id), body.data.enabled) });
   });
 
   app.delete('/v1/culture/profile/preferences/:kind/:key', async (req, reply) => {
@@ -73,7 +74,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
     }).strict().safeParse(req.params);
     const query = profileQuerySchema.safeParse(req.query);
     if (!params.success || !query.success) return reply.code(400).send({ error: 'invalid_request' });
-    const profileId = profileIdFrom(query.data.user_id);
+    const profileId = profileIdFrom(req, query.data.user_id);
     const key = params.data.key.toLowerCase();
     profiles.forgetPreference(profileId, { kind: params.data.kind, key });
     return reply.send({ removed: true });
@@ -82,7 +83,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
   app.post('/v1/culture/profile/reset', async (req, reply) => {
     const body = z.object({ user_id: trustedCultureUserIdSchema.optional(), confirm: z.literal(true) }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'explicit_confirmation_required' });
-    profiles.resetProfile(profileIdFrom(body.data.user_id));
+    profiles.resetProfile(profileIdFrom(req, body.data.user_id));
     return reply.send({ reset: true });
   });
 
@@ -100,7 +101,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
       }
     }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
-    const profileId = profileIdFrom(body.data.user_id);
+    const profileId = profileIdFrom(req, body.data.user_id);
     const profile = profiles.getProfile(profileId);
     if (!deps.env.CULTURE_PROACTIVE_ENABLED || !profile.proactiveEnabled) {
       return reply.send({ shouldNotify: false, reason: deps.env.CULTURE_PROACTIVE_ENABLED ? 'profile_opt_out' : 'runtime_disabled', candidates: [] });
@@ -153,7 +154,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
     }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     const acknowledged = profiles.recordNotification({
-      profileId: profileIdFrom(body.data.user_id),
+      profileId: profileIdFrom(req, body.data.user_id),
       entityType: body.data.entityType,
       entityId: body.data.entityId,
       fingerprint: body.data.fingerprint,

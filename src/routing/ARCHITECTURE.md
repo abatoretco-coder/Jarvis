@@ -11,7 +11,7 @@ src/routing/
 ├── semanticRouter.ts                  ← Orchestration principale
 ├── semanticRouter.types.ts            ← Types TypeScript
 ├── semanticRouteCatalog.ts            ← Catalogue aligné runtime (E2 + E1)
-├── embeddingClient.ts                 ← Client Ollama/OpenAI
+├── embeddingClient.ts                 ← Client embeddings OpenAI
 ├── routeScoring.ts                    ← Calcul similarity + ranking
 ├── routeDecision.ts                   ← Logique d'acceptation/rejet
 ├── routeDispatcher.ts                 ← Exécution des routes (Phase 2+)
@@ -105,9 +105,9 @@ export type SemanticRouterOptions = {
 const semanticResult = await trySemanticRouter({
   userText: assistantInputText,
   embeddingConfig: {
-    provider: 'ollama',
-    baseUrl: 'http://localhost:11434',
-    model: 'nomic-embed-text',
+    baseUrl: env.OPENAI_BASE_URL,
+    apiKey: env.OPENAI_API_KEY,
+    model: env.SEMANTIC_ROUTER_EMBEDDING_MODEL,
     timeoutMs: 5000,
   },
   options: {
@@ -150,13 +150,13 @@ if (semanticResult.accepted) {
 ```ts
 const userEmbedding = await getEmbeddingCached(
   assistantInputText,           // "quel temps demain ?"
-  { provider: 'ollama', ... }
+  { baseUrl: env.OPENAI_BASE_URL, apiKey: env.OPENAI_API_KEY, ... }
 );
 // Résultat: [0.1, 0.34, ..., 0.45]  (384 dimensions)
 ```
 
 **Cache** :
-- Key: `ollama:nomic-embed-text:quel temps demain ?`
+- Key: `text-embedding-3-small:quel temps demain ?`
 - TTL: session (in-memory Map)
 - Hit rate cible: >80%
 
@@ -461,9 +461,8 @@ Tous les logs sémantiques doivent inclure :
 
 # Semantic Router activation
 SEMANTIC_ROUTER_ENABLED=true
-SEMANTIC_ROUTER_PROVIDER=ollama                    # ollama | openai
-SEMANTIC_ROUTER_BASE_URL=http://localhost:11434
-SEMANTIC_ROUTER_MODEL=nomic-embed-text             # ou text-embedding-3-small pour OpenAI
+OPENAI_BASE_URL=https://api.openai.com/v1
+SEMANTIC_ROUTER_EMBEDDING_MODEL=text-embedding-3-small
 SEMANTIC_ROUTER_TIMEOUT_MS=5000
 SEMANTIC_ROUTER_ACCEPT_SCORE=0.84                  # 0-1
 SEMANTIC_ROUTER_MIN_MARGIN=0.08                    # 0-1
@@ -569,7 +568,7 @@ Dashboard Grafana recommandé avec ces métriques.
 ## 🚀 Checklist Phase 0
 
 - [ ] `semanticRouter.types.ts` créé et typé
-- [ ] `embeddingClient.ts` supporte Ollama + OpenAI
+- [x] `embeddingClient.ts` utilise exclusivement OpenAI
 - [ ] `routeScoring.ts` implémente cosine similarity
 - [ ] `routeDecision.ts` logique d'acceptation correcte
 - [ ] `semanticRouter.ts` orchestre tout et retourne `SemanticRouteResult`

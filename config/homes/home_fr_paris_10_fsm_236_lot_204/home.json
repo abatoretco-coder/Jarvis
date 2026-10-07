@@ -1,0 +1,259 @@
+{
+  "schemaVersion": "1.1.0",
+  "homeId": "home_fr_paris_10_fsm_236_lot_204",
+  "displayName": "Appartement – Faubourg Saint-Martin",
+  "kind": "apartment",
+  "status": "active",
+  "address": {
+    "street": "236 rue du Faubourg Saint-Martin",
+    "postalCode": "75010",
+    "city": "Paris",
+    "countryCode": "FR",
+    "floorLabel": "1er étage",
+    "lot": "204",
+    "doorLabel": "A Droite"
+  },
+  "geometry": {
+    "quality": "approximate_from_diagnostics",
+    "surveyGrade": false,
+    "units": "m",
+    "coordinateSystem": {
+      "origin": "angle de façade à l'extrémité chambre/salle d'eau",
+      "xAxis": "le long de la façade, vers le bureau",
+      "yAxis": "de la façade vers le fond du logement",
+      "zAxis": "vertical, depuis le sol fini"
+    },
+    "derivation": {
+      "method": "Surfaces certifiées + topologie du croquis CREP + longueur de façade estimée depuis le DPE",
+      "grossSouthFacadeLengthM": 14.3,
+      "grossSouthFacadeFormula": "(27.36 m² de mur + 6.66 + 0.94 + 2.22 m² de baies) / 2.60 m",
+      "mainDepthM": 4.141644,
+      "officeDepthM": 2.420762,
+      "officeDepthRatioSource": "rapport graphique approximatif 294/503 mesuré sur le croquis CREP",
+      "warning": "Les dimensions linéaires, portes et fenêtres sont des estimations de travail. Seules les surfaces par pièce et la hauteur moyenne sont issues directement des diagnostics."
+    },
+    "levels": [
+      {
+        "levelId": "level_01",
+        "name": "Appartement",
+        "elevationM": 0,
+        "ceilingHeightM": 2.6,
+        "footprint": [
+          [0, 0],
+          [14.3, 0],
+          [14.3, 2.420762],
+          [10.978732, 2.420762],
+          [10.978732, 4.141644],
+          [0, 4.141644]
+        ]
+      }
+    ]
+  },
+  "rooms": [
+    {
+      "roomId": "room_bedroom",
+      "levelId": "level_01",
+      "name": "Chambre",
+      "aliases": ["la chambre"],
+      "type": "bedroom",
+      "certifiedAreaM2": 10.57,
+      "polygon": [[0, 0], [3.252332, 0], [3.252332, 3.249976], [0, 3.249976]],
+      "geometryConfidence": "medium"
+    },
+    {
+      "roomId": "room_bathroom",
+      "levelId": "level_01",
+      "name": "Salle d’eau",
+      "aliases": ["la salle d’eau", "la salle de bain"],
+      "type": "bathroom",
+      "certifiedAreaM2": 2.9,
+      "polygon": [[0, 3.249976], [3.252332, 3.249976], [3.252332, 4.141644], [0, 4.141644]],
+      "geometryConfidence": "medium"
+    },
+    {
+      "roomId": "room_kitchen",
+      "levelId": "level_01",
+      "name": "Cuisine",
+      "aliases": ["la cuisine"],
+      "type": "kitchen",
+      "certifiedAreaM2": 9.48,
+      "polygon": [[3.252332, 0], [5.541278, 0], [5.541278, 4.141644], [3.252332, 4.141644]],
+      "geometryConfidence": "medium"
+    },
+    {
+      "roomId": "room_living",
+      "levelId": "level_01",
+      "name": "Séjour",
+      "aliases": ["le séjour", "le salon"],
+      "type": "living_room",
+      "certifiedAreaM2": 21.55,
+      "polygon": [[5.541278, 0], [10.978732, 0], [10.978732, 2.420762], [10.018732, 2.420762], [10.018732, 3.431179], [10.978732, 3.431179], [10.978732, 4.141644], [5.541278, 4.141644]],
+      "geometryConfidence": "medium"
+    },
+    {
+      "roomId": "room_wc",
+      "levelId": "level_01",
+      "name": "WC",
+      "aliases": ["les toilettes", "le WC"],
+      "type": "toilet",
+      "certifiedAreaM2": 0.97,
+      "polygon": [[10.018732, 2.420762], [10.978732, 2.420762], [10.978732, 3.431179], [10.018732, 3.431179]],
+      "geometryConfidence": "low"
+    },
+    {
+      "roomId": "room_office",
+      "levelId": "level_01",
+      "name": "Bureau",
+      "aliases": ["le bureau"],
+      "type": "office",
+      "certifiedAreaM2": 8.04,
+      "polygon": [[10.978732, 0], [14.3, 0], [14.3, 2.420762], [10.978732, 2.420762]],
+      "geometryConfidence": "medium"
+    }
+  ],
+  "openings": [
+    {
+      "openingId": "window_bedroom_01",
+      "kind": "window",
+      "roomIds": ["room_bedroom"],
+      "segment": [[1.25, 0], [2.25, 0]],
+      "orientation": "south",
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "window_kitchen_01",
+      "kind": "window",
+      "roomIds": ["room_kitchen"],
+      "segment": [[3.9, 0], [4.9, 0]],
+      "orientation": "south",
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "window_living_01",
+      "kind": "window",
+      "roomIds": ["room_living"],
+      "segment": [[6.25, 0], [7.3, 0]],
+      "orientation": "south",
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "window_living_02",
+      "kind": "window",
+      "roomIds": ["room_living"],
+      "segment": [[8.45, 0], [9.5, 0]],
+      "orientation": "south",
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "window_office_01",
+      "kind": "window",
+      "roomIds": ["room_office"],
+      "segment": [[12.05, 0], [13.1, 0]],
+      "orientation": "south",
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_main_entrance",
+      "kind": "door",
+      "roomIds": ["room_living"],
+      "segment": [[10.978732, 3.431179], [10.978732, 4.141644]],
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_wc",
+      "kind": "door",
+      "roomIds": ["room_living", "room_wc"],
+      "segment": [[10.018732, 2.560000], [10.018732, 3.360000]],
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_living_office",
+      "kind": "door",
+      "roomIds": ["room_living", "room_office"],
+      "segment": [[10.978732, 0.45], [10.978732, 1.35]],
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_kitchen_living",
+      "kind": "door",
+      "roomIds": ["room_kitchen", "room_living"],
+      "segment": [[5.541278, 0.45], [5.541278, 1.35]],
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_bedroom_kitchen",
+      "kind": "door",
+      "roomIds": ["room_bedroom", "room_kitchen"],
+      "segment": [[3.252332, 0.45], [3.252332, 1.35]],
+      "geometryConfidence": "low"
+    },
+    {
+      "openingId": "door_bathroom_bedroom",
+      "kind": "door",
+      "roomIds": ["room_bathroom", "room_bedroom"],
+      "segment": [[1.85, 3.249976], [2.65, 3.249976]],
+      "geometryConfidence": "low"
+    }
+  ],
+  "buildingFacts": {
+    "constructionYear": 1900,
+    "habitableAreaM2": 53.51,
+    "levelCount": 1,
+    "exposedFacadeCount": 1,
+    "exposedFacadeOrientation": "south",
+    "windowCountFromPlan": 5,
+    "glazedAreaM2": 9.82,
+    "heating": "Radiateurs électriques individuels, régulation pièce par pièce",
+    "domesticHotWater": "Chauffe-eau électrique vertical 80 L, installé en 2025",
+    "ventilation": "VMC simple flux autoréglable"
+  },
+  "automation": {
+    "spaces": [
+      {"roomId": "room_bedroom", "entities": []},
+      {"roomId": "room_bathroom", "entities": []},
+      {"roomId": "room_kitchen", "entities": []},
+      {"roomId": "room_living", "entities": []},
+      {"roomId": "room_wc", "entities": []},
+      {"roomId": "room_office", "entities": []}
+    ]
+  },
+  "assets": {
+    "plan2d": "plan-2d.svg",
+    "model3d": "plan-3d.obj",
+    "model3dMaterials": "plan-3d.mtl"
+  },
+  "sources": [
+    {
+      "file": "SURFACE.pdf",
+      "sha256": "B55B9F3B8FD30F18374B6C274DEA7B0F795575DF23E167A4991CA4B69FBC4E4D",
+      "usedFor": ["address", "lot", "room_names", "certified_room_areas", "habitable_area"]
+    },
+    {
+      "file": "CREP.pdf",
+      "sha256": "B769FC4384240CE50AC18BF78AA044EECE9F5A26F2A7A0250804EDAD439DF404",
+      "usedFor": ["room_topology", "relative_proportions", "window_count", "approximate_openings"],
+      "page": 7
+    },
+    {
+      "file": "DPE.pdf",
+      "sha256": "3D37F05508554BB5543A4800420127FD3893F0A6BDBFF7FF0918CCC3A43A348B",
+      "usedFor": ["ceiling_height", "facade_orientation", "wall_area", "glazed_area", "building_facts"]
+    },
+    {
+      "file": "PROJET BAIL BOURGUIGNON.pdf",
+      "sha256": "626792C6114956CCC622FC76F791963A9FA8C5B13EE9257082103D06E716E0B6",
+      "usedFor": ["address_cross_check", "lot_cross_check"]
+    },
+    {
+      "file": "ELECTRICITE.pdf",
+      "sha256": "DF85983025CFE503175DE09683B7A9045E65DC6F05352A15121829BDBEF5B8E6",
+      "usedFor": ["technical_context_only"]
+    },
+    {
+      "file": "ERP.pdf",
+      "sha256": "B9D4D059F210652BC6F554D36E95DA001574E6C65CC190BA3E8E38F2AC2CDE43",
+      "usedFor": ["environmental_context_only"]
+    }
+  ],
+  "generatedAt": "2026-10-06T00:00:00+02:00"
+}

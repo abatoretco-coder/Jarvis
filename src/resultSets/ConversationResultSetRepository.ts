@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import type Database from 'better-sqlite3';
 
+import { getCurrentDataOwnerScope } from '../identity/requestIdentity';
+
 type JsonObject = Record<string, unknown>;
 
 export type ConversationResultSetItem = {
@@ -91,6 +93,23 @@ function toResolved(set: ConversationResultSet, item: ConversationResultSetItem)
   return { ...item, resultSetId: set.id, resultSetContext: set.context };
 }
 
+function ownerPredicate(column = 'owner_user_id'): {
+  sql: string;
+  params: string[];
+  ownerUserId: string | null;
+  ownerServiceId: string | null;
+} {
+  const serviceColumn = column.replace(/owner_user_id$/u, 'owner_service_id');
+  const scope = getCurrentDataOwnerScope();
+  if (scope.kind === 'user') {
+    return { sql: `${column} = ? AND ${serviceColumn} IS NULL`, params: [scope.userId], ownerUserId: scope.userId, ownerServiceId: null };
+  }
+  if (scope.kind === 'service') {
+    return { sql: `${column} IS NULL AND ${serviceColumn} = ?`, params: [scope.serviceId], ownerUserId: null, ownerServiceId: scope.serviceId };
+  }
+  return { sql: `${column} IS NULL AND ${serviceColumn} IS NULL`, params: [], ownerUserId: null, ownerServiceId: null };
+}
+
 export class ConversationResultSetRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -116,14 +135,19 @@ export class ConversationResultSetRepository {
       ...item,
       metadataJson: serializeBounded(item.metadata, MAX_ITEM_METADATA_BYTES),
     }));
+    const owner = ownerPredicate();
 
     const transaction = this.db.transaction(() => {
-      this.db.prepare('UPDATE conversation_result_sets SET active=0 WHERE thread_id=? AND active=1').run(input.threadId);
+      const accessible = this.db.prepare(`SELECT 1 FROM conversation_threads WHERE thread_id=? AND ${owner.sql}`)
+        .get(input.threadId, ...owner.params);
+      if (!accessible) throw new Error('conversation_thread_not_found');
+      this.db.prepare(`UPDATE conversation_result_sets SET active=0 WHERE thread_id=? AND ${owner.sql} AND active=1`)
+        .run(input.threadId, ...owner.params);
       this.db.prepare(`
         INSERT INTO conversation_result_sets(
-          id,thread_id,source_agent,source_action,created_at_ms,expires_at_ms,focused_position,active,context_json
-        ) VALUES(?,?,?,?,?,?,NULL,1,?)
-      `).run(id, input.threadId, input.sourceAgent, input.sourceAction, now, expiresAtMs, contextJson);
+          id,thread_id,source_agent,source_action,created_at_ms,expires_at_ms,focused_position,active,context_json,owner_user_id,owner_service_id
+        ) VALUES(?,?,?,?,?,?,NULL,1,?,?,?)
+      `).run(id, input.threadId, input.sourceAgent, input.sourceAction, now, expiresAtMs, contextJson, owner.ownerUserId, owner.ownerServiceId);
       const insert = this.db.prepare(`
         INSERT INTO conversation_result_set_items(
           result_set_id,position,entity_type,entity_id,display_label,metadata_json
@@ -149,7 +173,9 @@ export class ConversationResultSetRepository {
   }
 
   cleanupExpired(now = Date.now()): number {
-    return this.db.prepare('DELETE FROM conversation_result_sets WHERE expires_at_ms<=?').run(now).changes;
+    const owner = ownerPredicate();
+    return this.db.prepare(`DELETE FROM conversation_result_sets WHERE ${owner.sql} AND expires_at_ms<=?`)
+      .run(...owner.params, now).changes;
   }
 
   findActive(threadId: string): ConversationResultSet | null {
@@ -158,11 +184,12 @@ export class ConversationResultSetRepository {
 
   resolveReferenceDetailed(threadId: string, text: string): ConversationReferenceResolution {
     const now = Date.now();
+    const owner = ownerPredicate();
     const expired = this.db.prepare(`
       SELECT 1 FROM conversation_result_sets
-      WHERE thread_id=? AND active=1 AND expires_at_ms<=?
+      WHERE thread_id=? AND ${owner.sql} AND active=1 AND expires_at_ms<=?
       LIMIT 1
-    `).get(threadId, now);
+    `).get(threadId, ...owner.params, now);
     this.cleanupExpired(now);
     const set = this.loadActive(threadId);
     if (!set) return expired ? { status: 'expired' } : { status: 'not_reference' };
@@ -230,16 +257,19 @@ export class ConversationResultSetRepository {
     set: ConversationResultSet,
     item: ConversationResultSetItem,
   ): { status: 'resolved'; result: ResolvedConversationResult } {
-    this.db.prepare('UPDATE conversation_result_sets SET focused_position=? WHERE id=?').run(item.position, set.id);
+    const owner = ownerPredicate();
+    this.db.prepare(`UPDATE conversation_result_sets SET focused_position=? WHERE id=? AND ${owner.sql}`)
+      .run(item.position, set.id, ...owner.params);
     return { status: 'resolved', result: toResolved(set, item) };
   }
 
   private loadActive(threadId: string): ConversationResultSet | null {
+    const owner = ownerPredicate();
     const row = this.db.prepare(`
       SELECT * FROM conversation_result_sets
-      WHERE thread_id=? AND active=1 AND expires_at_ms>?
+      WHERE thread_id=? AND ${owner.sql} AND active=1 AND expires_at_ms>?
       ORDER BY created_at_ms DESC LIMIT 1
-    `).get(threadId, Date.now()) as Record<string, unknown> | undefined;
+    `).get(threadId, ...owner.params, Date.now()) as Record<string, unknown> | undefined;
     if (!row) return null;
     const itemRows = this.db.prepare(`
       SELECT position,entity_type,entity_id,display_label,metadata_json

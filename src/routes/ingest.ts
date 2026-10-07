@@ -56,16 +56,23 @@ import {
 } from '../conversation/voiceUx';
 import { AgoraClientError } from '../culture/AgoraClient';
 import { cultureActionSchema } from '../culture/contracts';
-import { executeCulture, inferCultureComparisonPositions, inferCultureRefinement, inferCultureRequest } from '../culture/cultureAgent';
 import {
-  CultureMemoryService,
-  inferCultureMemoryCommand,
-} from '../culture/CultureMemoryService';
+  executeCulture,
+  inferCultureComparisonPositions,
+  inferCultureRefinement,
+  inferCultureRequest,
+} from '../culture/cultureAgent';
+import { CultureMemoryService, inferCultureMemoryCommand } from '../culture/CultureMemoryService';
 import {
-  resolveTrustedCultureProfileId,
+  resolveRequestCultureProfileId,
   trustedCultureUserIdSchema,
 } from '../culture/CultureProfileIdentity';
 import { CultureProfileRepository } from '../culture/CultureProfileRepository';
+import {
+  permissionForCapabilityAgent,
+  permissionForRouteKey,
+} from '../identity/conversationAuthorization';
+import { getCurrentIntegrationConnectionId, getCurrentOwnerUserId, hasRequestPermission, setCurrentIntegrationConnectionId } from '../identity/requestIdentity';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -76,8 +83,17 @@ import {
   planMailAgentAction,
 } from '../mail/mailAgent';
 import { formatNasStatus, isNasStatusQuery } from '../nas/nasStatusFormat';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
-import { type PendingMutationRecord,PendingMutationRepository } from '../pendingMutations/PendingMutationRepository';
+import {
+  executeOpenAiOperation,
+  getOpenAiResilienceSnapshot,
+  OpenAiHttpError,
+  retryAfterMsFromHeaders,
+} from '../openai/resilience';
+import { completeOpenAiResponse, requestOpenAiResponse } from '../openai/responsesClient';
+import {
+  type PendingMutationRecord,
+  PendingMutationRepository,
+} from '../pendingMutations/PendingMutationRepository';
 import {
   type ConversationResultSet,
   ConversationResultSetRepository,
@@ -103,7 +119,7 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
-import { transcribeWithWyoming } from '../stt/wyomingClient';
+import { SpotifyWebApiClient } from '../spotifyWebApi';
 import { formatParisTime } from '../time/parisTime';
 import {
   callTodoAgent,
@@ -120,13 +136,16 @@ import {
 } from '../weather/deterministicWeatherReply';
 import { buildWeatherSystemPrompt } from '../weather/prompts/weatherSystemPrompt';
 import { buildWeatherUserPrompt } from '../weather/prompts/weatherUserTemplate';
-import { buildWeatherSnapshotFromStates, type HaStateLike, type WeatherSnapshot } from '../weather/weatherSnapshot';
+import {
+  buildWeatherSnapshotFromStates,
+  type HaStateLike,
+  type WeatherSnapshot,
+} from '../weather/weatherSnapshot';
 import {
   audioExtensionFromContentType,
   bufferToWebBytes,
-  buildFfmpegFilters,
-  pipeStreamThroughFfmpeg,
   resolveOpenAiTtsRuntimeConfig,
+  synthesizeOpenAiSpeech,
   type TtsRouteMode,
 } from './ingest/audioRuntime';
 import {
@@ -135,32 +154,45 @@ import {
   type SpotifyResponseShape,
 } from './ingest/spotifyResponse';
 
-const threadIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+const threadIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/u);
 
-const clientLocationSchema = z.object({
-  latitude: z.number().finite().min(-90).max(90).optional(),
-  longitude: z.number().finite().min(-180).max(180).optional(),
-  lat: z.number().finite().min(-90).max(90).optional(),
-  lon: z.number().finite().min(-180).max(180).optional(),
-  accuracyM: z.number().finite().nonnegative().max(100_000).optional(),
-  accuracy: z.number().finite().nonnegative().max(100_000).optional(),
-}).passthrough().superRefine((value, context) => {
-  const hasCanonicalCoordinate = value.latitude !== undefined || value.longitude !== undefined;
-  const hasLegacyCoordinate = value.lat !== undefined || value.lon !== undefined;
-  if (hasCanonicalCoordinate && (value.latitude === undefined || value.longitude === undefined)) {
-    context.addIssue({ code: 'custom', message: 'latitude and longitude must be provided together' });
-  }
-  if (hasLegacyCoordinate && (value.lat === undefined || value.lon === undefined)) {
-    context.addIssue({ code: 'custom', message: 'lat and lon must be provided together' });
-  }
-  if (!hasCanonicalCoordinate && !hasLegacyCoordinate) {
-    context.addIssue({ code: 'custom', message: 'a complete coordinate pair is required' });
-  }
-});
+const clientLocationSchema = z
+  .object({
+    latitude: z.number().finite().min(-90).max(90).optional(),
+    longitude: z.number().finite().min(-180).max(180).optional(),
+    lat: z.number().finite().min(-90).max(90).optional(),
+    lon: z.number().finite().min(-180).max(180).optional(),
+    accuracyM: z.number().finite().nonnegative().max(100_000).optional(),
+    accuracy: z.number().finite().nonnegative().max(100_000).optional(),
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const hasCanonicalCoordinate = value.latitude !== undefined || value.longitude !== undefined;
+    const hasLegacyCoordinate = value.lat !== undefined || value.lon !== undefined;
+    if (hasCanonicalCoordinate && (value.latitude === undefined || value.longitude === undefined)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'latitude and longitude must be provided together',
+      });
+    }
+    if (hasLegacyCoordinate && (value.lat === undefined || value.lon === undefined)) {
+      context.addIssue({ code: 'custom', message: 'lat and lon must be provided together' });
+    }
+    if (!hasCanonicalCoordinate && !hasLegacyCoordinate) {
+      context.addIssue({ code: 'custom', message: 'a complete coordinate pair is required' });
+    }
+  });
 
-const clientContextSchema = z.object({
-  location: clientLocationSchema.optional(),
-}).passthrough();
+const clientContextSchema = z
+  .object({
+    location: clientLocationSchema.optional(),
+  })
+  .passthrough();
 
 const ingestSchema = z.object({
   threadId: threadIdSchema,
@@ -169,6 +201,7 @@ const ingestSchema = z.object({
   clientContext: clientContextSchema.optional(),
   correlation_id: z.string().optional(),
   user_id: trustedCultureUserIdSchema.optional(),
+  integrationConnectionId: z.string().uuid().optional(),
   domain: z.enum(['spotify', 'culture']).optional(),
   action: z.union([spotifyActionSchema, cultureActionSchema]).optional(),
   slots: z.record(z.string(), z.unknown()).optional(),
@@ -186,45 +219,56 @@ const responseSchema = z.object({
   responseText: z.string().min(1),
   usedSummaryVersion: z.string().min(1).optional(),
   sources: z.array(z.string().url()).optional(),
-  cultureCandidates: z.array(z.object({
-    position: z.number().int().min(1).max(20),
-    entityType: z.enum(['agora.item', 'agora.occurrence']),
-    entityId: z.string().min(1).max(128),
-    title: z.string().min(1).max(500),
-    personalizationScore: z.number(),
-    personalizationReasons: z.array(z.string().max(150)).max(20),
-  })).max(20).optional(),
-  voiceAudio: z.object({
-    contentType: z.string().min(1),
-    base64Audio: z.string().min(1),
-    source: z.enum(['inline_warm_cache', 'inline_warm_inflight']).optional(),
-  }).optional(),
-  replyMeta: z.object({
-    kind: z.string().min(1),
-    source: z.string().min(1),
-    routeKey: z.string().min(1).optional(),
-    semanticDecision: z.string().min(1).optional(),
-    fallbackReason: z.string().min(1).optional(),
-    llmProvider: z.enum(['ollama', 'openai']).optional(),
-    llmModel: z.string().min(1).optional(),
-    llmLatencyMs: z.number().int().nonnegative().optional(),
-    llmFallbackReason: z.string().min(1).optional(),
-    proposalId: z.string().min(1).optional(),
-    pendingAction: z.string().min(1).optional(),
-    contextCache: z.object({
-      hit: z.boolean(),
-      stale: z.boolean(),
-      fetchedAt: z.string().min(1),
-      domain: z.string().min(1),
-      questionKey: z.string().min(1).optional(),
-    }).optional(),
-  }).optional(),
+  cultureCandidates: z
+    .array(
+      z.object({
+        position: z.number().int().min(1).max(20),
+        entityType: z.enum(['agora.item', 'agora.occurrence']),
+        entityId: z.string().min(1).max(128),
+        title: z.string().min(1).max(500),
+        personalizationScore: z.number(),
+        personalizationReasons: z.array(z.string().max(150)).max(20),
+      })
+    )
+    .max(20)
+    .optional(),
+  voiceAudio: z
+    .object({
+      contentType: z.string().min(1),
+      base64Audio: z.string().min(1),
+      source: z.enum(['inline_warm_cache', 'inline_warm_inflight']).optional(),
+    })
+    .optional(),
+  replyMeta: z
+    .object({
+      kind: z.string().min(1),
+      source: z.string().min(1),
+      routeKey: z.string().min(1).optional(),
+      semanticDecision: z.string().min(1).optional(),
+      fallbackReason: z.string().min(1).optional(),
+      llmProvider: z.literal('openai').optional(),
+      llmModel: z.string().min(1).optional(),
+      llmLatencyMs: z.number().int().nonnegative().optional(),
+      llmFallbackReason: z.string().min(1).optional(),
+      proposalId: z.string().min(1).optional(),
+      pendingAction: z.string().min(1).optional(),
+      contextCache: z
+        .object({
+          hit: z.boolean(),
+          stale: z.boolean(),
+          fetchedAt: z.string().min(1),
+          domain: z.string().min(1),
+          questionKey: z.string().min(1).optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 function resultSetBelongsToCultureProfile(
   resultSet: ConversationResultSet | null,
   profileId: string,
-  defaultProfileId: string,
+  defaultProfileId: string
 ): boolean {
   if (!resultSet || resultSet.sourceAgent !== 'culture') return true;
   const storedProfileId = resultSet.context?.profileId;
@@ -238,7 +282,12 @@ const historyQuerySchema = z.object({
 });
 
 const sttParamsSchema = z.object({
-  engineId: z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u),
+  engineId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9._:-]+$/u),
 });
 
 const ttsRequestSchema = z.object({
@@ -280,13 +329,14 @@ function normalizeIntentText(value: string): string {
 
 /**
  * Avoid spending an LLM routing pass on social small talk.  Besides being
- * deterministic, this keeps interactive voice latency low when Ollama is
- * temporarily busy with a longer Helix or conversation request.
+ * deterministic, this also avoids an unnecessary cloud routing request.
  */
 function simpleConversationalReply(text: string): string | undefined {
   const normalized = normalizeIntentText(text);
   const isGreeting = /\b(salut|bonjour|bonsoir|hello|coucou|hey)\b/.test(normalized);
-  const asksWellbeing = /\b(comment ca va|ca va|tu vas bien|comment vas tu|quoi de neuf)\b/.test(normalized);
+  const asksWellbeing = /\b(comment ca va|ca va|tu vas bien|comment vas tu|quoi de neuf)\b/.test(
+    normalized
+  );
   if (isGreeting && asksWellbeing) return 'Salut ! Je vais bien, merci. Et toi, comment ça va ?';
   if (/^(salut|bonjour|bonsoir|hello|coucou|hey)(\s+jarvis)?[!., ]*$/u.test(normalized)) {
     return 'Salut ! Je suis là. Que puis-je faire pour toi ?';
@@ -297,15 +347,26 @@ function simpleConversationalReply(text: string): string | undefined {
 function isLikelyCalendarIntent(text: string): boolean {
   const t = normalizeIntentText(text);
   if (!t) return false;
-  const hasCalendarObject = /\b(agenda|calendrier|evenements?|evenments?|evenemnts?|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(t);
+  const hasCalendarObject =
+    /\b(agenda|calendrier|evenements?|evenments?|evenemnts?|event|rdv|rendez vous|rendez-vous|reunion|meeting)\b/.test(
+      t
+    );
   if (!hasCalendarObject) return false;
-  return /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve|recherche|supprime|supprimer|annule|annuler|efface|effacer|modifie|modifier|change|changer|deplace|deplacer|decale|decaler|retire|retirer|enleve|enlever)\b/.test(t)
-    || /\b(planning|prochains? evenements?|qu est ce que j ai)\b/.test(t);
+  return (
+    /\b(cree|creer|ajoute|ajouter|planifie|programme|mets|mettre|bloque|reserve|liste|montre|cherche|retrouve|recherche|supprime|supprimer|annule|annuler|efface|effacer|modifie|modifier|change|changer|deplace|deplacer|decale|decaler|retire|retirer|enleve|enlever)\b/.test(
+      t
+    ) || /\b(planning|prochains? evenements?|qu est ce que j ai)\b/.test(t)
+  );
 }
 
 function inferCalendarRouteKey(text: string): string {
   const t = normalizeIntentText(text);
-  if (/\b(retire|retirer|enleve|enlever)\b/.test(t) || /\b(supprime|supprimer|efface|effacer)\b.*\b(description|lieu|rappel|rappels|invite|invites|participant|participants)\b/.test(t)) {
+  if (
+    /\b(retire|retirer|enleve|enlever)\b/.test(t) ||
+    /\b(supprime|supprimer|efface|effacer)\b.*\b(description|lieu|rappel|rappels|invite|invites|participant|participants)\b/.test(
+      t
+    )
+  ) {
     return 'calendar.remove_from_event';
   }
   if (/\b(supprime|supprimer|annule|annuler|efface|effacer)\b/.test(t)) {
@@ -334,44 +395,18 @@ function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string 
   return `${text}\n\nInstruction: Réponds strictement en français.`;
 }
 
-/** Ordinary chat must stay local and must never depend on Home Assistant. */
-async function answerGeneralConversationWithOllama(params: {
-  text: string;
-  baseUrl: string;
-  model: string;
-  timeoutMs: number;
-}): Promise<string> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.timeoutMs);
-  try {
-    const content = await completeOllamaChat({
-      baseUrl: params.baseUrl,
-      model: params.model,
-      temperature: 0.35,
-      numPredict: 180,
-      messages: [
-          {
-            role: 'system',
-            content: 'Tu es Jarvis, un assistant personnel francophone. Réponds naturellement, brièvement et utilement. Ne mentionne jamais Home Assistant, les agents, les conteneurs ou le routage. N’invente aucune action sur des appareils.',
-          },
-          { role: 'user', content: params.text },
-      ],
-      signal: controller.signal,
-    });
-    if (!content) throw new Error('ollama_general_empty_response');
-    return toSingleParagraphPlainText(content);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
 const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
-  SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key),
+  SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key)
 );
 
-function resolveExecutorsEntry(agentEntries: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry | null {
+function resolveExecutorsEntry(
+  agentEntries: AgentRouteEntry[],
+  generalAgentId: string
+): AgentRouteEntry | null {
   // Preferred explicit mapping: key=executors or direct pseudo-agent id.
-  const explicit = agentEntries.find((entry) => entry.key === 'executors' || entry.agentId === 'executors');
+  const explicit = agentEntries.find(
+    (entry) => entry.key === 'executors' || entry.agentId === 'executors'
+  );
   if (explicit) return explicit;
 
   // Compatibility fallback: if there is exactly one remaining HA specialized target,
@@ -393,63 +428,34 @@ async function synthesizeWeatherReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
   model: string;
+  maxOutputTokens?: number;
   timeoutMs: number;
   userText: string;
   weather: WeatherSnapshot;
-  log?: { info: (obj: Record<string, unknown>, msg: string) => void; warn: (obj: Record<string, unknown>, msg: string) => void };
+  log?: {
+    info: (obj: Record<string, unknown>, msg: string) => void;
+    warn: (obj: Record<string, unknown>, msg: string) => void;
+  };
 }): Promise<string> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.timeoutMs);
-
   const systemPrompt = buildWeatherSystemPrompt();
 
   const userPrompt = buildWeatherUserPrompt(params.userText, params.weather);
 
-  try {
-    if (isOllamaBaseUrl(params.openAiBaseUrl)) {
-      const content = await completeOllamaChat({
-        baseUrl: params.openAiBaseUrl, model: params.model, temperature: 0.2, numPredict: 220,
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], signal: controller.signal,
-      });
-      if (!content) throw new Error('weather_ollama_empty_response');
-      params.log?.info({ model: params.model, content_len: content.length }, 'weather_ollama_done');
-      return toSingleParagraphPlainText(content);
-    }
-    const response = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${params.openAiApiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: params.model,
-        temperature: 0.2,
-        max_tokens: 220,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const raw = await response.text();
-    if (!response.ok) {
-      throw new Error(`weather_openai_failed:${response.status}:${raw.slice(0, 500)}`);
-    }
-
-    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-    const choices = Array.isArray(parsed.choices) ? parsed.choices as Array<{ message?: { content?: string } }> : [];
-    const content = choices[0]?.message?.content?.trim() ?? '';
-    if (!content) {
-      throw new Error('weather_openai_empty_response');
-    }
-
-    params.log?.info({ model: params.model, content_len: content.length }, 'weather_openai_done');
-    return toSingleParagraphPlainText(content);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  const content = await completeOpenAiResponse({
+    apiKey: params.openAiApiKey,
+    baseUrl: params.openAiBaseUrl,
+    model: params.model,
+    capability: 'synthesis',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    maxOutputTokens: Math.min(280, params.maxOutputTokens ?? 768),
+    timeoutMs: params.timeoutMs,
+    reasoningEffort: 'low',
+  });
+  params.log?.info({ model: params.model, content_len: content.length }, 'weather_openai_done');
+  return toSingleParagraphPlainText(content);
 }
 
 /**
@@ -467,19 +473,29 @@ async function callSearchAgent(
     text: string;
     openAiApiKey: string;
     openAiBaseUrl: string;
+    openAiModel?: string;
     perplexityApiKey?: string;
     perplexityBaseUrl?: string;
     timeoutMs: number;
     log?: { info: (obj: Record<string, unknown>, msg: string) => void };
-  },
+  }
 ): Promise<SearchAgentResponse> {
   const config = getSearchAgentConfig(agentKey);
   const now = new Date();
   const tz = 'Europe/Paris';
   const dateStr = now.toLocaleDateString('fr-FR', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: tz,
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: tz,
   });
-  const dayStr = now.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz });
+  const dayStr = now.toLocaleDateString('fr-FR', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: tz,
+  });
 
   const systemPrompt = config.buildSystemPrompt(dateStr);
   const userQuery = config.buildUserQuery(params.text, dayStr);
@@ -489,9 +505,39 @@ async function callSearchAgent(
   const baseUrl = usePerplexity
     ? (params.perplexityBaseUrl ?? 'https://api.perplexity.ai')
     : params.openAiBaseUrl;
-  const model = usePerplexity ? config.model : config.openAiModel;
+  const model = usePerplexity ? config.model : (params.openAiModel ?? 'gpt-6-luna');
 
-  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey }, 'search_agent_provider');
+  params.log?.info(
+    { provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey },
+    'search_agent_provider'
+  );
+
+  if (!usePerplexity) {
+    const response = await requestOpenAiResponse({
+      apiKey,
+      baseUrl,
+      model,
+      capability: 'synthesis',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userQuery },
+      ],
+      maxOutputTokens: Math.max(16, config.maxTokens),
+      timeoutMs: params.timeoutMs,
+      tools: [{ type: 'web_search', search_context_size: 'high' }],
+      toolChoice: 'required',
+      reasoningEffort: 'low',
+    });
+    const content = sanitizeSearchAgentContent(response.text);
+    const sources = [
+      ...new Set([...response.sources, ...extractSearchSources(response.text)]),
+    ].slice(0, 10);
+    params.log?.info(
+      { provider: 'openai', model, agentKey, content_len: content.length },
+      'search_agent_response'
+    );
+    return { text: content || "Je n'ai pas obtenu cette information.", sources };
+  }
 
   const body: Record<string, unknown> = {
     model,
@@ -504,50 +550,47 @@ async function callSearchAgent(
     ],
   };
 
-  if (usePerplexity) {
-    body['return_related_questions'] = false;
-    let hasAbsoluteDateFilter = false;
-    if (config.searchAfterDays != null) {
-      const cutoff = new Date(Date.now() - config.searchAfterDays * 24 * 3600 * 1000);
-      const mm = String(cutoff.getMonth() + 1).padStart(2, '0');
-      const dd = String(cutoff.getDate()).padStart(2, '0');
-      body['search_after_date_filter'] = `${mm}/${dd}/${cutoff.getFullYear()}`;
-      hasAbsoluteDateFilter = true;
-    }
-    if (!hasAbsoluteDateFilter && config.searchRecencyFilter) {
-      body['search_recency_filter'] = config.searchRecencyFilter;
-    }
-    if (config.searchLanguageFilter) body['search_language_filter'] = config.searchLanguageFilter;
-    if (config.languagePreference) body['language_preference'] = config.languagePreference;
-  } else {
-    body['web_search_options'] = { search_context_size: 'high' };
+  body['return_related_questions'] = false;
+  let hasAbsoluteDateFilter = false;
+  if (config.searchAfterDays != null) {
+    const cutoff = new Date(Date.now() - config.searchAfterDays * 24 * 3600 * 1000);
+    const mm = String(cutoff.getMonth() + 1).padStart(2, '0');
+    const dd = String(cutoff.getDate()).padStart(2, '0');
+    body['search_after_date_filter'] = `${mm}/${dd}/${cutoff.getFullYear()}`;
+    hasAbsoluteDateFilter = true;
   }
+  if (!hasAbsoluteDateFilter && config.searchRecencyFilter)
+    body['search_recency_filter'] = config.searchRecencyFilter;
+  if (config.searchLanguageFilter) body['search_language_filter'] = config.searchLanguageFilter;
+  if (config.languagePreference) body['language_preference'] = config.languagePreference;
 
-  // Both Perplexity and OpenAI use /chat/completions — model name selects search capability.
-  const chatPath = '/chat/completions';
-  const resp = await fetch(
-    `${baseUrl.replace(/\/$/, '')}${chatPath}`,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(params.timeoutMs),
+  const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`,
     },
-  );
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(params.timeoutMs),
+  });
 
   if (!resp.ok) {
-    const rawBody = await resp.text().catch(() => '');
-    throw new Error(`search_direct_http_${resp.status}: ${rawBody.slice(0, 200)}`);
+    throw new Error(`search_direct_http_${resp.status}`);
   }
 
-  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const raw = data.choices?.[0]?.message?.content?.trim();
   const content = raw ? sanitizeSearchAgentContent(raw) : '';
   const sources = raw ? extractSearchSources(raw) : [];
-  params.log?.info({ provider: usePerplexity ? 'perplexity' : 'openai', model, agentKey, content_len: content?.length ?? 0, content_preview: content?.slice(0, 120) }, 'search_agent_raw_response');
+  params.log?.info(
+    {
+      provider: usePerplexity ? 'perplexity' : 'openai',
+      model,
+      agentKey,
+      content_len: content?.length ?? 0,
+    },
+    'search_agent_response'
+  );
   return { text: content || "Je n'ai pas obtenu cette information.", sources };
 }
 
@@ -579,15 +622,18 @@ function sanitizeSearchAgentContent(raw: string): string {
       return true;
     });
 
-  const compact = filteredLines.join(' ')
-    .replace(/(?:^|\s)\((?:source|sources|reference|references|référence|références)\s*:[^)]+\)/giu, ' ')
+  const compact = filteredLines
+    .join(' ')
+    .replace(
+      /(?:^|\s)\((?:source|sources|reference|references|référence|références)\s*:[^)]+\)/giu,
+      ' '
+    )
     .replace(/\b(?:sources?|references?|références?)\s*:\s*(?:https?:\/\/\S+\s*)+/giu, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
 
   return toSingleParagraphPlainText(compact);
 }
-
 
 async function transcribeWithOpenAi(params: {
   env: AppDeps['env'];
@@ -607,39 +653,47 @@ async function transcribeWithOpenAi(params: {
   }
 
   const fileExt = audioExtensionFromContentType(params.incomingContentType);
-  form.set('file', new Blob([bufferToWebBytes(params.body)], { type: params.incomingContentType }), `audio.${fileExt}`);
+  form.set(
+    'file',
+    new Blob([bufferToWebBytes(params.body)], { type: params.incomingContentType }),
+    `audio.${fileExt}`
+  );
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), params.env.OPENAI_STT_TIMEOUT_MS);
   const sttBaseUrl = params.env.OPENAI_STT_BASE_URL?.trim() || params.env.OPENAI_BASE_URL;
-  const response = await fetch(`${sttBaseUrl.replace(/\/$/, '')}/audio/transcriptions`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${openAiApiKey}`,
+  return executeOpenAiOperation({
+    capability: 'stt',
+    model,
+    operation: async (_attempt, operationSignal) => {
+      const response = await fetch(`${sttBaseUrl.replace(/\/$/, '')}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${openAiApiKey}` },
+        body: form,
+        signal: AbortSignal.any([
+          operationSignal,
+          AbortSignal.timeout(params.env.OPENAI_STT_TIMEOUT_MS),
+        ]),
+      });
+      const raw = await response.text();
+      if (!response.ok) {
+        throw new OpenAiHttpError(
+          response.status,
+          retryAfterMsFromHeaders(response.headers),
+          `openai_stt_failed:${response.status}`
+        );
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = raw ? (JSON.parse(raw) as unknown) : {};
+      } catch {
+        parsed = {};
+      }
+      const root = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+      const text = toSingleParagraphPlainText(typeof root.text === 'string' ? root.text : '');
+      if (!text) throw new Error('openai_stt_empty_transcript');
+      return { value: { text, model }, status: response.status, model };
     },
-    body: form,
-    signal: controller.signal,
-  }).finally(() => clearTimeout(timeoutId));
-
-  const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(`openai_stt_failed:${response.status}:${raw.slice(0, 500)}`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = raw ? (JSON.parse(raw) as unknown) : {};
-  } catch {
-    parsed = {};
-  }
-
-  const root = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-  const text = toSingleParagraphPlainText(typeof root.text === 'string' ? root.text : '');
-  if (!text) {
-    throw new Error('openai_stt_empty_transcript');
-  }
-
-  return { text, model };
+  });
 }
 
 function toEntityStates(input: unknown): EntityStateLike[] {
@@ -652,8 +706,6 @@ function toEntityStates(input: unknown): EntityStateLike[] {
   });
 }
 
-
-
 /**
  * Pick a short TTS-safe ack phrase based on the slow-agent keys that were selected.
  * Returns null when no ack is appropriate (e.g. no slow agents).
@@ -662,16 +714,26 @@ function getIngestAckText(keys: (string | undefined)[]): string | null {
   if (keys.length === 0) return null;
   const cfg = INGEST_ACK_CONFIG;
   const ks = keys.map((k) => k ?? '');
-  const hasMail = ks.some((k) => k === 'mail' || cfg.mailPrefixes.some((prefix) => k.startsWith(prefix)));
-  const hasTodo = ks.some((k) => k === 'todo' || cfg.todoPrefixes.some((prefix) => k.startsWith(prefix)));
-  const hasCalendar = ks.some((k) => k === 'calendar' || cfg.calendarPrefixes.some((prefix) => k.startsWith(prefix)));
+  const hasMail = ks.some(
+    (k) => k === 'mail' || cfg.mailPrefixes.some((prefix) => k.startsWith(prefix))
+  );
+  const hasTodo = ks.some(
+    (k) => k === 'todo' || cfg.todoPrefixes.some((prefix) => k.startsWith(prefix))
+  );
+  const hasCalendar = ks.some(
+    (k) => k === 'calendar' || cfg.calendarPrefixes.some((prefix) => k.startsWith(prefix))
+  );
   const hasSearch = ks.some((k) => k.startsWith(cfg.searchPrefix));
-  const hasWeather = ks.some((k) => k === 'weather' || cfg.weatherPrefixes.some((prefix) => k.startsWith(prefix)));
+  const hasWeather = ks.some(
+    (k) => k === 'weather' || cfg.weatherPrefixes.some((prefix) => k.startsWith(prefix))
+  );
   if (hasMail && !hasTodo && !hasCalendar && !hasSearch) return cfg.responses.mailOnly;
   if (hasTodo && !hasMail && !hasCalendar && !hasSearch) return cfg.responses.todoOnly;
   if (hasCalendar && !hasMail && !hasTodo && !hasSearch) return cfg.responses.calendarOnly;
-  if (hasWeather && !hasMail && !hasTodo && !hasCalendar && !hasSearch) return cfg.responses.weatherOnly;
-  if (hasSearch && !hasMail && !hasTodo && !hasCalendar && ks.length === 1) return cfg.responses.searchOnly;
+  if (hasWeather && !hasMail && !hasTodo && !hasCalendar && !hasSearch)
+    return cfg.responses.weatherOnly;
+  if (hasSearch && !hasMail && !hasTodo && !hasCalendar && ks.length === 1)
+    return cfg.responses.searchOnly;
   return cfg.responses.default;
 }
 
@@ -698,12 +760,17 @@ type PreparedContextMatch = {
   voiceDomain: VoiceResponseDomain;
 };
 
-const PROACTIVE_CONTEXT_ACTION_RE = /\b(mets?|met|joue|lance|pause|arrete|arrête|reprends?|suivant|precedent|pr[eé]c[eé]dent|ajoute|cree|cr[eé]e|supprime|efface|envoie|r[eé]ponds?|archive|marque|coche|d[eé]cale|modifie|ouvre|ferme|allume|eteins|[eé]teins|baisse|augmente|r[eé]gle)\b/iu;
+const PROACTIVE_CONTEXT_ACTION_RE =
+  /\b(mets?|met|joue|lance|pause|arrete|arrête|reprends?|suivant|precedent|pr[eé]c[eé]dent|ajoute|cree|cr[eé]e|supprime|efface|envoie|r[eé]ponds?|archive|marque|coche|d[eé]cale|modifie|ouvre|ferme|allume|eteins|[eé]teins|baisse|augmente|r[eé]gle)\b/iu;
 
 function inferPreparedContextMatch(text: string): PreparedContextMatch | null {
   const normalized = text.toLocaleLowerCase('fr-FR');
 
-  if (/\b(brief du jour|briefing du jour|brief matinal|brief du matin|resume ma journee|résume ma journée|programme de la journee|programme de la journée)\b/iu.test(normalized)) {
+  if (
+    /\b(brief du jour|briefing du jour|brief matinal|brief du matin|resume ma journee|résume ma journée|programme de la journee|programme de la journée)\b/iu.test(
+      normalized
+    )
+  ) {
     return { domain: 'daily_brief', questionKeys: ['daily_brief.today'], voiceDomain: 'general' };
   }
 
@@ -725,22 +792,42 @@ function inferPreparedContextMatch(text: string): PreparedContextMatch | null {
 
   if (/\b(spotify|musique|titre|morceau|chanson|joue|lecture|appareil)\b/iu.test(normalized)) {
     if (/\b(appareil|device|enceinte|t[eé]l[eé]phone|ordi|ordinateur)\b/iu.test(normalized)) {
-      return { domain: 'spotify', questionKeys: ['spotify.active_device', 'spotify.list_devices'], voiceDomain: 'spotify' };
+      return {
+        domain: 'spotify',
+        questionKeys: ['spotify.active_device', 'spotify.list_devices'],
+        voiceDomain: 'spotify',
+      };
     }
     if (/\b(pause|lecture)\b/iu.test(normalized)) {
-      return { domain: 'spotify', questionKeys: ['spotify.playback_state', 'spotify.now_playing'], voiceDomain: 'spotify' };
+      return {
+        domain: 'spotify',
+        questionKeys: ['spotify.playback_state', 'spotify.now_playing'],
+        voiceDomain: 'spotify',
+      };
     }
     return { domain: 'spotify', questionKeys: ['spotify.now_playing'], voiceDomain: 'spotify' };
   }
 
   if (/\b(mail|mails|email|emails|courriel|boite|boîte|inbox)\b/iu.test(normalized)) {
     if (/\b(dernier|r[eé]cent|resume|résume)\b/iu.test(normalized)) {
-      return { domain: 'mail', questionKeys: ['mail.latest_summary', 'mail.unread_summary'], voiceDomain: 'mail' };
+      return {
+        domain: 'mail',
+        questionKeys: ['mail.latest_summary', 'mail.unread_summary'],
+        voiceDomain: 'mail',
+      };
     }
     if (/\b(important|urgent|r[eé]pondre|repondre)\b/iu.test(normalized)) {
-      return { domain: 'mail', questionKeys: ['mail.important_summary', 'mail.waiting_reply', 'mail.unread_summary'], voiceDomain: 'mail' };
+      return {
+        domain: 'mail',
+        questionKeys: ['mail.important_summary', 'mail.waiting_reply', 'mail.unread_summary'],
+        voiceDomain: 'mail',
+      };
     }
-    return { domain: 'mail', questionKeys: ['mail.unread_summary', 'mail.latest_summary'], voiceDomain: 'mail' };
+    return {
+      domain: 'mail',
+      questionKeys: ['mail.unread_summary', 'mail.latest_summary'],
+      voiceDomain: 'mail',
+    };
   }
 
   if (/\b(t[aâ]che|taches|todo|to-do|liste)\b/iu.test(normalized)) {
@@ -750,49 +837,117 @@ function inferPreparedContextMatch(text: string): PreparedContextMatch | null {
     if (/\b(prochaine|suivante|next)\b/iu.test(normalized)) {
       return { domain: 'todo', questionKeys: ['todo.next', 'todo.today'], voiceDomain: 'todo' };
     }
-    return { domain: 'todo', questionKeys: ['todo.today', 'todo.overdue', 'todo.next'], voiceDomain: 'todo' };
+    return {
+      domain: 'todo',
+      questionKeys: ['todo.today', 'todo.overdue', 'todo.next'],
+      voiceDomain: 'todo',
+    };
   }
 
-  if (/\b(agenda|calendrier|rdv|rendez-vous|rendez vous|planning|libre|dispo|disponible)\b/iu.test(normalized)) {
+  if (
+    /\b(agenda|calendrier|rdv|rendez-vous|rendez vous|planning|libre|dispo|disponible)\b/iu.test(
+      normalized
+    )
+  ) {
     if (/\b(demain)\b/iu.test(normalized)) {
-      return { domain: 'calendar', questionKeys: ['calendar.tomorrow', 'calendar.next_event'], voiceDomain: 'calendar' };
+      return {
+        domain: 'calendar',
+        questionKeys: ['calendar.tomorrow', 'calendar.next_event'],
+        voiceDomain: 'calendar',
+      };
     }
     if (/\b(libre|dispo|disponible)\b/iu.test(normalized)) {
-      return { domain: 'calendar', questionKeys: ['calendar.free_busy', 'calendar.today'], voiceDomain: 'calendar' };
+      return {
+        domain: 'calendar',
+        questionKeys: ['calendar.free_busy', 'calendar.today'],
+        voiceDomain: 'calendar',
+      };
     }
-    return { domain: 'calendar', questionKeys: ['calendar.next_event', 'calendar.today'], voiceDomain: 'calendar' };
+    return {
+      domain: 'calendar',
+      questionKeys: ['calendar.next_event', 'calendar.today'],
+      voiceDomain: 'calendar',
+    };
   }
 
-  if (/\b(m[eé]t[eé]o|temps|temp[eé]rature|degr[eé]|pluie|pleut|humidit[eé]|dehors)\b/iu.test(normalized)) {
+  if (
+    /\b(m[eé]t[eé]o|temps|temp[eé]rature|degr[eé]|pluie|pleut|humidit[eé]|dehors)\b/iu.test(
+      normalized
+    )
+  ) {
     if (isClearlyExternalWeather(normalized)) return null;
     if (/\b(demain)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.tomorrow', 'weather.weekly_trend'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.tomorrow', 'weather.weekly_trend'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(semaine|tendance|prochains jours|prochains jours)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.weekly_trend', 'weather.tomorrow'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.weekly_trend', 'weather.tomorrow'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(max|maxi|maximale|plus chaud)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.today_high', 'weather.today_outfit'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.today_high', 'weather.today_outfit'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(min|mini|minimale|plus froid)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.today_low', 'weather.today_outfit'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.today_low', 'weather.today_outfit'],
+        voiceDomain: 'weather',
+      };
     }
-    if (/\b([01]?\d|2[0-3])\s*h\b|\bce matin\b|\bcet apres-midi\b|\bcet après-midi\b|\bce soir\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.today_by_hour', 'weather.conditions'], voiceDomain: 'weather' };
+    if (
+      /\b([01]?\d|2[0-3])\s*h\b|\bce matin\b|\bcet apres-midi\b|\bcet après-midi\b|\bce soir\b/iu.test(
+        normalized
+      )
+    ) {
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.today_by_hour', 'weather.conditions'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(habill|m'habille|m habille|porter|veste|manteau)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.today_outfit', 'weather.today_high', 'weather.today_low'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.today_outfit', 'weather.today_high', 'weather.today_low'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(humidit[eé]|humide)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.humidity', 'weather.conditions'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.humidity', 'weather.conditions'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(pluie|pleut|pleuvoir|averse)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.precipitation', 'weather.conditions'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.precipitation', 'weather.conditions'],
+        voiceDomain: 'weather',
+      };
     }
     if (/\b(temp[eé]rature|degr[eé]|combien|fait)\b/iu.test(normalized)) {
-      return { domain: 'weather', questionKeys: ['weather.temperature', 'weather.conditions'], voiceDomain: 'weather' };
+      return {
+        domain: 'weather',
+        questionKeys: ['weather.temperature', 'weather.conditions'],
+        voiceDomain: 'weather',
+      };
     }
-    return { domain: 'weather', questionKeys: ['weather.conditions', 'weather.temperature'], voiceDomain: 'weather' };
+    return {
+      domain: 'weather',
+      questionKeys: ['weather.conditions', 'weather.temperature'],
+      voiceDomain: 'weather',
+    };
   }
 
   if (/\b(minuteur|timer|lumi[eè]re|lampe|volet|maison)\b/iu.test(normalized)) {
@@ -820,7 +975,7 @@ function prepareContextAnswerForVoice(domain: ProactiveContextDomain, answerText
 function formatPreparedContextVoiceResponse(
   match: PreparedContextMatch,
   answerText: string,
-  voiceMode: VoiceResponseMode,
+  voiceMode: VoiceResponseMode
 ): string {
   if (match.domain === 'daily_brief') {
     return toSingleParagraphPlainText(sanitizeResponseAttribution(answerText, match.voiceDomain));
@@ -835,40 +990,66 @@ function formatPreparedContextVoiceResponse(
 function isLocalTimeQuery(text: string): boolean {
   const normalized = normalizeIntentText(text);
   if (!normalized) return false;
-  if (/\b(meteo|temps qu il fait|quel temps|temperature|degre|pluie|pleut)\b/u.test(normalized)) return false;
-  return /\b(quelle heure|il est quelle heure|donne moi l heure|tu as l heure|heure actuelle|heure est il|heure est-il)\b/u.test(normalized)
-    || /^l heure[ ?!]*$/u.test(normalized);
+  if (/\b(meteo|temps qu il fait|quel temps|temperature|degre|pluie|pleut)\b/u.test(normalized))
+    return false;
+  return (
+    /\b(quelle heure|il est quelle heure|donne moi l heure|tu as l heure|heure actuelle|heure est il|heure est-il)\b/u.test(
+      normalized
+    ) || /^l heure[ ?!]*$/u.test(normalized)
+  );
 }
 
 function isSalonLightCommand(text: string): boolean {
   const normalized = normalizeIntentText(text);
-  return /\b(allume|eteins|active|desactive|ouvre|ferme|mets|met)\b/u.test(normalized)
-    && /\b(lumiere|lumieres|lampe|lampes)\b/u.test(normalized)
-    && /\b(salon|sejour|living)\b/u.test(normalized);
+  return (
+    /\b(allume|eteins|active|desactive|ouvre|ferme|mets|met)\b/u.test(normalized) &&
+    /\b(lumiere|lumieres|lampe|lampes)\b/u.test(normalized) &&
+    /\b(salon|sejour|living)\b/u.test(normalized)
+  );
 }
 
 function isDailyRecapRequest(text: string): boolean {
   const normalized = normalizeIntentText(text);
-  return /\b(resume|resumes|recap|recapitule|bilan)\b/u.test(normalized)
-    && /\b(ma|notre|la|cette|aujourd hui|aujourdhui)\b/u.test(normalized)
-    && /\b(journee|jour|aujourd hui|aujourdhui)\b/u.test(normalized);
+  return (
+    /\b(resume|resumes|recap|recapitule|bilan)\b/u.test(normalized) &&
+    /\b(ma|notre|la|cette|aujourd hui|aujourdhui)\b/u.test(normalized) &&
+    /\b(journee|jour|aujourd hui|aujourdhui)\b/u.test(normalized)
+  );
 }
 
-function inferSimpleSpotifyControl(text: string, options: { voiceHub?: boolean } = {}): z.infer<typeof spotifyActionSchema> | null {
-  const normalized = normalizeIntentText(text).replace(/[^\p{L}\p{N}\s-]/gu, ' ').replace(/\s+/gu, ' ').trim();
-  const hasMusicNoun = /\b(musique|spotify|piste|titre|morceau|chanson|track|lecture)\b/u.test(normalized);
-  if (options.voiceHub && /^(la |le |titre |piste |morceau |chanson )?(suivante?|next|skip)$/u.test(normalized)) {
+function inferSimpleSpotifyControl(
+  text: string,
+  options: { voiceHub?: boolean } = {}
+): z.infer<typeof spotifyActionSchema> | null {
+  const normalized = normalizeIntentText(text)
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const hasMusicNoun = /\b(musique|spotify|piste|titre|morceau|chanson|track|lecture)\b/u.test(
+    normalized
+  );
+  if (
+    options.voiceHub &&
+    /^(la |le |titre |piste |morceau |chanson )?(suivante?|next|skip)$/u.test(normalized)
+  ) {
     return 'next';
   }
-  if (options.voiceHub && /^(la |le |titre |piste |morceau |chanson )?(precedente?|previous|retour)$/u.test(normalized)) {
+  if (
+    options.voiceHub &&
+    /^(la |le |titre |piste |morceau |chanson )?(precedente?|previous|retour)$/u.test(normalized)
+  ) {
     return 'previous';
   }
-  if (/\b(piste|titre|morceau|chanson|track)\s+(suivante?|d apres|apres)\b/u.test(normalized)
-    || /\b(suivante?|next|skip)\b/u.test(normalized) && hasMusicNoun) {
+  if (
+    /\b(piste|titre|morceau|chanson|track)\s+(suivante?|d apres|apres)\b/u.test(normalized) ||
+    (/\b(suivante?|next|skip)\b/u.test(normalized) && hasMusicNoun)
+  ) {
     return 'next';
   }
-  if (/\b(piste|titre|morceau|chanson|track)\s+(precedente?|d avant|avant)\b/u.test(normalized)
-    || /\b(precedente?|previous|retour)\b/u.test(normalized) && hasMusicNoun) {
+  if (
+    /\b(piste|titre|morceau|chanson|track)\s+(precedente?|d avant|avant)\b/u.test(normalized) ||
+    (/\b(precedente?|previous|retour)\b/u.test(normalized) && hasMusicNoun)
+  ) {
     return 'previous';
   }
   if (/\b(pause|mets en pause|arrete|stop)\b/u.test(normalized) && hasMusicNoun) {
@@ -883,16 +1064,22 @@ function inferSimpleSpotifyControl(text: string, options: { voiceHub?: boolean }
 function hasRealSalonLight(states: EntityStateLike[]): boolean {
   return states.some((state) => {
     if (!state.entity_id.startsWith('light.')) return false;
-    const friendlyName = typeof state.attributes?.friendly_name === 'string' ? state.attributes.friendly_name : '';
+    const friendlyName =
+      typeof state.attributes?.friendly_name === 'string' ? state.attributes.friendly_name : '';
     const haystack = normalizeIntentText(`${state.entity_id} ${friendlyName}`);
-    if (haystack.includes('led ring') || haystack.includes('home assistant voice') || haystack.includes('hub salon')) return false;
+    if (
+      haystack.includes('led ring') ||
+      haystack.includes('home assistant voice') ||
+      haystack.includes('hub salon')
+    )
+      return false;
     return /\b(salon|sejour|living)\b/u.test(haystack);
   });
 }
 
 function findPreparedContextAnswer(
   answers: Array<{ questionKey: string; answerText: string }>,
-  questionKeys: string[],
+  questionKeys: string[]
 ): { questionKey: string; answerText: string } | null {
   for (const key of questionKeys) {
     const found = answers.find((answer) => answer.questionKey === key && answer.answerText.trim());
@@ -908,17 +1095,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     done(null, body);
   });
 
-  app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_req, body, done) => {
-    done(null, body);
-  });
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer' },
+    (_req, body, done) => {
+      done(null, body);
+    }
+  );
 
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
   const pendingMutationRepository = new PendingMutationRepository(db);
   const resultSetRepository = new ConversationResultSetRepository(db);
-  const cultureProfileRepository = new CultureProfileRepository(db, deps.env.CULTURE_FEEDBACK_RETENTION_DAYS);
-  const cultureMemoryService = new CultureMemoryService(cultureProfileRepository, resultSetRepository, deps.env);
+  const cultureProfileRepository = new CultureProfileRepository(
+    db,
+    deps.env.CULTURE_FEEDBACK_RETENTION_DAYS
+  );
+  const cultureMemoryService = new CultureMemoryService(
+    cultureProfileRepository,
+    resultSetRepository,
+    deps.env
+  );
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -926,7 +1124,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const runRetentionCleanup = async () => {
     try {
       const cutoff = Date.now() - RETENTION_MS;
-      const deleted = await threadRepository.purgeThreadsOlderThan(cutoff);
+      const deleted = await threadRepository.purgeThreadsOlderThan(cutoff, { allOwners: true });
       if (deleted > 0) {
         app.log.info({ deleted }, 'conversation_retention_purge');
       }
@@ -935,7 +1133,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
   };
   void runRetentionCleanup();
-  const retentionTimer = setInterval(() => { void runRetentionCleanup(); }, CLEANUP_INTERVAL_MS);
+  const retentionTimer = setInterval(() => {
+    void runRetentionCleanup();
+  }, CLEANUP_INTERVAL_MS);
   retentionTimer.unref();
   app.addHook('onClose', async () => {
     clearInterval(retentionTimer);
@@ -950,6 +1150,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     llmBaseUrl: deps.env.OPENAI_BASE_URL,
     llmModel: deps.env.OPENAI_MODEL_SUMMARY,
     llmTimeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+    llmMaxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_SUMMARY,
   });
 
   const conversationService = new ConversationService(threadRepository, messageRepository, {
@@ -972,10 +1173,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   };
 
   if (
-    process.env.NODE_ENV !== 'test'
-    && deps.env.SEMANTIC_ROUTER_ENABLED
-    && deps.env.SEMANTIC_ROUTER_WARMUP_ON_STARTUP
-    && Boolean(deps.env.OPENAI_API_KEY?.trim())
+    process.env.NODE_ENV !== 'test' &&
+    deps.env.SEMANTIC_ROUTER_ENABLED &&
+    deps.env.SEMANTIC_ROUTER_WARMUP_ON_STARTUP &&
+    Boolean(deps.env.OPENAI_API_KEY?.trim())
   ) {
     void warmupRouteEmbeddings({
       routes: SEMANTIC_ROUTES,
@@ -991,61 +1192,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             failed: summary.failed,
             batchSize: deps.env.SEMANTIC_ROUTER_WARMUP_BATCH_SIZE,
           },
-          'semantic_router_embedding_warmup_done',
+          'semantic_router_embedding_warmup_done'
         );
       })
       .catch((err) => {
         app.log.warn({ err }, 'semantic_router_embedding_warmup_failed');
       });
-  }
-
-  // Warm up dedicated OpenAI-compatible TTS backend (for example Kokoro)
-  // to reduce first-request latency after a fresh container restart.
-  if (process.env.NODE_ENV !== 'test') {
-    const startupTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
-    const hasDedicatedTtsBackend =
-      Boolean(startupTtsCfg)
-      && typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
-      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
-
-    if (startupTtsCfg && hasDedicatedTtsBackend) {
-      setTimeout(() => {
-        const t0 = Date.now();
-        const ctrl = new AbortController();
-        const timeoutId = setTimeout(() => ctrl.abort(), startupTtsCfg.timeoutMs);
-        void fetch(`${startupTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${startupTtsCfg.apiKey}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: startupTtsCfg.model,
-            voice: startupTtsCfg.voice,
-            input: 'warmup',
-            response_format: startupTtsCfg.format,
-            speed: startupTtsCfg.speed,
-            ...(startupTtsCfg.instructions ? { instructions: startupTtsCfg.instructions } : {}),
-          }),
-          signal: ctrl.signal,
-        })
-          .then(async (res) => {
-            if (!res.ok) {
-              const body = await res.text();
-              app.log.warn({ status: res.status, body: body.slice(0, 200) }, 'tts_openai_startup_warmup_failed');
-              return;
-            }
-            await res.arrayBuffer();
-            app.log.info({ elapsed_ms: Date.now() - t0 }, 'tts_openai_startup_warmup_done');
-          })
-          .catch((err) => {
-            app.log.warn({ err }, 'tts_openai_startup_warmup_failed');
-          })
-          .finally(() => {
-            clearTimeout(timeoutId);
-          });
-      }, 1_000);
-    }
   }
 
   // ─── TTS pre-warm cache (populated by ingest, consumed by /v1/tts) ────────
@@ -1054,6 +1206,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   type TtsWarmEntry = { bytes: Buffer; contentType: string; at: number };
   const ttsWarmCache = new Map<string, TtsWarmEntry>();
   const ttsWarmInFlight = new Map<string, Promise<TtsWarmEntry | null>>();
+  app.addHook('onClose', async () => {
+    await Promise.allSettled([...ttsWarmInFlight.values()]);
+    ttsWarmInFlight.clear();
+    ttsWarmCache.clear();
+  });
 
   async function resolveInlineVoiceAudio(text: string): Promise<{
     contentType: string;
@@ -1103,38 +1260,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const work = (async (): Promise<TtsWarmEntry | null> => {
       try {
-        const response = await Promise.race([
-          fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${openAiTtsCfg.apiKey}`,
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: openAiTtsCfg.model,
-              voice: openAiTtsCfg.voice,
-              input: text,
-              response_format: openAiTtsCfg.format,
-              speed: openAiTtsCfg.speed,
-              ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
-            }),
-          }),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error('warm_openai_timeout')), openAiTtsCfg.timeoutMs)),
-        ]);
-        if (!response.ok) return null;
-
-        const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-        const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: false }, true);
-        const openAiBody = response.body;
-        const bytes = openAiFilters.length > 0 && openAiBody
-          ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
-          : Buffer.from(await response.arrayBuffer());
+        const { bytes, contentType } = await synthesizeOpenAiSpeech(openAiTtsCfg, text);
 
         const entry: TtsWarmEntry = { bytes, contentType, at: Date.now() };
         ttsWarmCache.set(key, entry);
         if (ttsWarmCache.size > 40) {
           const now = Date.now();
-          for (const [k, v] of ttsWarmCache) { if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k); }
+          for (const [k, v] of ttsWarmCache) {
+            if (now - v.at > TTS_WARM_TTL_MS) ttsWarmCache.delete(k);
+          }
         }
         app.log.info({ text_chars: text.length }, 'tts_warm_cached');
         return entry;
@@ -1155,15 +1289,39 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   type PendingMutation =
     | {
         agent: 'calendar';
-        action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event' | 'disambiguate_event';
+        action:
+          | 'create_event'
+          | 'delete_event'
+          | 'update_event'
+          | 'remove_from_event'
+          | 'disambiguate_event';
         effect: CapabilityEffect;
         preview: string;
-        payload: { plan?: CalendarAction; disambiguation?: { action: Extract<CalendarAction, { action: 'delete_event' | 'update_event' | 'remove_from_event' }>; candidates: Array<{ index: number; eventId: string; calendarId: string; title: string; start: string }> } };
+        payload: {
+          plan?: CalendarAction;
+          disambiguation?: {
+            action: Extract<
+              CalendarAction,
+              { action: 'delete_event' | 'update_event' | 'remove_from_event' }
+            >;
+            candidates: Array<{
+              index: number;
+              eventId: string;
+              calendarId: string;
+              title: string;
+              start: string;
+            }>;
+          };
+        };
         proposalId: string;
         threadId: string;
         clientChannel?: string;
         expiresAtMs: number;
-        routeKey: 'calendar.create_event' | 'calendar.delete_event' | 'calendar.update_event' | 'calendar.remove_from_event';
+        routeKey:
+          | 'calendar.create_event'
+          | 'calendar.delete_event'
+          | 'calendar.update_event'
+          | 'calendar.remove_from_event';
       }
     | {
         agent: Extract<CapabilityAgent, 'mail' | 'todo'>;
@@ -1195,47 +1353,79 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   type PendingCalendarRouteKey = PendingCalendarMutation['routeKey'];
   const PENDING_MUTATION_TTL_MS = 10 * 60_000;
 
-  const buildCalendarEnv = () => ({
-    GOOGLE_CLIENT_ID:             deps.env.GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET:         deps.env.GOOGLE_CLIENT_SECRET,
-    GOOGLE_REFRESH_TOKEN:         deps.env.GOOGLE_REFRESH_TOKEN,
-    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+  const buildCalendarEnv = () => {
+    const ownerUserId = getCurrentOwnerUserId();
+    const connectionId = getCurrentIntegrationConnectionId();
+    const personalRefreshToken = ownerUserId
+      ? deps.integrations?.resolveRefreshToken(ownerUserId, 'google-calendar', connectionId)
+      : undefined;
+    return {
+    GOOGLE_CLIENT_ID: deps.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: deps.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_REFRESH_TOKEN: ownerUserId ? personalRefreshToken ?? undefined : deps.env.GOOGLE_REFRESH_TOKEN,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
     GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
     GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
-    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
-    OPENAI_API_KEY:               deps.env.OPENAI_API_KEY,
-    OPENAI_BASE_URL:              deps.env.OPENAI_BASE_URL,
-    OPENAI_TIMEOUT_MS:            deps.env.OPENAI_TIMEOUT_MS,
-  });
+    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL:
+      deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
+    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+    };
+  };
 
-  const normalizeConfirmationText = (value: string): string => (
+  const normalizeConfirmationText = (value: string): string =>
     value
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/gu, '')
       .toLowerCase()
       .replace(/[^\p{Letter}\p{Number}\s'-]/gu, ' ')
       .replace(/\s+/gu, ' ')
-      .trim()
-  );
+      .trim();
 
   const isClearCalendarConfirmation = (value: string, proposalId?: string): boolean => {
     const normalized = normalizeConfirmationText(value);
     const normalizedProposal = proposalId ? normalizeConfirmationText(proposalId) : '';
-    return Boolean(normalizedProposal && normalized.includes(normalizedProposal))
-      || /^(confirme|je confirme|valide|cree|ajoute).*(agenda|calendrier|evenement|rdv)/u.test(normalized)
-      || /^(confirme|valide|cree|ajoute) (l'|le |cet |cette )?(evenement|rdv)/u.test(normalized);
+    return (
+      Boolean(normalizedProposal && normalized.includes(normalizedProposal)) ||
+      /^(confirme|je confirme|valide|cree|ajoute).*(agenda|calendrier|evenement|rdv)/u.test(
+        normalized
+      ) ||
+      /^(confirme|valide|cree|ajoute) (l'|le |cet |cette )?(evenement|rdv)/u.test(normalized)
+    );
   };
 
   const isClearMutationConfirmation = (value: string, mutation: PendingMutation): boolean => {
     const normalized = normalizeConfirmationText(value);
     if (isClearCalendarConfirmation(value, mutation.proposalId)) return true;
     if (/^(je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
-    if (/^(oui|ouais|yep|yes|ok|d accord|vas y|c est bon|parfait|allez|go)( merci)?$/u.test(normalized)) return true;
-    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?$/u.test(normalized)) return true;
-    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?\b/u.test(normalized)) return true;
-    if (/^(je )?confirm(?:e|er|r)?\b.*\b(ajoute|cree|valide|execute|lance|supprime|modifie|envoie)\b/u.test(normalized)) return true;
-    if (/^(valide|je valide|tu peux|vas y|c est bon|fais le|lance|execute)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv| ca)?$/u.test(normalized)) return true;
-    if (mutation.agent === 'calendar' && /^(supprime|annule|modifie|retire)( l evenement| le rdv| ca)?$/u.test(normalized)) return true;
+    if (
+      /^(oui|ouais|yep|yes|ok|d accord|vas y|c est bon|parfait|allez|go)( merci)?$/u.test(
+        normalized
+      )
+    )
+      return true;
+    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?$/u.test(normalized))
+      return true;
+    if (/^(oui|ok|d accord|vas y|c est bon) (je )?confirm(?:e|er|r)?\b/u.test(normalized))
+      return true;
+    if (
+      /^(je )?confirm(?:e|er|r)?\b.*\b(ajoute|cree|valide|execute|lance|supprime|modifie|envoie)\b/u.test(
+        normalized
+      )
+    )
+      return true;
+    if (
+      /^(valide|je valide|tu peux|vas y|c est bon|fais le|lance|execute)( l action| la suppression| la modification| l envoi| la tache| l evenement| le rdv| ca)?$/u.test(
+        normalized
+      )
+    )
+      return true;
+    if (
+      mutation.agent === 'calendar' &&
+      /^(supprime|annule|modifie|retire)( l evenement| le rdv| ca)?$/u.test(normalized)
+    )
+      return true;
     return false;
   };
 
@@ -1246,7 +1436,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
   const isClearCalendarRejection = (value: string): boolean => {
     const normalized = normalizeConfirmationText(value);
-    return /^(non|nope|nan|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien|surtout pas)( merci)?$/u.test(normalized);
+    return /^(non|nope|nan|annule|annuler|stop|laisse tomber|pas maintenant|ne fais rien|surtout pas)( merci)?$/u.test(
+      normalized
+    );
   };
 
   const buildMutationProposalText = (mutation: PendingMutation): string => {
@@ -1269,7 +1461,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       agent: input.agent,
       action: input.action,
       effect: input.effect,
-      preview: input.preview ?? `Cette action ${input.agent}.${input.action} modifie des donnees et attend une confirmation.`,
+      preview:
+        input.preview ??
+        `Cette action ${input.agent}.${input.action} modifie des donnees et attend une confirmation.`,
       payload: input.payload,
       proposalId,
       threadId: input.threadId,
@@ -1288,9 +1482,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     routeKey?: string;
   }): Promise<string | null> => {
     const routeCapability = findCapabilityByRouteKey(input.routeKey ?? '');
-    const planned = input.agent === 'mail'
-      ? await planMailAgentAction(input.text, buildMailEnv(), app.log)
-      : await planTodoAgentAction(input.text, buildTodoEnv(), app.log);
+    const planned =
+      input.agent === 'mail'
+        ? await planMailAgentAction(input.text, buildMailEnv(), app.log)
+        : await planTodoAgentAction(input.text, buildTodoEnv(), app.log);
     if ('clarification' in planned) {
       if (routeCapability && requiresCapabilityConfirmation(routeCapability)) {
         const mutation = await createPendingMutationProposal({
@@ -1306,11 +1501,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
       return planned.clarification;
     }
-    const capability = routeCapability ?? findCapabilityByRouteKey(`${input.agent}.${planned.action}`);
+    const capability =
+      routeCapability ?? findCapabilityByRouteKey(`${input.agent}.${planned.action}`);
     if (!capability || !requiresCapabilityConfirmation(capability)) return null;
-    const preview = input.agent === 'mail'
-      ? formatMailActionPreview(planned as MailAction)
-      : formatTodoActionPreview(planned as TodoAction);
+    const preview =
+      input.agent === 'mail'
+        ? formatMailActionPreview(planned as MailAction)
+        : formatTodoActionPreview(planned as TodoAction);
     const mutation = await createPendingMutationProposal({
       threadId: input.threadId,
       clientChannel: input.clientChannel,
@@ -1324,35 +1521,42 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return buildMutationProposalText(mutation);
   };
 
-  const isCalendarMutationRouteKey = (routeKey: string): routeKey is PendingCalendarRouteKey => (
-    routeKey === 'calendar.create_event'
-    || routeKey === 'calendar.delete_event'
-    || routeKey === 'calendar.update_event'
-    || routeKey === 'calendar.remove_from_event'
-  );
+  const isCalendarMutationRouteKey = (routeKey: string): routeKey is PendingCalendarRouteKey =>
+    routeKey === 'calendar.create_event' ||
+    routeKey === 'calendar.delete_event' ||
+    routeKey === 'calendar.update_event' ||
+    routeKey === 'calendar.remove_from_event';
 
-  const routeKeyForCalendarMutation = (action: ExecutableCalendarAction): PendingCalendarRouteKey => {
+  const routeKeyForCalendarMutation = (
+    action: ExecutableCalendarAction
+  ): PendingCalendarRouteKey => {
     switch (action) {
-      case 'delete_event': return 'calendar.delete_event';
-      case 'update_event': return 'calendar.update_event';
-      case 'remove_from_event': return 'calendar.remove_from_event';
+      case 'delete_event':
+        return 'calendar.delete_event';
+      case 'update_event':
+        return 'calendar.update_event';
+      case 'remove_from_event':
+        return 'calendar.remove_from_event';
       case 'create_event':
-      default: return 'calendar.create_event';
+      default:
+        return 'calendar.create_event';
     }
   };
 
-  const effectForCalendarMutation = (action: ExecutableCalendarAction): CapabilityEffect => (
-    action === 'delete_event' ? 'destructive' : 'write'
-  );
+  const effectForCalendarMutation = (action: ExecutableCalendarAction): CapabilityEffect =>
+    action === 'delete_event' ? 'destructive' : 'write';
 
   const createPendingCalendarMutation = async (input: {
     threadId: string;
     clientChannel?: string;
-    plan: Extract<CalendarAction, { action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event' }>;
+    plan: Extract<
+      CalendarAction,
+      { action: 'create_event' | 'delete_event' | 'update_event' | 'remove_from_event' }
+    >;
     preview: string;
   }): Promise<PendingMutation> => {
     const proposalId = `cal${randomUUID().slice(0, 8)}`;
-    return await pendingMutationRepository.create({
+    return (await pendingMutationRepository.create({
       agent: 'calendar',
       action: input.plan.action,
       effect: effectForCalendarMutation(input.plan.action),
@@ -1363,7 +1567,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       threadId: input.threadId,
       clientChannel: input.clientChannel,
       expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
-    }) as PendingMutation;
+    })) as PendingMutation;
   };
 
   const createPendingCultureReset = async (input: {
@@ -1371,21 +1575,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     clientChannel?: string;
     profileId: string;
   }): Promise<PendingMutation> => {
-    return await pendingMutationRepository.create({
+    return (await pendingMutationRepository.create({
       agent: 'culture',
       action: 'reset_profile',
       effect: 'destructive',
-      preview: 'Je vais supprimer les préférences, feedbacks, favoris et notifications Culture de ce profil local.',
+      preview:
+        'Je vais supprimer les préférences, feedbacks, favoris et notifications Culture de ce profil local.',
       payload: { profileId: input.profileId },
       routeKey: 'culture.reset_profile',
       proposalId: `culture${randomUUID().slice(0, 8)}`,
       threadId: input.threadId,
       clientChannel: input.clientChannel,
       expiresAtMs: Date.now() + PENDING_MUTATION_TTL_MS,
-    }) as PendingMutation;
+    })) as PendingMutation;
   };
 
-  const parseCalendarCandidateSelection = (value: string, candidates: Array<{ index: number; start: string }>): number | null => {
+  const parseCalendarCandidateSelection = (
+    value: string,
+    candidates: Array<{ index: number; start: string }>
+  ): number | null => {
     const normalized = normalizeConfirmationText(value);
     if (/\b(premier|premiere|1|numero 1)\b/u.test(normalized)) return 1;
     if (/\b(deuxieme|second|seconde|2|numero 2)\b/u.test(normalized)) return 2;
@@ -1402,12 +1610,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return null;
   };
 
-  const createCalendarMutationFromDisambiguation = async (mutation: PendingMutation, selectionText: string, selection?: { candidateIndex?: number; candidateEventId?: string }): Promise<string | null> => {
-    if (mutation.agent !== 'calendar' || mutation.action !== 'disambiguate_event' || !mutation.payload.disambiguation) return null;
-    const selectedIndex = selection?.candidateIndex ?? parseCalendarCandidateSelection(selectionText, mutation.payload.disambiguation.candidates);
-    const candidate = mutation.payload.disambiguation.candidates.find((item) => (
-      selection?.candidateEventId ? item.eventId === selection.candidateEventId : item.index === selectedIndex
-    ));
+  const createCalendarMutationFromDisambiguation = async (
+    mutation: PendingMutation,
+    selectionText: string,
+    selection?: { candidateIndex?: number; candidateEventId?: string }
+  ): Promise<string | null> => {
+    if (
+      mutation.agent !== 'calendar' ||
+      mutation.action !== 'disambiguate_event' ||
+      !mutation.payload.disambiguation
+    )
+      return null;
+    const selectedIndex =
+      selection?.candidateIndex ??
+      parseCalendarCandidateSelection(selectionText, mutation.payload.disambiguation.candidates);
+    const candidate = mutation.payload.disambiguation.candidates.find((item) =>
+      selection?.candidateEventId
+        ? item.eventId === selection.candidateEventId
+        : item.index === selectedIndex
+    );
     if (!candidate) return mutation.preview;
     await pendingMutationRepository.cancel(mutation.proposalId, 'disambiguation_selected');
     const plan = {
@@ -1425,7 +1646,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return buildMutationProposalText(finalMutation);
   };
 
-  const planPendingCalendarMutation = async (threadId: string, inputText: string, channel?: string): Promise<string> => {
+  const planPendingCalendarMutation = async (
+    threadId: string,
+    inputText: string,
+    channel?: string
+  ): Promise<string> => {
     const plan = await planCalendarAgentAction(inputText, buildCalendarEnv());
     if (!isCalendarMutation(plan)) {
       return executeCalendarAgentAction(plan, buildCalendarEnv());
@@ -1458,18 +1683,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       preview = prepared.proposal;
     }
 
-    const mutation = await createPendingCalendarMutation({ threadId, clientChannel: channel, plan: preparedPlan, preview });
+    const mutation = await createPendingCalendarMutation({
+      threadId,
+      clientChannel: channel,
+      plan: preparedPlan,
+      preview,
+    });
     return buildMutationProposalText(mutation);
   };
 
   function recordPerf(key: string, elapsedMs: number): void {
     let arr = perfSamples.get(key);
-    if (!arr) { arr = []; perfSamples.set(key, arr); }
+    if (!arr) {
+      arr = [];
+      perfSamples.set(key, arr);
+    }
     arr.push(elapsedMs);
     if (arr.length > PERF_MAX) arr.shift();
   }
 
-  function computePercentiles(key: string): { count: number; avg: number; p50: number; p95: number } {
+  function computePercentiles(key: string): {
+    count: number;
+    avg: number;
+    p50: number;
+    p95: number;
+  } {
     const arr = perfSamples.get(key) ?? [];
     if (arr.length === 0) return { count: 0, avg: 0, p50: 0, p95: 0 };
     const sorted = [...arr].sort((a, b) => a - b);
@@ -1479,26 +1717,69 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     return { count: sorted.length, avg, p50, p95 };
   }
 
-  const buildMailEnv = () => ({
-    mailAccounts: buildMailAccounts(deps.env),
-    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+  const buildMailEnv = () => {
+    const ownerUserId = getCurrentOwnerUserId();
+    const connectionId = getCurrentIntegrationConnectionId();
+    const token = ownerUserId ? deps.integrations?.resolveRefreshToken(ownerUserId, 'gmail', connectionId) : undefined;
+    return {
+    mailAccounts: ownerUserId
+      ? token && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET ? [{
+          label: 'gmail', provider: 'gmail' as const, clientId: deps.env.GOOGLE_CLIENT_ID,
+          clientSecret: deps.env.GOOGLE_CLIENT_SECRET, refreshToken: token,
+          credentialKey: `gmail:${ownerUserId}:${connectionId ?? 'personal'}`,
+          onRefreshToken: async (next: string) => deps.integrations?.rotateRefreshToken(ownerUserId, 'gmail', next, connectionId),
+        }] : []
+      : buildMailAccounts(deps.env),
+    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
     OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
     OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
     OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
     OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-  });
+    };
+  };
 
-  const buildTodoEnv = () => ({
-    MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
-    MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
-    MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
-    MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
-    OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-    OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
-    OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
-    OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
-    OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
-  });
+  const buildTodoEnv = () => {
+    const ownerUserId = getCurrentOwnerUserId();
+    const connectionId = getCurrentIntegrationConnectionId();
+    const token = ownerUserId ? deps.integrations?.resolveRefreshToken(ownerUserId, 'microsoft-todo', connectionId) : undefined;
+    return {
+    MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
+    MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
+    MICROSOFT_REFRESH_TOKEN: ownerUserId ? token ?? undefined : deps.env.MICROSOFT_REFRESH_TOKEN,
+    MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    credentialKey: ownerUserId ? `todo:${ownerUserId}:${connectionId ?? 'personal'}` : undefined,
+    onRefreshToken: ownerUserId
+      ? async (next: string) => deps.integrations?.rotateRefreshToken(ownerUserId, 'microsoft-todo', next, connectionId)
+      : undefined,
+    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+    };
+  };
+
+  const personalSpotifyClients = new Map<string, { token: string; client: SpotifyWebApiClient }>();
+  const spotifyWebApi = () => {
+    const ownerUserId = getCurrentOwnerUserId();
+    if (!ownerUserId) return deps.spotifyWebApi;
+    const connectionId = getCurrentIntegrationConnectionId();
+    const token = deps.integrations?.resolveRefreshToken(ownerUserId, 'spotify', connectionId);
+    if (!token) {
+      return new SpotifyWebApiClient({ ...deps.env, SPOTIFY_WEBAPI_REFRESH_TOKEN: undefined }, app.log,
+        { persistTokenFile: false });
+    }
+    const cacheKey = `${ownerUserId}:${connectionId ?? 'personal'}`;
+    const existing = personalSpotifyClients.get(cacheKey);
+    if (existing?.token === token) return existing.client;
+    const client = new SpotifyWebApiClient({ ...deps.env, SPOTIFY_WEBAPI_REFRESH_TOKEN: token }, app.log, {
+      refreshToken: token,
+      persistTokenFile: false,
+      onRefreshToken: async (next) => deps.integrations?.rotateRefreshToken(ownerUserId, 'spotify', next, connectionId),
+    });
+    personalSpotifyClients.set(cacheKey, { token, client });
+    return client;
+  };
 
   const executePendingMutation = async (mutation: PendingMutation): Promise<string> => {
     if (mutation.agent === 'culture') {
@@ -1512,23 +1793,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (mutation.agent === 'mail') {
       const plan = mutation.payload.plan as MailAction | undefined;
       if (!plan) throw new Error('pending_mail_missing_plan');
-      return executeMailAgentAction(plan, buildMailEnv(), { userText: mutation.payload.text, log: app.log });
+      return executeMailAgentAction(plan, buildMailEnv(), {
+        userText: mutation.payload.text,
+        log: app.log,
+      });
     }
     if (mutation.agent === 'todo') {
       const plan = mutation.payload.plan as TodoAction | undefined;
       if (!plan) throw new Error('pending_todo_missing_plan');
-      return executeTodoAgentAction(plan, buildTodoEnv(), { userText: mutation.payload.text, log: app.log });
+      return executeTodoAgentAction(plan, buildTodoEnv(), {
+        userText: mutation.payload.text,
+        log: app.log,
+      });
     }
     throw new Error('pending_mutation_unknown_agent');
   };
 
-  const pendingMutationBodySchema = z.object({
-    threadId: z.string().trim().min(1),
-    clientChannel: z.string().trim().min(1).optional(),
-    user_id: trustedCultureUserIdSchema.optional(),
-    candidateIndex: z.coerce.number().int().min(1).max(20).optional(),
-    candidateEventId: z.string().trim().min(1).optional(),
-  }).strict();
+  const pendingMutationBodySchema = z
+    .object({
+      threadId: z.string().trim().min(1),
+      clientChannel: z.string().trim().min(1).optional(),
+      user_id: trustedCultureUserIdSchema.optional(),
+      candidateIndex: z.coerce.number().int().min(1).max(20).optional(),
+      candidateEventId: z.string().trim().min(1).optional(),
+    })
+    .strict();
 
   const pendingMutationDto = (mutation: PendingMutationRecord | PendingMutation) => ({
     proposalId: mutation.proposalId,
@@ -1546,34 +1835,51 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     payload: mutation.payload,
   });
 
-  const routeClientChannel = (req: { headers: Record<string, unknown> }, bodyChannel?: string): string | undefined => (
-    normalizeClientChannel(bodyChannel) ?? normalizeClientChannel(req.headers['x-client-channel'])
-  );
+  const routeClientChannel = (
+    req: { headers: Record<string, unknown> },
+    bodyChannel?: string
+  ): string | undefined =>
+    normalizeClientChannel(bodyChannel) ?? normalizeClientChannel(req.headers['x-client-channel']);
 
   app.get('/v1/pending-mutations', async (req, reply) => {
     const query = z.object({ threadId: z.string().trim().min(1) }).safeParse(req.query);
-    if (!query.success) return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
+    if (!query.success)
+      return reply.code(400).send({ error: 'invalid_query', issues: query.error.issues });
     await pendingMutationRepository.expirePending();
     const items = await pendingMutationRepository.listPendingByThread(query.data.threadId);
-    return reply.code(200).send({ status: 'ok', items: items.map(pendingMutationDto) });
+    const authorizedItems = items.filter((item) =>
+      hasRequestPermission(req, permissionForCapabilityAgent(item.agent))
+    );
+    return reply.code(200).send({ status: 'ok', items: authorizedItems.map(pendingMutationDto) });
   });
 
   app.post('/v1/pending-mutations/:proposalId/confirm', async (req, reply) => {
     const params = z.object({ proposalId: z.string().trim().min(1) }).safeParse(req.params);
     const body = pendingMutationBodySchema.safeParse(req.body);
-    if (!params.success) return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
-    if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+    if (!params.success)
+      return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
+    if (!body.success)
+      return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     await pendingMutationRepository.expirePending();
-    const mutation = await pendingMutationRepository.findByProposalId(params.data.proposalId) as PendingMutation | null;
+    const mutation = (await pendingMutationRepository.findByProposalId(
+      params.data.proposalId
+    )) as PendingMutation | null;
     const channel = routeClientChannel(req, body.data.clientChannel);
     if (!mutation) return reply.code(404).send({ error: 'pending_mutation_not_found' });
-    if (mutation.threadId !== body.data.threadId || (mutation.clientChannel && mutation.clientChannel !== channel)) {
+    if (
+      mutation.threadId !== body.data.threadId ||
+      (mutation.clientChannel && mutation.clientChannel !== channel)
+    ) {
       return reply.code(409).send({ error: 'pending_mutation_context_mismatch' });
     }
+    if (!hasRequestPermission(req, permissionForCapabilityAgent(mutation.agent))) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
     if (mutation.agent === 'culture') {
-      const requestingProfileId = resolveTrustedCultureProfileId(
+      const requestingProfileId = resolveRequestCultureProfileId(
+        req,
         body.data.user_id,
-        deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default',
+        deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default'
       );
       if (mutation.payload.profileId !== requestingProfileId) {
         return reply.code(409).send({ error: 'pending_mutation_profile_mismatch' });
@@ -1586,22 +1892,36 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
       const next = await pendingMutationRepository.findActiveByThread(mutation.threadId);
       if (!responseText || !next || next.proposalId === mutation.proposalId) {
-        return reply.code(400).send({ error: 'calendar_candidate_required', item: pendingMutationDto(mutation) });
+        return reply
+          .code(400)
+          .send({ error: 'calendar_candidate_required', item: pendingMutationDto(mutation) });
       }
-      return reply.code(200).send({ status: 'pending', responseText, item: pendingMutationDto(next) });
+      return reply
+        .code(200)
+        .send({ status: 'pending', responseText, item: pendingMutationDto(next) });
     }
     const started = await pendingMutationRepository.tryStartExecution(mutation.proposalId);
-    if (started === 'executed') return reply.code(200).send({ status: 'executed', item: pendingMutationDto(mutation) });
-    if (started === 'executing') return reply.code(409).send({ error: 'pending_mutation_executing' });
-    if (started !== 'started') return reply.code(409).send({ error: 'pending_mutation_not_pending', status: started });
+    if (started === 'executed')
+      return reply.code(200).send({ status: 'executed', item: pendingMutationDto(mutation) });
+    if (started === 'executing')
+      return reply.code(409).send({ error: 'pending_mutation_executing' });
+    if (started !== 'started')
+      return reply.code(409).send({ error: 'pending_mutation_not_pending', status: started });
     try {
       const responseText = await executePendingMutation(mutation);
       await pendingMutationRepository.markExecuted(mutation.proposalId);
       const updated = await pendingMutationRepository.findByProposalId(mutation.proposalId);
-      return reply.code(200).send({ status: 'executed', responseText, item: updated ? pendingMutationDto(updated) : pendingMutationDto(mutation) });
+      return reply.code(200).send({
+        status: 'executed',
+        responseText,
+        item: updated ? pendingMutationDto(updated) : pendingMutationDto(mutation),
+      });
     } catch (err) {
       await pendingMutationRepository.markFailed(mutation.proposalId, 'execution_failed');
-      app.log.warn({ proposalId: mutation.proposalId, agent: mutation.agent, action: mutation.action, err }, 'pending_mutation_rest_execute_failed');
+      app.log.warn(
+        { proposalId: mutation.proposalId, agent: mutation.agent, action: mutation.action, err },
+        'pending_mutation_rest_execute_failed'
+      );
       return reply.code(500).send({ error: 'pending_mutation_execute_failed' });
     }
   });
@@ -1609,16 +1929,27 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   app.post('/v1/pending-mutations/:proposalId/cancel', async (req, reply) => {
     const params = z.object({ proposalId: z.string().trim().min(1) }).safeParse(req.params);
     const body = pendingMutationBodySchema.safeParse(req.body);
-    if (!params.success) return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
-    if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
+    if (!params.success)
+      return reply.code(400).send({ error: 'invalid_params', issues: params.error.issues });
+    if (!body.success)
+      return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     const mutation = await pendingMutationRepository.findByProposalId(params.data.proposalId);
     const channel = routeClientChannel(req, body.data.clientChannel);
     if (!mutation) return reply.code(404).send({ error: 'pending_mutation_not_found' });
-    if (mutation.threadId !== body.data.threadId || (mutation.clientChannel && mutation.clientChannel !== channel)) {
+    if (
+      mutation.threadId !== body.data.threadId ||
+      (mutation.clientChannel && mutation.clientChannel !== channel)
+    ) {
       return reply.code(409).send({ error: 'pending_mutation_context_mismatch' });
     }
+    if (!hasRequestPermission(req, permissionForCapabilityAgent(mutation.agent))) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
     const cancelled = await pendingMutationRepository.cancel(params.data.proposalId, 'api_cancel');
-    return reply.code(200).send({ status: cancelled?.status ?? 'cancelled', item: cancelled ? pendingMutationDto(cancelled) : pendingMutationDto(mutation) });
+    return reply.code(200).send({
+      status: cancelled?.status ?? 'cancelled',
+      item: cancelled ? pendingMutationDto(cancelled) : pendingMutationDto(mutation),
+    });
   });
 
   app.post('/v1/ingest', async (req, reply) => {
@@ -1626,6 +1957,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
     }
+    setCurrentIntegrationConnectionId(parsed.data.integrationConnectionId);
 
     const rawText = parsed.data.text ?? '';
     const normalizedRawText = normalizeIntentText(rawText);
@@ -1635,19 +1967,32 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
     const clientChannel = clientContextChannel ?? headerChannel;
-    const supportsInlineVoiceAudio = parsed.data.clientContext?.['supportsInlineVoiceAudio'] === true
-      || parsed.data.clientContext?.['supportsInlineVoiceAudio'] === 'true';
+    const supportsInlineVoiceAudio =
+      parsed.data.clientContext?.['supportsInlineVoiceAudio'] === true ||
+      parsed.data.clientContext?.['supportsInlineVoiceAudio'] === 'true';
     const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
     const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
-    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
+    let sendForbiddenStream: (() => void) | undefined;
+    const denyUnless = (permission: Parameters<typeof hasRequestPermission>[1]): boolean => {
+      if (hasRequestPermission(req, permission)) return false;
+      app.log.warn({ requestId, permission }, 'ingest_permission_denied');
+      if (sendForbiddenStream) sendForbiddenStream();
+      else void reply.code(403).send({ error: 'forbidden' });
+      return true;
+    };
+    const voiceTurnId =
+      typeof req.headers['x-voice-turn-id'] === 'string'
+        ? req.headers['x-voice-turn-id'].trim()
+        : '';
     const voiceEnabled = isVoiceRequest({ voiceTurnId, clientChannel });
     const voiceMode = resolveVoiceResponseMode({
       text,
-      clientContext: (parsed.data.clientContext as Record<string, unknown> | undefined),
+      clientContext: parsed.data.clientContext as Record<string, unknown> | undefined,
     });
-    const correlationId = typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
+    const correlationId =
+      typeof parsed.data.correlation_id === 'string' ? parsed.data.correlation_id.trim() : '';
 
     // Vérifier si une fenêtre de conversation active existe (10s post-réponse)
     // Si oui, réutiliser le threadId actif pour maintenir le contexte
@@ -1657,7 +2002,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       : null;
     const effectiveThreadId = detectEffectiveThreadId(threadId, activeThread);
     const defaultCultureProfileId = deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default';
-    const profileId = resolveTrustedCultureProfileId(parsed.data.user_id, defaultCultureProfileId);
+    const profileId = resolveRequestCultureProfileId(
+      req,
+      parsed.data.user_id,
+      defaultCultureProfileId
+    );
     if (activeThread) {
       app.log.info(
         {
@@ -1670,39 +2019,70 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const preflightResultSet = resultSetRepository.findActive(effectiveThreadId);
-    const existingCultureResultSet = preflightResultSet?.sourceAgent === 'culture'
-      && resultSetBelongsToCultureProfile(preflightResultSet, profileId, defaultCultureProfileId);
+    const existingCultureResultSet =
+      preflightResultSet?.sourceAgent === 'culture' &&
+      resultSetBelongsToCultureProfile(preflightResultSet, profileId, defaultCultureProfileId);
     const resultSetReference = isConversationResultSetReferenceText(normalizedRawText);
-    const resultSetRefinement = existingCultureResultSet
-      && /\b(seulement|vo|vf|vostfr|gratuit|budget|moins de|apres|demain|meme style)\b/u.test(normalizedRawText);
+    const resultSetRefinement =
+      existingCultureResultSet &&
+      /\b(seulement|vo|vf|vostfr|gratuit|budget|moins de|apres|demain|meme style)\b/u.test(
+        normalizedRawText
+      );
     const resultSetFollowup = resultSetReference || resultSetRefinement;
     await pendingMutationRepository.expirePending();
-    const foundPreflightPendingMutation = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
-    const preflightPendingMutation = foundPreflightPendingMutation?.agent === 'culture'
-      && foundPreflightPendingMutation.payload.profileId !== profileId
-      ? null
-      : foundPreflightPendingMutation;
+    const foundPreflightPendingMutation = (await pendingMutationRepository.findActiveByThread(
+      effectiveThreadId
+    )) as PendingMutation | null;
+    const preflightPendingMutation =
+      foundPreflightPendingMutation?.agent === 'culture' &&
+      foundPreflightPendingMutation.payload.profileId !== profileId
+        ? null
+        : foundPreflightPendingMutation;
     const pendingCultureConfirmation = preflightPendingMutation?.agent === 'culture';
     const preflightCultureMemoryCommand = inferCultureMemoryCommand(rawText);
-    const memoryCommandNeedsResultSet = preflightCultureMemoryCommand
-      && ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(preflightCultureMemoryCommand.type);
+    const memoryCommandNeedsResultSet =
+      preflightCultureMemoryCommand &&
+      ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(
+        preflightCultureMemoryCommand.type
+      );
     const routableCultureMemoryCommand = Boolean(
-      preflightCultureMemoryCommand && (!memoryCommandNeedsResultSet || existingCultureResultSet),
+      preflightCultureMemoryCommand && (!memoryCommandNeedsResultSet || existingCultureResultSet)
     );
-    const rawCultureRequest = parsed.data.domain === 'culture'
-      || Boolean(inferCultureRequest(rawText))
-      || routableCultureMemoryCommand
-      || resultSetFollowup;
-    if ((!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) && !rawCultureRequest && !pendingCultureConfirmation) {
+    const rawCultureRequest =
+      parsed.data.domain === 'culture' ||
+      Boolean(inferCultureRequest(rawText)) ||
+      routableCultureMemoryCommand ||
+      resultSetFollowup;
+    if (
+      (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) &&
+      !rawCultureRequest &&
+      !pendingCultureConfirmation
+    ) {
       return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
-    await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+    try {
+      await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'conversation_thread_not_found') {
+        return reply.code(404).send({ error: 'thread_not_found' });
+      }
+      throw error;
+    }
 
     const activePendingMutation = preflightPendingMutation;
-    const pendingChannelMatches = !activePendingMutation?.clientChannel || activePendingMutation.clientChannel === clientChannel;
-    const mentionsKnownProposal = Boolean(activePendingMutation && normalizeConfirmationText(text).includes(normalizeConfirmationText(activePendingMutation.proposalId)));
-    const mentionsWrongProposal = /\b(?:cal|mail|todo|culture)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) && !mentionsKnownProposal;
+    const pendingChannelMatches =
+      !activePendingMutation?.clientChannel ||
+      activePendingMutation.clientChannel === clientChannel;
+    const mentionsKnownProposal = Boolean(
+      activePendingMutation &&
+      normalizeConfirmationText(text).includes(
+        normalizeConfirmationText(activePendingMutation.proposalId)
+      )
+    );
+    const mentionsWrongProposal =
+      /\b(?:cal|mail|todo|culture)[a-f0-9]{8}\b/iu.test(normalizeConfirmationText(text)) &&
+      !mentionsKnownProposal;
     if (activePendingMutation && text && pendingChannelMatches && mentionsWrongProposal) {
       return reply.code(409).send({
         error: 'proposal_id_mismatch',
@@ -1711,8 +2091,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
-    if (activePendingMutation && text && pendingChannelMatches && activePendingMutation.agent === 'calendar' && activePendingMutation.action === 'disambiguate_event') {
-      const disambiguationText = await createCalendarMutationFromDisambiguation(activePendingMutation, text);
+    if (
+      activePendingMutation &&
+      text &&
+      pendingChannelMatches &&
+      activePendingMutation.agent === 'calendar' &&
+      activePendingMutation.action === 'disambiguate_event'
+    ) {
+      if (denyUnless('calendar')) return reply;
+      const disambiguationText = await createCalendarMutationFromDisambiguation(
+        activePendingMutation,
+        text
+      );
       if (disambiguationText) {
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: disambiguationText, domain: 'calendar', mode: voiceMode })
@@ -1727,7 +2117,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             kind: 'calendar',
             source: 'pending_mutation',
             routeKey: finalProposal?.routeKey ?? activePendingMutation.routeKey,
-            semanticDecision: finalProposal?.proposalId === activePendingMutation.proposalId ? 'clarification_required' : 'confirmation_required',
+            semanticDecision:
+              finalProposal?.proposalId === activePendingMutation.proposalId
+                ? 'clarification_required'
+                : 'confirmation_required',
             ...(finalProposal ? { proposalId: finalProposal.proposalId } : {}),
           },
         };
@@ -1735,19 +2128,41 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    if (activePendingMutation && text && pendingChannelMatches && activePendingMutation.action !== 'disambiguate_event' && (isClearMutationConfirmation(text, activePendingMutation) || isClearCalendarRejection(text))) {
+    if (
+      activePendingMutation &&
+      text &&
+      pendingChannelMatches &&
+      activePendingMutation.action !== 'disambiguate_event' &&
+      (isClearMutationConfirmation(text, activePendingMutation) || isClearCalendarRejection(text))
+    ) {
+      if (denyUnless(permissionForCapabilityAgent(activePendingMutation.agent))) return reply;
       const confirmed = isClearMutationConfirmation(text, activePendingMutation);
       let mutationText = 'Ok, je n execute pas cette action.';
       if (confirmed) {
-        const started = await pendingMutationRepository.tryStartExecution(activePendingMutation.proposalId);
+        const started = await pendingMutationRepository.tryStartExecution(
+          activePendingMutation.proposalId
+        );
         if (started === 'started') {
           try {
             mutationText = await executePendingMutation(activePendingMutation);
             await pendingMutationRepository.markExecuted(activePendingMutation.proposalId);
           } catch (err) {
-            mutationText = 'La mutation a echoue pendant l execution. Elle est conservee en etat failed.';
-            await pendingMutationRepository.markFailed(activePendingMutation.proposalId, 'execution_failed');
-            app.log.warn({ threadId: effectiveThreadId, requestId, agent: activePendingMutation.agent, action: activePendingMutation.action, err }, 'pending_mutation_execute_failed');
+            mutationText =
+              'La mutation a echoue pendant l execution. Elle est conservee en etat failed.';
+            await pendingMutationRepository.markFailed(
+              activePendingMutation.proposalId,
+              'execution_failed'
+            );
+            app.log.warn(
+              {
+                threadId: effectiveThreadId,
+                requestId,
+                agent: activePendingMutation.agent,
+                action: activePendingMutation.action,
+                err,
+              },
+              'pending_mutation_execute_failed'
+            );
           }
         } else if (started === 'executed') {
           mutationText = 'Cette proposition a deja ete executee.';
@@ -1759,7 +2174,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       } else {
         await pendingMutationRepository.cancel(activePendingMutation.proposalId, 'voice_rejected');
       }
-      const responseDomain = activePendingMutation.agent === 'culture' ? 'general' : activePendingMutation.agent;
+      const responseDomain =
+        activePendingMutation.agent === 'culture' ? 'general' : activePendingMutation.agent;
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: mutationText, domain: responseDomain, mode: voiceMode })
         : mutationText;
@@ -1782,14 +2198,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
       app.log.info(
         { threadId: effectiveThreadId, requestId, confirmed, elapsed_ms: Date.now() - t0 },
-        'pending_mutation_confirmation_resolved',
+        'pending_mutation_confirmation_resolved'
       );
       return reply.code(200).send(validated.data);
     }
-    if (activePendingMutation && text && pendingChannelMatches && isLikelyMutationConfirmationAttempt(text)) {
-      const clarification = activePendingMutation.action === 'disambiguate_event'
-        ? 'Je dois d abord savoir quel evenement choisir. Dis par exemple "le premier" ou "celui de 18h".'
-        : 'Je n ai pas bien compris la confirmation. Dis simplement "je confirme", ou utilise le bouton de confirmation.';
+    if (
+      activePendingMutation &&
+      text &&
+      pendingChannelMatches &&
+      isLikelyMutationConfirmationAttempt(text)
+    ) {
+      const clarification =
+        activePendingMutation.action === 'disambiguate_event'
+          ? 'Je dois d abord savoir quel evenement choisir. Dis par exemple "le premier" ou "celui de 18h".'
+          : 'Je n ai pas bien compris la confirmation. Dis simplement "je confirme", ou utilise le bouton de confirmation.';
       await conversationService.persistMessages(effectiveThreadId, text, clarification);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
@@ -1807,35 +2229,57 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (activePendingMutation && text && pendingChannelMatches) {
       await pendingMutationRepository.cancelActiveByThread(effectiveThreadId, 'new_intent');
       app.log.info(
-        { threadId: effectiveThreadId, requestId, proposalId: activePendingMutation.proposalId, agent: activePendingMutation.agent },
-        'pending_mutation_cancelled_by_new_intent',
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          proposalId: activePendingMutation.proposalId,
+          agent: activePendingMutation.agent,
+        },
+        'pending_mutation_cancelled_by_new_intent'
       );
     }
 
     // Guard against truncated voice captures (e.g. "Démar...") that can trigger
     // wrong routing/action. Ask for a clean reformulation instead.
     if (isVoiceHubChannel && isLikelyTruncatedVoiceUtterance(text)) {
-      const clarification = 'Je n\'ai pas bien entendu la commande. Peux-tu reformuler en une phrase complète ?';
+      const clarification =
+        "Je n'ai pas bien entendu la commande. Peux-tu reformuler en une phrase complète ?";
       await conversationService.persistMessages(effectiveThreadId, text, clarification);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       app.log.info(
-        { threadId: effectiveThreadId, requestId, text_len: text.length, client_channel: clientChannel },
-        'ingest_voice_hub_truncated_guard',
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          text_len: text.length,
+          client_channel: clientChannel,
+        },
+        'ingest_voice_hub_truncated_guard'
       );
       return reply.code(200).send({ threadId: effectiveThreadId, responseText: clarification });
     }
 
     const preparedContextMatch = inferPreparedContextMatch(assistantInputText);
-    if (preparedContextMatch && deps.contextCache) {
+    const personalContextDomain = preparedContextMatch
+      && ['spotify', 'mail', 'todo', 'calendar'].includes(preparedContextMatch.domain);
+    if (preparedContextMatch && deps.contextCache && !(getCurrentOwnerUserId() && personalContextDomain)) {
+      if (denyUnless(permissionForRouteKey(`${preparedContextMatch.domain}.read`))) return reply;
       try {
         let contextResult = await deps.contextCache.get(preparedContextMatch.domain);
         let preparedAnswer = contextResult
-          ? findPreparedContextAnswer(contextResult.snapshot.preparedAnswers, preparedContextMatch.questionKeys)
+          ? findPreparedContextAnswer(
+              contextResult.snapshot.preparedAnswers,
+              preparedContextMatch.questionKeys
+            )
           : null;
         if (!contextResult || !preparedAnswer || contextResult.stale) {
-          const refreshedContextResult = await deps.contextCache.get(preparedContextMatch.domain, { force: true });
+          const refreshedContextResult = await deps.contextCache.get(preparedContextMatch.domain, {
+            force: true,
+          });
           const refreshedPreparedAnswer = refreshedContextResult
-            ? findPreparedContextAnswer(refreshedContextResult.snapshot.preparedAnswers, preparedContextMatch.questionKeys)
+            ? findPreparedContextAnswer(
+                refreshedContextResult.snapshot.preparedAnswers,
+                preparedContextMatch.questionKeys
+              )
             : null;
           if (refreshedContextResult && refreshedPreparedAnswer) {
             contextResult = refreshedContextResult;
@@ -1843,7 +2287,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           }
         }
         if (contextResult && preparedAnswer) {
-          const answerText = prepareContextAnswerForVoice(preparedContextMatch.domain, preparedAnswer.answerText);
+          const answerText = prepareContextAnswerForVoice(
+            preparedContextMatch.domain,
+            preparedAnswer.answerText
+          );
           const responseText = voiceEnabled
             ? formatPreparedContextVoiceResponse(preparedContextMatch, answerText, voiceMode)
             : answerText;
@@ -1878,14 +2325,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               questionKey: preparedAnswer.questionKey,
               elapsed_ms: Date.now() - t0,
             },
-            'ingest_prepared_context_cache_hit',
+            'ingest_prepared_context_cache_hit'
           );
           return reply.code(200).send(validated.data);
         }
       } catch (err) {
         app.log.warn(
           { threadId: effectiveThreadId, requestId, domain: preparedContextMatch.domain, err },
-          'ingest_prepared_context_cache_failed',
+          'ingest_prepared_context_cache_failed'
         );
       }
       const unavailableText = buildPreparedContextUnavailableResponse(preparedContextMatch.domain);
@@ -1922,15 +2369,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             domain: preparedContextMatch.domain,
             elapsed_ms: Date.now() - t0,
           },
-          'ingest_prepared_context_unavailable',
+          'ingest_prepared_context_unavailable'
         );
         return reply.code(200).send(validated.data);
       }
     }
 
     if (voiceEnabled && isLastMailSummaryRequest(text)) {
+      if (denyUnless('mail')) return reply;
       const mailState = voiceThreadState.get(effectiveThreadId);
-      const hasStructuredMailState = Array.isArray(mailState?.lastMailTop) && mailState!.lastMailTop!.length > 0;
+      const hasStructuredMailState =
+        Array.isArray(mailState?.lastMailTop) && mailState!.lastMailTop!.length > 0;
       const followup = hasStructuredMailState ? buildLastMailSummaryFromState(mailState) : null;
       if (followup) {
         await conversationService.persistMessages(effectiveThreadId, text, followup);
@@ -1944,8 +2393,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           return reply.code(500).send({ error: 'response_validation_failed' });
         }
         app.log.info(
-          { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined },
-          'ingest_complete',
+          {
+            threadId: effectiveThreadId,
+            requestId,
+            elapsed_ms: Date.now() - t0,
+            voice_turn_id: voiceTurnId || undefined,
+          },
+          'ingest_complete'
         );
         return reply.code(200).send(followupPayload);
       }
@@ -1957,21 +2411,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           has_state: Boolean(mailState),
           has_top: Boolean(mailState?.lastMailTop && mailState.lastMailTop.length > 0),
         },
-        'mail_followup_requires_refresh',
+        'mail_followup_requires_refresh'
       );
 
       try {
         const refreshedMailText = await callMailAgent(
           'Détaille mes emails non lus: donne le top 5 avec expéditeur et objet, de façon concise.',
-          {
-            mailAccounts: buildMailAccounts(deps.env),
-            OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-            OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-            OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-            OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-            OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-          },
-          app.log,
+          buildMailEnv(),
+          app.log
         );
 
         const parsedMail = extractMailStateFromReply(refreshedMailText);
@@ -1998,18 +2445,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           return reply.code(500).send({ error: 'response_validation_failed' });
         }
         app.log.info(
-          { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined },
-          'ingest_complete',
+          {
+            threadId: effectiveThreadId,
+            requestId,
+            elapsed_ms: Date.now() - t0,
+            voice_turn_id: voiceTurnId || undefined,
+          },
+          'ingest_complete'
         );
         return reply.code(200).send(followupPayload);
       } catch (err) {
-        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'mail_followup_refresh_failed');
+        app.log.warn(
+          { threadId: effectiveThreadId, requestId, err },
+          'mail_followup_refresh_failed'
+        );
       }
     }
 
-    const toDeterministicHaFailureMessage = (): string => (
-      'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).'
-    );
+    const toDeterministicHaFailureMessage = (): string =>
+      'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).';
 
     const inferredCulture = inferCultureRequest(assistantInputText);
     const cultureMemoryCommand = inferCultureMemoryCommand(assistantInputText);
@@ -2017,44 +2471,61 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const activeResultSetBelongsToProfile = resultSetBelongsToCultureProfile(
       foundActiveResultSet,
       profileId,
-      defaultCultureProfileId,
+      defaultCultureProfileId
     );
     const activeResultSet = activeResultSetBelongsToProfile ? foundActiveResultSet : null;
-    const referenceResolution = !foundActiveResultSet || activeResultSetBelongsToProfile
-      ? resultSetRepository.resolveReferenceDetailed(effectiveThreadId, text)
-      : { status: 'not_reference' as const };
-    const referencedResult = referenceResolution.status === 'resolved' ? referenceResolution.result : null;
-    const focusedResult = !referencedResult && activeResultSet && activeResultSet.focusedPosition !== null
-      ? activeResultSet.items.find((item) => item.position === activeResultSet.focusedPosition)
-      : null;
-    const contextualSelectedResult = referencedResult ?? (focusedResult && activeResultSet
-      ? { ...focusedResult, resultSetId: activeResultSet.id, resultSetContext: activeResultSet.context }
-      : null);
+    const referenceResolution =
+      !foundActiveResultSet || activeResultSetBelongsToProfile
+        ? resultSetRepository.resolveReferenceDetailed(effectiveThreadId, text)
+        : { status: 'not_reference' as const };
+    const referencedResult =
+      referenceResolution.status === 'resolved' ? referenceResolution.result : null;
+    const focusedResult =
+      !referencedResult && activeResultSet && activeResultSet.focusedPosition !== null
+        ? activeResultSet.items.find((item) => item.position === activeResultSet.focusedPosition)
+        : null;
+    const contextualSelectedResult =
+      referencedResult ??
+      (focusedResult && activeResultSet
+        ? {
+            ...focusedResult,
+            resultSetId: activeResultSet.id,
+            resultSetContext: activeResultSet.context,
+          }
+        : null);
     const cultureRefinement = inferCultureRefinement({
       text: assistantInputText,
       activeResultSet,
       selectedResult: contextualSelectedResult,
     });
-    const contextualCultureRequest = activeResultSet?.sourceAgent === 'culture'
-      && /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|tu conseilles|compare|hesite|pitche)\b/u.test(normalizeIntentText(text));
-    const comparisonPositions = contextualCultureRequest ? inferCultureComparisonPositions(text) : undefined;
-    const referencedProfileId = typeof referencedResult?.resultSetContext?.profileId === 'string'
-      ? referencedResult.resultSetContext.profileId
-      : null;
-    const referencedCultureResult = referencedResult?.entityType.startsWith('agora.')
-      && (!referencedProfileId || referencedProfileId === profileId)
-      ? referencedResult
-      : null;
-    const unresolvedReferenceText = referenceResolution.status === 'ambiguous'
-      ? `Je ne peux pas déterminer lequel tu désignes. Précise le numéro parmi : ${referenceResolution.candidates.map((candidate) => `${candidate.position}. ${candidate.displayLabel}`).join(' ; ')}.`
-      : referenceResolution.status === 'not_found'
-        ? 'Je ne retrouve pas ce résultat dans la liste active. Précise son numéro ou son intitulé.'
-        : referenceResolution.status === 'expired'
-          ? 'La liste précédente a expiré. Relance la recherche pour obtenir des résultats à jour.'
-          : null;
+    const contextualCultureRequest =
+      activeResultSet?.sourceAgent === 'culture' &&
+      /\b(parmi ceux[- ]la|lequel|laquelle|qu en penses|tu preferes|tu choisirais|tu conseilles|compare|hesite|pitche)\b/u.test(
+        normalizeIntentText(text)
+      );
+    const comparisonPositions = contextualCultureRequest
+      ? inferCultureComparisonPositions(text)
+      : undefined;
+    const referencedProfileId =
+      typeof referencedResult?.resultSetContext?.profileId === 'string'
+        ? referencedResult.resultSetContext.profileId
+        : null;
+    const referencedCultureResult =
+      referencedResult?.entityType.startsWith('agora.') &&
+      (!referencedProfileId || referencedProfileId === profileId)
+        ? referencedResult
+        : null;
+    const unresolvedReferenceText =
+      referenceResolution.status === 'ambiguous'
+        ? `Je ne peux pas déterminer lequel tu désignes. Précise le numéro parmi : ${referenceResolution.candidates.map((candidate) => `${candidate.position}. ${candidate.displayLabel}`).join(' ; ')}.`
+        : referenceResolution.status === 'not_found'
+          ? 'Je ne retrouve pas ce résultat dans la liste active. Précise son numéro ou son intitulé.'
+          : referenceResolution.status === 'expired'
+            ? 'La liste précédente a expiré. Relance la recherche pour obtenir des résultats à jour.'
+            : null;
     if (
-      unresolvedReferenceText
-      && (referenceResolution.status === 'ambiguous' || (!inferredCulture && !cultureRefinement))
+      unresolvedReferenceText &&
+      (referenceResolution.status === 'ambiguous' || (!inferredCulture && !cultureRefinement))
     ) {
       await conversationService.persistMessages(effectiveThreadId, text, unresolvedReferenceText);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
@@ -2064,13 +2535,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
     const activeCultureResultSet = activeResultSet?.sourceAgent === 'culture';
-    const activeMemoryCommandNeedsResultSet = cultureMemoryCommand
-      && ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(cultureMemoryCommand.type);
-    const actionableCultureMemoryCommand = cultureMemoryCommand
-      && (!activeMemoryCommandNeedsResultSet || activeCultureResultSet)
-      ? cultureMemoryCommand
-      : null;
+    const activeMemoryCommandNeedsResultSet =
+      cultureMemoryCommand &&
+      ['save', 'save_with_genre_feedback', 'remove_saved', 'feedback', 'explain'].includes(
+        cultureMemoryCommand.type
+      );
+    const actionableCultureMemoryCommand =
+      cultureMemoryCommand && (!activeMemoryCommandNeedsResultSet || activeCultureResultSet)
+        ? cultureMemoryCommand
+        : null;
     if (actionableCultureMemoryCommand) {
+      if (denyUnless('chat')) return reply;
       if (actionableCultureMemoryCommand.type === 'reset_profile') {
         const mutation = await createPendingCultureReset({
           threadId: effectiveThreadId,
@@ -2113,17 +2588,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         },
       });
     }
-    if (parsed.data.domain === 'culture' || inferredCulture || cultureRefinement || referencedCultureResult || contextualCultureRequest) {
+    if (
+      parsed.data.domain === 'culture' ||
+      inferredCulture ||
+      cultureRefinement ||
+      referencedCultureResult ||
+      contextualCultureRequest
+    ) {
+      if (denyUnless('chat')) return reply;
       const parsedCultureAction = cultureActionSchema.safeParse(parsed.data.action);
-      const requestedAction = parsed.data.domain === 'culture' && parsedCultureAction.success
-        ? parsedCultureAction.data
-        : cultureRefinement
-          ? cultureRefinement.action
-        : contextualCultureRequest
-            ? 'recommend_candidates'
-            : referencedCultureResult
-              ? 'get_item'
-            : inferredCulture?.action ?? 'discover';
+      const requestedAction =
+        parsed.data.domain === 'culture' && parsedCultureAction.success
+          ? parsedCultureAction.data
+          : cultureRefinement
+            ? cultureRefinement.action
+            : contextualCultureRequest
+              ? 'recommend_candidates'
+              : referencedCultureResult
+                ? 'get_item'
+                : (inferredCulture?.action ?? 'discover');
       const requestedSlots = {
         ...(cultureRefinement?.slots ?? {}),
         ...(inferredCulture?.slots ?? {}),
@@ -2139,7 +2622,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           cultureMemoryService.recordImplicitSelection(
             profileId,
             referencedCultureResult,
-            /\b(?:parle|detail|pitch|quoi|ou|heure|coute)\b/u.test(normalizedRawText),
+            /\b(?:parle|detail|pitch|quoi|ou|heure|coute)\b/u.test(normalizedRawText)
           );
         }
         cultureMemoryService.recordQuery(profileId, requestedSlots);
@@ -2155,11 +2638,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           profiles: cultureProfileRepository,
           profileId,
           presentationLimit: voiceEnabled ? (voiceMode === 'detailed' ? 5 : 3) : 5,
+          preserveValidatedWindow: Boolean(cultureRefinement),
         });
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: culture.text, domain: 'culture', mode: voiceMode })
           : culture.text;
-        await conversationService.persistMessages(effectiveThreadId, text || `culture.${requestedAction}`, responseText);
+        await conversationService.persistMessages(
+          effectiveThreadId,
+          text || `culture.${requestedAction}`,
+          responseText
+        );
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         return reply.code(200).send({
           threadId: effectiveThreadId,
@@ -2186,29 +2674,38 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
         if (error instanceof AgoraClientError) {
           if (error.code === 'timeout') return reply.code(504).send({ error: 'agora_timeout' });
-          if (error.code === 'unauthorized') return reply.code(502).send({ error: 'agora_unauthorized' });
-          if (error.code === 'invalid_response') return reply.code(502).send({ error: 'agora_invalid_response' });
-          if (error.code === 'unavailable') return reply.code(503).send({ error: 'agora_unavailable' });
+          if (error.code === 'unauthorized')
+            return reply.code(502).send({ error: 'agora_unauthorized' });
+          if (error.code === 'invalid_response')
+            return reply.code(502).send({ error: 'agora_invalid_response' });
+          if (error.code === 'unavailable')
+            return reply.code(503).send({ error: 'agora_unavailable' });
         }
         return reply.code(502).send({ error: 'agora_unavailable' });
       }
     }
 
     if (parsed.data.domain === 'spotify' && parsed.data.action) {
+      if (denyUnless('music')) return reply;
       const explicitSpotifyPayload = ingestSpotifyRequestSchema.safeParse({
         ...parsed.data,
         threadId: effectiveThreadId,
         text: text || undefined,
         correlation_id: correlationId || undefined,
-        user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+        user_id:
+          typeof parsed.data.user_id === 'string'
+            ? parsed.data.user_id.trim() || undefined
+            : undefined,
       });
       if (!explicitSpotifyPayload.success) {
-        return reply.code(400).send({ error: 'invalid_spotify_contract', issues: explicitSpotifyPayload.error.issues });
+        return reply
+          .code(400)
+          .send({ error: 'invalid_spotify_contract', issues: explicitSpotifyPayload.error.issues });
       }
 
       const spotifyResp = await executeSpotifyCapability({
         request: explicitSpotifyPayload.data,
-        spotifyWebApi: deps.spotifyWebApi,
+        spotifyWebApi: spotifyWebApi(),
         env: deps.env,
         log: app.log,
       });
@@ -2220,11 +2717,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           })
         : spotifyResp.tts;
       const persistedUserText = text || `spotify.${explicitSpotifyPayload.data.action}`;
-      void conversationService.persistMessages(effectiveThreadId, persistedUserText, spotifyVoiceText).then(async () => {
-        if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-          summarizationService.startPresummarize(effectiveThreadId);
-        }
-      });
+      void conversationService
+        .persistMessages(effectiveThreadId, persistedUserText, spotifyVoiceText)
+        .then(async () => {
+          if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+            summarizationService.startPresummarize(effectiveThreadId);
+          }
+        });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       app.log.info(
         {
@@ -2234,22 +2733,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           status: spotifyResp.status,
           correlation_id: correlationId || undefined,
         },
-        'ingest_spotify_explicit_contract_done',
+        'ingest_spotify_explicit_contract_done'
       );
 
-      return reply.code(200).send(buildSpotifyIngestPayload({
-        threadId: effectiveThreadId,
-        responseText: spotifyVoiceText,
-        spotify: {
-          status: spotifyResp.status,
-          ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
-          ...(spotifyResp.options ? { options: spotifyResp.options } : {}),
-          ...(spotifyResp.error_code ? { error_code: spotifyResp.error_code } : {}),
-        },
-        action: explicitSpotifyPayload.data.action,
-        routingPath: 'explicit_contract',
-        correlationId: correlationId || undefined,
-      }));
+      return reply.code(200).send(
+        buildSpotifyIngestPayload({
+          threadId: effectiveThreadId,
+          responseText: spotifyVoiceText,
+          spotify: {
+            status: spotifyResp.status,
+            ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
+            ...(spotifyResp.options ? { options: spotifyResp.options } : {}),
+            ...(spotifyResp.error_code ? { error_code: spotifyResp.error_code } : {}),
+          },
+          action: explicitSpotifyPayload.data.action,
+          routingPath: 'explicit_contract',
+          correlationId: correlationId || undefined,
+        })
+      );
     }
 
     if (!text) {
@@ -2269,16 +2770,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         routing_config_hash: ROUTING_CONFIG_HASH,
         semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
       },
-      'ingest_start',
+      'ingest_start'
     );
 
     // SSE — open the event stream immediately so the client receives ack before agent results arrive
     const rawAccept = req.headers['accept'];
-    const acceptHeader = typeof rawAccept === 'string' ? rawAccept : Array.isArray(rawAccept) ? (rawAccept as string[]).join(',') : '';
+    const acceptHeader =
+      typeof rawAccept === 'string'
+        ? rawAccept
+        : Array.isArray(rawAccept)
+          ? (rawAccept as string[]).join(',')
+          : '';
     // Tauri's fetch shim replaces Accept with "*/*" — use ?sse=1 query param as fallback
     const querySSE = (req.query as Record<string, string>)['sse'] === '1';
     const wantsSSE = acceptHeader.includes('text/event-stream') || querySSE;
-    app.log.info({ threadId, requestId, wantsSSE, accept: acceptHeader.slice(0, 80) }, 'ingest_sse_check');
+    app.log.info(
+      { threadId, requestId, wantsSSE, accept: acceptHeader.slice(0, 80) },
+      'ingest_sse_check'
+    );
     let sseStream: Readable | null = null;
     if (wantsSSE) {
       sseStream = new Readable({ read() {} });
@@ -2295,9 +2804,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       sseAckSent = true;
       sseStream.push(`event: ack\ndata: ${JSON.stringify({ text })}\n\n`);
     };
-    const fallbackAckTimer = sseStream === null
-      ? undefined
-      : setTimeout(() => pushSseAck(getContextualFallbackAck(assistantInputText)), 650);
+    const fallbackAckTimer =
+      sseStream === null
+        ? undefined
+        : setTimeout(() => pushSseAck(getContextualFallbackAck(assistantInputText)), 650);
     fallbackAckTimer?.unref();
     const pushSseResponse = (data: unknown): void => {
       sseSettled = true;
@@ -2305,8 +2815,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`);
       sseStream?.push(null);
     };
+    sendForbiddenStream =
+      sseStream === null
+        ? undefined
+        : () => {
+            sseSettled = true;
+            if (fallbackAckTimer) clearTimeout(fallbackAckTimer);
+            sseStream.push(`event: error\ndata: ${JSON.stringify({ error: 'forbidden' })}\n\n`);
+            sseStream.push(null);
+          };
 
     if (isLocalTimeQuery(assistantInputText)) {
+      if (denyUnless('chat')) return reply;
       const localTimeText = `Il est ${formatParisTime()}.`;
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: localTimeText, domain: 'general', mode: voiceMode })
@@ -2314,7 +2834,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       await conversationService.persistMessages(effectiveThreadId, text, responseText);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
-      app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_local_time_fast_path');
+      app.log.info(
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          elapsed_ms: Date.now() - t0,
+          voice_turn_id: voiceTurnId || undefined,
+        },
+        'ingest_local_time_fast_path'
+      );
       const payload = {
         threadId: effectiveThreadId,
         responseText: toSingleParagraphPlainText(responseText),
@@ -2323,15 +2851,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           source: 'local_paris_time',
         },
       };
-      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      if (sseStream !== null) {
+        pushSseResponse(payload);
+        return reply;
+      }
       return reply.code(200).send(payload);
     }
 
     if (deps.ha && isVoiceHubChannel && isLikelyLocalWeatherQuery(assistantInputText)) {
+      if (denyUnless('home')) return reply;
       try {
         const rawStates = await deps.ha.getStates();
         const haStates: HaStateLike[] = Array.isArray(rawStates)
-          ? rawStates.filter((item): item is HaStateLike => item !== null && typeof item === 'object' && 'entity_id' in item && typeof (item as { entity_id?: unknown }).entity_id === 'string')
+          ? rawStates.filter(
+              (item): item is HaStateLike =>
+                item !== null &&
+                typeof item === 'object' &&
+                'entity_id' in item &&
+                typeof (item as { entity_id?: unknown }).entity_id === 'string'
+            )
           : [];
         const weather = buildWeatherSnapshotFromStates(haStates);
         if (weather) {
@@ -2342,12 +2880,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           });
           if (deterministicWeatherText) {
             const responseText = voiceEnabled
-              ? formatVoiceResponse({ text: deterministicWeatherText, domain: 'weather', mode: voiceMode })
+              ? formatVoiceResponse({
+                  text: deterministicWeatherText,
+                  domain: 'weather',
+                  mode: voiceMode,
+                })
               : deterministicWeatherText;
             await conversationService.persistMessages(effectiveThreadId, text, responseText);
             await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
             recordPerf('ingest', Date.now() - t0);
-            app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_local_weather_fast_path');
+            app.log.info(
+              { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 },
+              'ingest_local_weather_fast_path'
+            );
             const payload = {
               threadId: effectiveThreadId,
               responseText: toSingleParagraphPlainText(responseText),
@@ -2356,16 +2901,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 source: 'local_weather_snapshot',
               },
             };
-            if (sseStream !== null) { pushSseResponse(payload); return reply; }
+            if (sseStream !== null) {
+              pushSseResponse(payload);
+              return reply;
+            }
             return reply.code(200).send(payload);
           }
         }
       } catch (err) {
-        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'ingest_local_weather_fast_path_failed');
+        app.log.warn(
+          { threadId: effectiveThreadId, requestId, err },
+          'ingest_local_weather_fast_path_failed'
+        );
       }
     }
 
     if (deps.ha && isVoiceHubChannel && isSalonLightCommand(assistantInputText)) {
+      if (denyUnless('home')) return reply;
       try {
         const states = toEntityStates(await deps.ha.getStates());
         if (!hasRealSalonLight(states)) {
@@ -2373,7 +2925,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           await conversationService.persistMessages(effectiveThreadId, text, responseText);
           await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
           recordPerf('ingest', Date.now() - t0);
-          app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_salon_light_missing_fast_path');
+          app.log.info(
+            { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 },
+            'ingest_salon_light_missing_fast_path'
+          );
           const payload = {
             threadId: effectiveThreadId,
             responseText,
@@ -2383,20 +2938,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               fallbackReason: 'missing_salon_light',
             },
           };
-          if (sseStream !== null) { pushSseResponse(payload); return reply; }
+          if (sseStream !== null) {
+            pushSseResponse(payload);
+            return reply;
+          }
           return reply.code(200).send(payload);
         }
       } catch (err) {
-        app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'ingest_salon_light_missing_fast_path_failed');
+        app.log.warn(
+          { threadId: effectiveThreadId, requestId, err },
+          'ingest_salon_light_missing_fast_path_failed'
+        );
       }
     }
 
     if (isVoiceHubChannel && isDailyRecapRequest(assistantInputText)) {
-      const responseText = 'Je n’ai pas encore de journal fiable de ta journée. Je peux te résumer l’agenda, les tâches ou les mails si tu me précises quoi regarder.';
+      if (denyUnless('chat')) return reply;
+      const responseText =
+        'Je n’ai pas encore de journal fiable de ta journée. Je peux te résumer l’agenda, les tâches ou les mails si tu me précises quoi regarder.';
       await conversationService.persistMessages(effectiveThreadId, text, responseText);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
-      app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_daily_recap_fast_path');
+      app.log.info(
+        { threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0 },
+        'ingest_daily_recap_fast_path'
+      );
       const payload = {
         threadId: effectiveThreadId,
         responseText: toSingleParagraphPlainText(responseText),
@@ -2406,12 +2972,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           fallbackReason: 'missing_daily_journal',
         },
       };
-      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      if (sseStream !== null) {
+        pushSseResponse(payload);
+        return reply;
+      }
       return reply.code(200).send(payload);
     }
 
-    const simpleSpotifyAction = inferSimpleSpotifyControl(assistantInputText, { voiceHub: isVoiceHubChannel });
-    if (simpleSpotifyAction && deps.spotifyWebApi.isConfigured()) {
+    const simpleSpotifyAction = inferSimpleSpotifyControl(assistantInputText, {
+      voiceHub: isVoiceHubChannel,
+    });
+    if (simpleSpotifyAction && spotifyWebApi().isConfigured()) {
+      if (denyUnless('music')) return reply;
       const spotifyPayload = ingestSpotifyRequestSchema.parse({
         threadId: effectiveThreadId,
         domain: 'spotify',
@@ -2420,11 +2992,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         context: {},
         text,
         correlation_id: correlationId || undefined,
-        user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+        user_id:
+          typeof parsed.data.user_id === 'string'
+            ? parsed.data.user_id.trim() || undefined
+            : undefined,
       });
       const spotifyResp = await executeSpotifyCapability({
         request: spotifyPayload,
-        spotifyWebApi: deps.spotifyWebApi,
+        spotifyWebApi: spotifyWebApi(),
         env: deps.env,
         log: app.log,
       });
@@ -2435,8 +3010,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
-        { threadId: effectiveThreadId, requestId, action: simpleSpotifyAction, status: spotifyResp.status, elapsed_ms: Date.now() - t0 },
-        'ingest_spotify_simple_control_fast_path',
+        {
+          threadId: effectiveThreadId,
+          requestId,
+          action: simpleSpotifyAction,
+          status: spotifyResp.status,
+          elapsed_ms: Date.now() - t0,
+        },
+        'ingest_spotify_simple_control_fast_path'
       );
       const payload = buildSpotifyIngestPayload({
         threadId: effectiveThreadId,
@@ -2451,16 +3032,24 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         routingPath: 'router_direct',
         correlationId: correlationId || undefined,
       });
-      if (sseStream !== null) { pushSseResponse(payload); return reply; }
+      if (sseStream !== null) {
+        pushSseResponse(payload);
+        return reply;
+      }
       return reply.code(200).send(payload);
     }
 
     if (deps.nasStatus?.isConfigured() && isNasStatusQuery(assistantInputText)) {
+      if (denyUnless('nas.operations')) return reply;
       pushSseAck(getContextualFallbackAck(assistantInputText));
       try {
         const nasStatus = await deps.nasStatus.getStatus();
         const responseText = voiceEnabled
-          ? formatVoiceResponse({ text: formatNasStatus(nasStatus), domain: 'general', mode: voiceMode })
+          ? formatVoiceResponse({
+              text: formatNasStatus(nasStatus),
+              domain: 'general',
+              mode: voiceMode,
+            })
           : formatNasStatus(nasStatus);
         await conversationService.persistMessages(effectiveThreadId, text, responseText);
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
@@ -2472,7 +3061,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             source: 'nas_status_cache',
           },
         };
-        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        if (sseStream !== null) {
+          pushSseResponse(payload);
+          return reply;
+        }
         return reply.code(200).send(payload);
       } catch (err) {
         app.log.warn({ threadId: effectiveThreadId, requestId, err }, 'nas_status_query_failed');
@@ -2480,17 +3072,30 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     if (isLikelyCalendarIntent(assistantInputText)) {
+      if (denyUnless('calendar')) return reply;
       const routeKey = inferCalendarRouteKey(assistantInputText);
       const ackMsg = getIngestAckText([routeKey]);
       if (ackMsg) pushSseAck(ackMsg);
 
       try {
-        app.log.info({ threadId: effectiveThreadId, requestId, route: routeKey }, 'calendar_intent_fast_path');
+        app.log.info(
+          { threadId: effectiveThreadId, requestId, route: routeKey },
+          'calendar_intent_fast_path'
+        );
         const calendarText = isCalendarMutationRouteKey(routeKey)
-          ? await planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
+          ? await planPendingCalendarMutation(
+              effectiveThreadId,
+              assistantInputText,
+              clientChannel ?? undefined
+            )
           : await callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
-        const activeCalendarProposal = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
-        const hasActiveCalendarProposal = activeCalendarProposal?.agent === 'calendar' && activeCalendarProposal.routeKey === routeKey && activeCalendarProposal.action !== 'disambiguate_event';
+        const activeCalendarProposal = (await pendingMutationRepository.findActiveByThread(
+          effectiveThreadId
+        )) as PendingMutation | null;
+        const hasActiveCalendarProposal =
+          activeCalendarProposal?.agent === 'calendar' &&
+          activeCalendarProposal.routeKey === routeKey &&
+          activeCalendarProposal.action !== 'disambiguate_event';
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
@@ -2503,14 +3108,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             kind: 'calendar',
             source: 'calendar_agent',
             routeKey,
-            ...(isCalendarMutationRouteKey(routeKey) ? { semanticDecision: hasActiveCalendarProposal ? 'confirmation_required' : 'clarification_required' } : {}),
-            ...(activeCalendarProposal?.agent === 'calendar' ? { proposalId: activeCalendarProposal.proposalId } : {}),
+            ...(isCalendarMutationRouteKey(routeKey)
+              ? {
+                  semanticDecision: hasActiveCalendarProposal
+                    ? 'confirmation_required'
+                    : 'clarification_required',
+                }
+              : {}),
+            ...(activeCalendarProposal?.agent === 'calendar'
+              ? { proposalId: activeCalendarProposal.proposalId }
+              : {}),
           },
         };
-        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        if (sseStream !== null) {
+          pushSseResponse(payload);
+          return reply;
+        }
         return reply.code(200).send(payload);
       } catch (err) {
-        app.log.warn({ threadId: effectiveThreadId, requestId, route: routeKey, err }, 'calendar_intent_fast_path_failed');
+        app.log.warn(
+          { threadId: effectiveThreadId, requestId, route: routeKey, err },
+          'calendar_intent_fast_path_failed'
+        );
         const fallbackText = 'Je n arrive pas a acceder a ton agenda pour le moment.';
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: fallbackText, domain: 'calendar', mode: voiceMode })
@@ -2527,7 +3146,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             fallbackReason: 'calendar_unavailable',
           },
         };
-        if (sseStream !== null) { pushSseResponse(payload); return reply; }
+        if (sseStream !== null) {
+          pushSseResponse(payload);
+          return reply;
+        }
         return reply.code(200).send(payload);
       }
     }
@@ -2543,7 +3165,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     ]);
 
     const usedSummaryVersion =
-      committed.usedSummaryVersion ?? (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
+      committed.usedSummaryVersion ??
+      (threadBefore.summaryVersion > 0 ? `v${threadBefore.summaryVersion}` : undefined);
 
     // ── Orchestrator layer ────────────────────────────────────────────────────
     // Router runs first (sequential). Targets can include spotify, search agents,
@@ -2558,15 +3181,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     //   - router fails / none     → HA general called as fallback
 
     const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
-    const spotifyEntry = deps.spotifyWebApi.isConfigured()
-      ? { agentId: SPOTIFY_AGENT_ID, hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale', key: 'spotify' as const }
+    const spotifyEntry = spotifyWebApi().isConfigured()
+      ? {
+          agentId: SPOTIFY_AGENT_ID,
+          hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale',
+          key: 'spotify' as const,
+        }
       : null;
     const weatherEntry = deps.ha
-      ? { agentId: 'weather', routerId: LOCAL_WEATHER_ROUTER_AGENT_ID, hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes. Jamais une ville externe.', key: 'weather' }
+      ? {
+          agentId: 'weather',
+          routerId: LOCAL_WEATHER_ROUTER_AGENT_ID,
+          hint: 'Meteo locale Home Assistant: etat actuel, temperature, humidite, precipitation, previsions courtes. Jamais une ville externe.',
+          key: 'weather',
+        }
       : null;
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
     const executorsEntry = resolveExecutorsEntry(agentEntries, generalAgentId);
-    const allAgentEntries = [...(spotifyEntry ? [spotifyEntry] : []), ...(weatherEntry ? [weatherEntry] : []), ...agentEntries];
+    const allAgentEntries = [
+      ...(spotifyEntry ? [spotifyEntry] : []),
+      ...(weatherEntry ? [weatherEntry] : []),
+      ...agentEntries,
+    ];
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
     const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
 
@@ -2578,34 +3214,38 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const directConversationReply = simpleConversationalReply(assistantInputText);
     if (directConversationReply) {
+      if (denyUnless('chat')) return reply;
       assistantText = directConversationReply;
       app.log.info({ threadId, requestId }, 'ingest_simple_conversation_fast_path');
     }
 
     if (!routerEnabled) {
-      app.log.info({ threadId, requestId, reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key' }, 'ha_agent_router_disabled');
+      app.log.info(
+        {
+          threadId,
+          requestId,
+          reason: allAgentEntries.length === 0 ? 'no_agents' : 'no_openai_key',
+        },
+        'ha_agent_router_disabled'
+      );
     }
 
     const semanticLiveModeEnabled =
-      deps.env.SEMANTIC_ROUTER_ENABLED
-      && !deps.env.SEMANTIC_ROUTER_SHADOW_MODE;
+      deps.env.SEMANTIC_ROUTER_ENABLED && !deps.env.SEMANTIC_ROUTER_SHADOW_MODE;
     const semanticE2ActivationEnabled =
-      semanticLiveModeEnabled
-      && deps.env.SEMANTIC_ROUTER_ACTIVATION_ENABLED;
+      semanticLiveModeEnabled && deps.env.SEMANTIC_ROUTER_ACTIVATION_ENABLED;
     const semanticActivatedRouteKeys = new Set(
-      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES ?? '').split(',')),
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES ?? '').split(','))
     );
     const semanticE1ActivationEnabled =
-      semanticLiveModeEnabled
-      && deps.env.SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED === true;
+      semanticLiveModeEnabled && deps.env.SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED === true;
     const semanticActivatedE1RouteKeys = new Set(
-      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES ?? '').split(',')),
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES ?? '').split(','))
     );
     const semanticE1HighRiskActivationEnabled =
-      semanticLiveModeEnabled
-      && deps.env.SEMANTIC_ROUTER_E1_HIGH_RISK_ACTIVATION_ENABLED === true;
+      semanticLiveModeEnabled && deps.env.SEMANTIC_ROUTER_E1_HIGH_RISK_ACTIVATION_ENABLED === true;
     const semanticActivatedE1HighRiskRouteKeys = new Set(
-      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_HIGH_RISK_ROUTES ?? '').split(',')),
+      uniqueNonEmpty((deps.env.SEMANTIC_ROUTER_ACTIVATED_E1_HIGH_RISK_ROUTES ?? '').split(','))
     );
 
     const toSemanticActivationTarget = (candidate: {
@@ -2673,7 +3313,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           routing_config_hash: ROUTING_CONFIG_HASH,
           semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
         },
-        'semantic_router_start',
+        'semantic_router_start'
       );
       if (runtimeMultiIntentGuard) {
         app.log.info(
@@ -2686,7 +3326,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             multi_intent_segment_count: multiIntent.segmentCount,
             multi_intent_verb_count: multiIntent.verbCount,
           },
-          'semantic_router_skip_multi_intent_runtime',
+          'semantic_router_skip_multi_intent_runtime'
         );
       }
       if (!runtimeMultiIntentGuard && semanticLiveModeEnabled) {
@@ -2708,15 +3348,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               activationEnabled: semanticE2ActivationEnabled,
               e1ActivationEnabled: semanticE1ActivationEnabled,
             },
-            semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
+            semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm'
           );
 
-          if (semResult.accepted && semResult.decision === 'accepted_e2' && semResult.matchedRoute) {
+          if (
+            semResult.accepted &&
+            semResult.decision === 'accepted_e2' &&
+            semResult.matchedRoute
+          ) {
             const routeKey = semResult.matchedRoute.key;
+            if (
+              semanticE2ActivationEnabled &&
+              semanticActivatedRouteKeys.has(routeKey) &&
+              denyUnless(permissionForRouteKey(routeKey))
+            )
+              return reply;
             if (!semanticE2ActivationEnabled) {
-              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
+              app.log.info(
+                { threadId, requestId, routeKey },
+                'semantic_router_activation_fallback_not_allowlisted'
+              );
             } else if (!semanticActivatedRouteKeys.has(routeKey)) {
-              app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_not_allowlisted');
+              app.log.info(
+                { threadId, requestId, routeKey },
+                'semantic_router_activation_fallback_not_allowlisted'
+              );
             } else {
               if (semResult.matchedRoute.targetAgentId === 'search') {
                 const tSearch = Date.now();
@@ -2729,7 +3385,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     decision: semResult.decision,
                     handled: false,
                   },
-                  'semantic_router_search_e2_live_attempt',
+                  'semantic_router_search_e2_live_attempt'
                 );
                 if (sseStream !== null) {
                   const ackMsg = getIngestAckText([routeKey]);
@@ -2763,7 +3419,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         handled: true,
                         elapsed_ms: Date.now() - tSearch,
                       },
-                      'semantic_router_search_e2_live_handled',
+                      'semantic_router_search_e2_live_handled'
                     );
                   } else {
                     app.log.info(
@@ -2776,7 +3432,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         handled: false,
                         elapsed_ms: Date.now() - tSearch,
                       },
-                      'semantic_router_search_e2_live_fallback_llm',
+                      'semantic_router_search_e2_live_fallback_llm'
                     );
                   }
                 } catch (err) {
@@ -2790,7 +3446,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       elapsed_ms: Date.now() - tSearch,
                       err,
                     },
-                    'semantic_router_search_e2_live_error',
+                    'semantic_router_search_e2_live_error'
                   );
                 }
               }
@@ -2798,31 +3454,45 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               if (assistantText !== undefined) {
                 semanticActivatedRouteKey = routeKey;
               } else {
-              const candidate = toSemanticActivationTarget({
-                key: routeKey,
-                targetAgentId: semResult.matchedRoute.targetAgentId,
-                directRequest: semResult.matchedRoute.directRequest
-                  ? {
-                    action: semResult.matchedRoute.directRequest.action,
-                    slots: semResult.matchedRoute.directRequest.slots,
-                  }
-                  : undefined,
-              });
-              if (candidate) {
-                semanticActivatedTarget = candidate;
-                semanticActivatedRouteKey = routeKey;
-                app.log.info(
-                  { threadId, requestId, routeKey, targetAgentId: candidate.agentId },
-                  'semantic_router_activated_e2',
-                );
-              } else {
-                app.log.info({ threadId, requestId, routeKey }, 'semantic_router_activation_fallback_unsupported_target');
+                const candidate = toSemanticActivationTarget({
+                  key: routeKey,
+                  targetAgentId: semResult.matchedRoute.targetAgentId,
+                  directRequest: semResult.matchedRoute.directRequest
+                    ? {
+                        action: semResult.matchedRoute.directRequest.action,
+                        slots: semResult.matchedRoute.directRequest.slots,
+                      }
+                    : undefined,
+                });
+                if (candidate) {
+                  semanticActivatedTarget = candidate;
+                  semanticActivatedRouteKey = routeKey;
+                  app.log.info(
+                    { threadId, requestId, routeKey, targetAgentId: candidate.agentId },
+                    'semantic_router_activated_e2'
+                  );
+                } else {
+                  app.log.info(
+                    { threadId, requestId, routeKey },
+                    'semantic_router_activation_fallback_unsupported_target'
+                  );
+                }
               }
             }
-            }
           }
-          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+          if (
+            semResult.accepted &&
+            semResult.decision === 'accepted_e1' &&
+            semResult.matchedRoute
+          ) {
             const routeKey = semResult.matchedRoute.key;
+            if (
+              semanticE1ActivationEnabled &&
+              semanticActivatedE1RouteKeys.has(routeKey) &&
+              SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS.has(routeKey) &&
+              denyUnless(permissionForRouteKey(routeKey))
+            )
+              return reply;
             const highRisk = semResult.matchedRoute.highRisk === true;
             app.log.info(
               {
@@ -2840,7 +3510,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 targetAgentId: semResult.matchedRoute.targetAgentId,
                 plannerRequired: semResult.matchedRoute.plannerRequired === true,
               },
-              'semantic_router_e1_candidate',
+              'semantic_router_e1_candidate'
             );
 
             if (!semanticE1ActivationEnabled) {
@@ -2858,7 +3528,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   highRisk,
                   elapsedMs: semResult.elapsedMs,
                 },
-                'semantic_router_e1_activation_fallback_not_allowlisted',
+                'semantic_router_e1_activation_fallback_not_allowlisted'
               );
             } else if (!semanticActivatedE1RouteKeys.has(routeKey)) {
               app.log.info(
@@ -2875,7 +3545,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   highRisk,
                   elapsedMs: semResult.elapsedMs,
                 },
-                'semantic_router_e1_activation_fallback_not_allowlisted',
+                'semantic_router_e1_activation_fallback_not_allowlisted'
               );
             } else {
               const targetAgentId = semResult.matchedRoute.targetAgentId;
@@ -2889,16 +3559,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       ? 'mail'
                       : routeKey.startsWith('calendar.')
                         ? 'calendar'
-                      : routeKey.startsWith('executor.')
-                        ? 'executors'
-                      : null;
+                        : routeKey.startsWith('executor.')
+                          ? 'executors'
+                          : null;
               const safeRouteAllowed = SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS.has(routeKey);
-              const supportedTarget = expectedTargetAgentId !== null && targetAgentId === expectedTargetAgentId;
-              const isSlowReadRoute = routeKey.startsWith('search.deep.')
-                || routeKey.startsWith('todo.')
-                || routeKey.startsWith('mail.')
-                || routeKey.startsWith('calendar.')
-                || routeKey.startsWith('executor.');
+              const supportedTarget =
+                expectedTargetAgentId !== null && targetAgentId === expectedTargetAgentId;
+              const isSlowReadRoute =
+                routeKey.startsWith('search.deep.') ||
+                routeKey.startsWith('todo.') ||
+                routeKey.startsWith('mail.') ||
+                routeKey.startsWith('calendar.') ||
+                routeKey.startsWith('executor.');
 
               if (!safeRouteAllowed || !supportedTarget) {
                 app.log.info(
@@ -2916,7 +3588,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     elapsedMs: semResult.elapsedMs,
                     targetAgentId,
                   },
-                  'semantic_router_e1_activation_fallback_unsupported_target',
+                  'semantic_router_e1_activation_fallback_unsupported_target'
                 );
               } else {
                 let highRiskAllowed = true;
@@ -2947,7 +3619,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           highRisk: true,
                           elapsedMs: semResult.elapsedMs,
                         },
-                        'semantic_router_e1_high_risk_blocked_activation_disabled',
+                        'semantic_router_e1_high_risk_blocked_activation_disabled'
                       );
                     } else if (highRiskGate.decision === 'blocked_not_allowlisted') {
                       app.log.info(
@@ -2964,7 +3636,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           highRisk: true,
                           elapsedMs: semResult.elapsedMs,
                         },
-                        'semantic_router_e1_high_risk_blocked_not_allowlisted',
+                        'semantic_router_e1_high_risk_blocked_not_allowlisted'
                       );
                     } else {
                       app.log.info(
@@ -2983,253 +3655,40 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           thresholdScore: deps.env.SEMANTIC_ROUTER_HIGH_RISK_ACCEPT_SCORE,
                           thresholdMargin: deps.env.SEMANTIC_ROUTER_HIGH_RISK_MIN_MARGIN,
                         },
-                        'semantic_router_e1_high_risk_blocked_thresholds',
+                        'semantic_router_e1_high_risk_blocked_thresholds'
                       );
                     }
                   }
                 }
 
                 if (highRiskAllowed) {
-                if (routeKey.startsWith('executor.')) {
-                  if (!executorsEntry) {
-                    app.log.info(
-                      {
-                        threadId,
-                        requestId,
-                        route: routeKey,
-                        routeLevel: 'E1',
-                        score: semResult.top1Score,
-                        margin: semResult.margin,
-                        decision: semResult.decision,
-                        activated: false,
-                        fallback: true,
-                        highRisk,
-                        elapsedMs: semResult.elapsedMs,
-                        targetAgentId,
-                      },
-                      'semantic_router_e1_activation_fallback_unsupported_target',
-                    );
-                  } else {
-                    semanticActivatedTarget = { agentId: executorsEntry.agentId, confidence: 1 };
-                    semanticActivatedRouteKey = routeKey;
-                    app.log.info(
-                      {
-                        threadId,
-                        requestId,
-                        route: routeKey,
-                        routeLevel: 'E1',
-                        score: semResult.top1Score,
-                        margin: semResult.margin,
-                        decision: semResult.decision,
-                        activated: true,
-                        fallback: false,
-                        highRisk,
-                        elapsedMs: semResult.elapsedMs,
-                        targetAgentId,
-                        handled: true,
-                        mode: 'ha_executor_specialized',
-                      },
-                      'semantic_router_e1_live_handled',
-                    );
-                  }
-                } else {
-                const tE1 = Date.now();
-                app.log.info(
-                  {
-                    threadId,
-                    requestId,
-                    route: routeKey,
-                    routeLevel: 'E1',
-                    score: semResult.top1Score,
-                    margin: semResult.margin,
-                    decision: semResult.decision,
-                    activated: true,
-                    fallback: false,
-                    highRisk,
-                    elapsedMs: semResult.elapsedMs,
-                    targetAgentId,
-                    handled: false,
-                  },
-                  highRisk ? 'semantic_router_e1_high_risk_live_attempt' : 'semantic_router_e1_live_attempt',
-                );
-
-                if (isSlowReadRoute && sseStream !== null) {
-                  const ackMsg = getIngestAckText([routeKey]);
-                  if (ackMsg) pushSseAck(ackMsg);
-                }
-
-                try {
-                  const routeCapability = findCapabilityByRouteKey(routeKey);
-                  if (
-                    routeCapability
-                    && routeCapability.agent !== 'calendar'
-                    && requiresCapabilityConfirmation(routeCapability)
-                  ) {
-                    app.log.info(
-                      { threadId: effectiveThreadId, requestId, route: routeKey, agent: routeCapability.agent, action: routeCapability.action },
-                      'semantic_router_e1_mutation_blocked_pending_required',
-                    );
-                  }
-                  const blockedMutationText = routeCapability
-                    && (routeCapability.agent === 'mail' || routeCapability.agent === 'todo')
-                    && requiresCapabilityConfirmation(routeCapability)
-                    ? await planPendingMailOrTodoMutation({
-                      threadId: effectiveThreadId,
-                      clientChannel: clientChannel ?? undefined,
-                      agent: routeCapability.agent,
-                      text: assistantInputText,
-                      routeKey,
-                    }) ?? ''
-                    : '';
-                  const e1Result = blockedMutationText
-                    ? routeCapability?.agent === 'mail'
-                      ? { kind: 'mail_text' as const, routeKey, data: blockedMutationText }
-                      : { kind: 'todo_text' as const, routeKey, data: blockedMutationText }
-                    : await dispatchAcceptedE1Route({
-                    route: semResult.matchedRoute,
-                    text: assistantInputText,
-                    deps: {
-                      planSpotifyAction: async (plannerText: string) => (
-                        planSpotifyActionFromTextWithOpenAi({
-                          env: deps.env,
-                          spotifyWebApi: deps.spotifyWebApi,
-                          text: plannerText,
-                          correlationId: correlationId || undefined,
-                          userId: typeof parsed.data.user_id === 'string'
-                            ? parsed.data.user_id.trim() || undefined
-                            : undefined,
-                          log: app.log,
-                        })
-                      ),
-                      callSearchAgent: async (agentKey, params) => (
-                        callSearchAgent(agentKey, {
-                          text: params.text,
-                          openAiApiKey: deps.env.OPENAI_API_KEY ?? '',
-                          openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-                          perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
-                          perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
-                          timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
-                          log: app.log,
-                        })
-                      ),
-                      callTodoAgent: async () => {
-                        return callTodoAgent(assistantInputText, {
-                          MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
-                          MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
-                          MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
-                          MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
-                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                          OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
-                          OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
-                          OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
-                          OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
-                        }, app.log);
-                      },
-                      callMailAgent: async () => {
-                        return callMailAgent(assistantInputText, {
-                          mailAccounts:    buildMailAccounts(deps.env),
-                          OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                          OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
-                          OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-                          OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-                          OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-                        }, app.log);
-                      },
-                      callCalendarAgent: async () => {
-                        if (isCalendarMutationRouteKey(routeKey)) {
-                          return planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined);
-                        }
-                        return callCalendarAgent(assistantInputText, buildCalendarEnv(), app.log);
-                      },
-                    },
-                  });
-
-                  if (!e1Result) {
-                    app.log.info(
-                      {
-                        threadId,
-                        requestId,
-                        route: routeKey,
-                        routeLevel: 'E1',
-                        score: semResult.top1Score,
-                        margin: semResult.margin,
-                        decision: semResult.decision,
-                        activated: true,
-                        fallback: true,
-                        highRisk,
-                        elapsedMs: semResult.elapsedMs,
-                        targetAgentId,
-                        handled: false,
-                        elapsed_ms: Date.now() - tE1,
-                      },
-                      highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
-                    );
-                  } else if (
-                    e1Result.kind === 'search_text'
-                    || e1Result.kind === 'todo_text'
-                    || e1Result.kind === 'mail_text'
-                    || e1Result.kind === 'calendar_text'
-                  ) {
-                    assistantText = e1Result.data;
-                    if (e1Result.kind === 'search_text') searchSources = e1Result.sources ?? [];
-                    responseDomain = e1Result.kind === 'search_text'
-                      ? 'search'
-                      : e1Result.kind === 'todo_text'
-                        ? 'todo'
-                        : e1Result.kind === 'calendar_text'
-                          ? 'calendar'
-                          : 'mail';
-                    semanticActivatedRouteKey = e1Result.routeKey;
-                    app.log.info(
-                      {
-                        threadId,
-                        requestId,
-                        route: e1Result.routeKey,
-                        routeLevel: 'E1',
-                        score: semResult.top1Score,
-                        margin: semResult.margin,
-                        decision: semResult.decision,
-                        activated: true,
-                        fallback: false,
-                        highRisk,
-                        elapsedMs: semResult.elapsedMs,
-                        targetAgentId,
-                        handled: true,
-                        elapsed_ms: Date.now() - tE1,
-                      },
-                      highRisk ? 'semantic_router_e1_high_risk_live_handled' : 'semantic_router_e1_live_handled',
-                    );
-                  } else if (e1Result.kind === 'spotify_plan') {
-                    const maybePlan = e1Result.data as MusicAgentPlan;
-                    if (maybePlan.route !== 'spotify' || !maybePlan.request) {
+                  if (routeKey.startsWith('executor.')) {
+                    if (!executorsEntry) {
                       app.log.info(
                         {
                           threadId,
                           requestId,
-                          route: e1Result.routeKey,
+                          route: routeKey,
                           routeLevel: 'E1',
                           score: semResult.top1Score,
                           margin: semResult.margin,
                           decision: semResult.decision,
-                          activated: true,
+                          activated: false,
                           fallback: true,
                           highRisk,
                           elapsedMs: semResult.elapsedMs,
                           targetAgentId,
-                          handled: false,
-                          elapsed_ms: Date.now() - tE1,
                         },
-                        highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
+                        'semantic_router_e1_activation_fallback_unsupported_target'
                       );
                     } else {
-                      semanticE1SpotifyPlan = maybePlan;
-                      semanticActivatedTarget = { agentId: SPOTIFY_AGENT_ID, confidence: 1 };
-                      semanticActivatedRouteKey = e1Result.routeKey;
+                      semanticActivatedTarget = { agentId: executorsEntry.agentId, confidence: 1 };
+                      semanticActivatedRouteKey = routeKey;
                       app.log.info(
                         {
                           threadId,
                           requestId,
-                          route: e1Result.routeKey,
+                          route: routeKey,
                           routeLevel: 'E1',
                           score: semResult.top1Score,
                           margin: semResult.margin,
@@ -3239,14 +3698,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           highRisk,
                           elapsedMs: semResult.elapsedMs,
                           targetAgentId,
-                          planner: 'spotify_music_agent',
                           handled: true,
-                          elapsed_ms: Date.now() - tE1,
+                          mode: 'ha_executor_specialized',
                         },
-                        highRisk ? 'semantic_router_e1_high_risk_live_handled' : 'semantic_router_e1_live_handled',
+                        'semantic_router_e1_live_handled'
                       );
                     }
                   } else {
+                    const tE1 = Date.now();
                     app.log.info(
                       {
                         threadId,
@@ -3257,38 +3716,283 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         margin: semResult.margin,
                         decision: semResult.decision,
                         activated: true,
-                        fallback: true,
+                        fallback: false,
                         highRisk,
                         elapsedMs: semResult.elapsedMs,
                         targetAgentId,
                         handled: false,
-                        elapsed_ms: Date.now() - tE1,
                       },
-                      highRisk ? 'semantic_router_e1_high_risk_live_fallback_llm' : 'semantic_router_e1_live_fallback_llm',
+                      highRisk
+                        ? 'semantic_router_e1_high_risk_live_attempt'
+                        : 'semantic_router_e1_live_attempt'
                     );
+
+                    if (isSlowReadRoute && sseStream !== null) {
+                      const ackMsg = getIngestAckText([routeKey]);
+                      if (ackMsg) pushSseAck(ackMsg);
+                    }
+
+                    try {
+                      const routeCapability = findCapabilityByRouteKey(routeKey);
+                      if (
+                        routeCapability &&
+                        routeCapability.agent !== 'calendar' &&
+                        requiresCapabilityConfirmation(routeCapability)
+                      ) {
+                        app.log.info(
+                          {
+                            threadId: effectiveThreadId,
+                            requestId,
+                            route: routeKey,
+                            agent: routeCapability.agent,
+                            action: routeCapability.action,
+                          },
+                          'semantic_router_e1_mutation_blocked_pending_required'
+                        );
+                      }
+                      const blockedMutationText =
+                        routeCapability &&
+                        (routeCapability.agent === 'mail' || routeCapability.agent === 'todo') &&
+                        requiresCapabilityConfirmation(routeCapability)
+                          ? ((await planPendingMailOrTodoMutation({
+                              threadId: effectiveThreadId,
+                              clientChannel: clientChannel ?? undefined,
+                              agent: routeCapability.agent,
+                              text: assistantInputText,
+                              routeKey,
+                            })) ?? '')
+                          : '';
+                      const e1Result = blockedMutationText
+                        ? routeCapability?.agent === 'mail'
+                          ? { kind: 'mail_text' as const, routeKey, data: blockedMutationText }
+                          : { kind: 'todo_text' as const, routeKey, data: blockedMutationText }
+                        : await dispatchAcceptedE1Route({
+                            route: semResult.matchedRoute,
+                            text: assistantInputText,
+                            deps: {
+                              planSpotifyAction: async (plannerText: string) =>
+                                planSpotifyActionFromTextWithOpenAi({
+                                  env: deps.env,
+                                  spotifyWebApi: spotifyWebApi(),
+                                  text: plannerText,
+                                  correlationId: correlationId || undefined,
+                                  userId:
+                                    typeof parsed.data.user_id === 'string'
+                                      ? parsed.data.user_id.trim() || undefined
+                                      : undefined,
+                                  log: app.log,
+                                }),
+                              callSearchAgent: async (agentKey, params) =>
+                                callSearchAgent(agentKey, {
+                                  text: params.text,
+                                  openAiApiKey: deps.env.OPENAI_API_KEY ?? '',
+                                  openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                                  openAiModel: deps.env.OPENAI_MODEL_SYNTHESIS,
+                                  perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
+                                  perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
+                                  timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                                  log: app.log,
+                                }),
+                              callTodoAgent: async () => {
+                                return callTodoAgent(
+                                  assistantInputText,
+                                  {
+                                    MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
+                                    MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
+                                    MICROSOFT_REFRESH_TOKEN: deps.env.MICROSOFT_REFRESH_TOKEN,
+                                    MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
+                                    OAUTH_REFRESH_TOKEN_STORE_PATH:
+                                      deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+                                    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+                                    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+                                    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+                                    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+                                  },
+                                  app.log
+                                );
+                              },
+                              callMailAgent: async () => {
+                                return callMailAgent(
+                                  assistantInputText,
+                                  buildMailEnv(),
+                                  app.log
+                                );
+                              },
+                              callCalendarAgent: async () => {
+                                if (isCalendarMutationRouteKey(routeKey)) {
+                                  return planPendingCalendarMutation(
+                                    effectiveThreadId,
+                                    assistantInputText,
+                                    clientChannel ?? undefined
+                                  );
+                                }
+                                return callCalendarAgent(
+                                  assistantInputText,
+                                  buildCalendarEnv(),
+                                  app.log
+                                );
+                              },
+                            },
+                          });
+
+                      if (!e1Result) {
+                        app.log.info(
+                          {
+                            threadId,
+                            requestId,
+                            route: routeKey,
+                            routeLevel: 'E1',
+                            score: semResult.top1Score,
+                            margin: semResult.margin,
+                            decision: semResult.decision,
+                            activated: true,
+                            fallback: true,
+                            highRisk,
+                            elapsedMs: semResult.elapsedMs,
+                            targetAgentId,
+                            handled: false,
+                            elapsed_ms: Date.now() - tE1,
+                          },
+                          highRisk
+                            ? 'semantic_router_e1_high_risk_live_fallback_llm'
+                            : 'semantic_router_e1_live_fallback_llm'
+                        );
+                      } else if (
+                        e1Result.kind === 'search_text' ||
+                        e1Result.kind === 'todo_text' ||
+                        e1Result.kind === 'mail_text' ||
+                        e1Result.kind === 'calendar_text'
+                      ) {
+                        assistantText = e1Result.data;
+                        if (e1Result.kind === 'search_text') searchSources = e1Result.sources ?? [];
+                        responseDomain =
+                          e1Result.kind === 'search_text'
+                            ? 'search'
+                            : e1Result.kind === 'todo_text'
+                              ? 'todo'
+                              : e1Result.kind === 'calendar_text'
+                                ? 'calendar'
+                                : 'mail';
+                        semanticActivatedRouteKey = e1Result.routeKey;
+                        app.log.info(
+                          {
+                            threadId,
+                            requestId,
+                            route: e1Result.routeKey,
+                            routeLevel: 'E1',
+                            score: semResult.top1Score,
+                            margin: semResult.margin,
+                            decision: semResult.decision,
+                            activated: true,
+                            fallback: false,
+                            highRisk,
+                            elapsedMs: semResult.elapsedMs,
+                            targetAgentId,
+                            handled: true,
+                            elapsed_ms: Date.now() - tE1,
+                          },
+                          highRisk
+                            ? 'semantic_router_e1_high_risk_live_handled'
+                            : 'semantic_router_e1_live_handled'
+                        );
+                      } else if (e1Result.kind === 'spotify_plan') {
+                        const maybePlan = e1Result.data as MusicAgentPlan;
+                        if (maybePlan.route !== 'spotify' || !maybePlan.request) {
+                          app.log.info(
+                            {
+                              threadId,
+                              requestId,
+                              route: e1Result.routeKey,
+                              routeLevel: 'E1',
+                              score: semResult.top1Score,
+                              margin: semResult.margin,
+                              decision: semResult.decision,
+                              activated: true,
+                              fallback: true,
+                              highRisk,
+                              elapsedMs: semResult.elapsedMs,
+                              targetAgentId,
+                              handled: false,
+                              elapsed_ms: Date.now() - tE1,
+                            },
+                            highRisk
+                              ? 'semantic_router_e1_high_risk_live_fallback_llm'
+                              : 'semantic_router_e1_live_fallback_llm'
+                          );
+                        } else {
+                          semanticE1SpotifyPlan = maybePlan;
+                          semanticActivatedTarget = { agentId: SPOTIFY_AGENT_ID, confidence: 1 };
+                          semanticActivatedRouteKey = e1Result.routeKey;
+                          app.log.info(
+                            {
+                              threadId,
+                              requestId,
+                              route: e1Result.routeKey,
+                              routeLevel: 'E1',
+                              score: semResult.top1Score,
+                              margin: semResult.margin,
+                              decision: semResult.decision,
+                              activated: true,
+                              fallback: false,
+                              highRisk,
+                              elapsedMs: semResult.elapsedMs,
+                              targetAgentId,
+                              planner: 'spotify_music_agent',
+                              handled: true,
+                              elapsed_ms: Date.now() - tE1,
+                            },
+                            highRisk
+                              ? 'semantic_router_e1_high_risk_live_handled'
+                              : 'semantic_router_e1_live_handled'
+                          );
+                        }
+                      } else {
+                        app.log.info(
+                          {
+                            threadId,
+                            requestId,
+                            route: routeKey,
+                            routeLevel: 'E1',
+                            score: semResult.top1Score,
+                            margin: semResult.margin,
+                            decision: semResult.decision,
+                            activated: true,
+                            fallback: true,
+                            highRisk,
+                            elapsedMs: semResult.elapsedMs,
+                            targetAgentId,
+                            handled: false,
+                            elapsed_ms: Date.now() - tE1,
+                          },
+                          highRisk
+                            ? 'semantic_router_e1_high_risk_live_fallback_llm'
+                            : 'semantic_router_e1_live_fallback_llm'
+                        );
+                      }
+                    } catch (err) {
+                      app.log.warn(
+                        {
+                          threadId,
+                          requestId,
+                          route: routeKey,
+                          routeLevel: 'E1',
+                          score: semResult.top1Score,
+                          margin: semResult.margin,
+                          decision: semResult.decision,
+                          activated: true,
+                          fallback: true,
+                          highRisk,
+                          elapsedMs: semResult.elapsedMs,
+                          targetAgentId,
+                          elapsed_ms: Date.now() - tE1,
+                          err,
+                        },
+                        highRisk
+                          ? 'semantic_router_e1_high_risk_live_error'
+                          : 'semantic_router_e1_live_error'
+                      );
+                    }
                   }
-                } catch (err) {
-                  app.log.warn(
-                    {
-                      threadId,
-                      requestId,
-                      route: routeKey,
-                      routeLevel: 'E1',
-                      score: semResult.top1Score,
-                      margin: semResult.margin,
-                      decision: semResult.decision,
-                      activated: true,
-                      fallback: true,
-                      highRisk,
-                      elapsedMs: semResult.elapsedMs,
-                      targetAgentId,
-                      elapsed_ms: Date.now() - tE1,
-                      err,
-                    },
-                    highRisk ? 'semantic_router_e1_high_risk_live_error' : 'semantic_router_e1_live_error',
-                  );
-                }
-                }
                 }
               }
             }
@@ -3298,100 +4002,107 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
       } else {
         // Phase 1A shadow mode (observation only)
-        trySemanticRouter(semanticInput).then((semResult) => {
-          app.log.info(
-            {
-              threadId,
-              requestId,
-              semanticTop1: semResult.top1Intent,
-              semanticScore: semResult.top1Score,
-              semanticTop2: semResult.top2Intent,
-              margin: semResult.margin,
-              decision: semResult.decision,
-              accepted: semResult.accepted,
-              elapsedMs: semResult.elapsedMs,
-              cachedEmbedding: semResult.debug?.cachedEmbedding,
-              shadow: deps.env.SEMANTIC_ROUTER_SHADOW_MODE,
-              activationEnabled: false,
-              runtimeMultiIntentGuard,
-              routing_config_hash: ROUTING_CONFIG_HASH,
-              semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
-            },
-            semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm',
-          );
-          if (semResult.accepted && semResult.decision === 'accepted_e1' && semResult.matchedRoute) {
+        trySemanticRouter(semanticInput)
+          .then((semResult) => {
             app.log.info(
               {
                 threadId,
                 requestId,
-                route: semResult.matchedRoute.key,
+                semanticTop1: semResult.top1Intent,
+                semanticScore: semResult.top1Score,
+                semanticTop2: semResult.top2Intent,
+                margin: semResult.margin,
                 decision: semResult.decision,
-                targetAgentId: semResult.matchedRoute.targetAgentId,
-                plannerRequired: semResult.matchedRoute.plannerRequired === true,
+                accepted: semResult.accepted,
+                elapsedMs: semResult.elapsedMs,
+                cachedEmbedding: semResult.debug?.cachedEmbedding,
+                shadow: deps.env.SEMANTIC_ROUTER_SHADOW_MODE,
+                activationEnabled: false,
+                runtimeMultiIntentGuard,
+                routing_config_hash: ROUTING_CONFIG_HASH,
+                semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
               },
-              'semantic_router_e1_candidate',
+              semResult.accepted ? 'semantic_router_result' : 'semantic_router_fallback_llm'
             );
-          }
-        }).catch((err) => {
-          app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
-        });
+            if (
+              semResult.accepted &&
+              semResult.decision === 'accepted_e1' &&
+              semResult.matchedRoute
+            ) {
+              app.log.info(
+                {
+                  threadId,
+                  requestId,
+                  route: semResult.matchedRoute.key,
+                  decision: semResult.decision,
+                  targetAgentId: semResult.matchedRoute.targetAgentId,
+                  plannerRequired: semResult.matchedRoute.plannerRequired === true,
+                },
+                'semantic_router_e1_candidate'
+              );
+            }
+          })
+          .catch((err) => {
+            app.log.warn({ threadId, requestId, err }, 'semantic_router_error');
+          });
       }
     }
 
-    const routerPromise: Promise<RouterResult> = assistantText !== undefined
-      ? Promise.resolve({
-          targets: [],
-          reason: `semantic_router_live:${semanticActivatedRouteKey ?? 'handled'}`,
-        })
-      : semanticActivatedTarget
-      ? Promise.resolve({
-          targets: [semanticActivatedTarget],
-          reason: `semantic_router_activated:${semanticActivatedRouteKey ?? semanticActivatedTarget.agentId}`,
-        })
-      : routerEnabled
-        ? routeUserRequest({
-            text: assistantInputText,
-            agents: allAgentEntries,
-            summary: threadBefore.summary?.trim() || undefined,
-            recentMessages,
-            options: {
-              openAiApiKey: deps.env.OPENAI_API_KEY!,
-              openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-              model: deps.env.OPENAI_MODEL_ROUTER,
-              timeoutMs: deps.env.LLM_PROVIDER === 'hybrid' ? deps.env.LLM_LOCAL_ROUTER_TIMEOUT_MS : deps.env.ROUTER_TIMEOUT_MS,
-              confidenceThreshold: threshold,
-              generalAgentId,
-              provider: deps.env.LLM_PROVIDER === 'openai' ? 'openai' : 'ollama',
-              ...(deps.env.LLM_PROVIDER === 'hybrid' && deps.env.LLM_FALLBACK_OPENAI_API_KEY && deps.env.LLM_FALLBACK_OPENAI_BASE_URL && deps.env.LLM_FALLBACK_OPENAI_MODEL_ROUTER ? {
-                fallback: {
-                  openAiApiKey: deps.env.LLM_FALLBACK_OPENAI_API_KEY,
-                  openAiBaseUrl: deps.env.LLM_FALLBACK_OPENAI_BASE_URL,
-                  model: deps.env.LLM_FALLBACK_OPENAI_MODEL_ROUTER,
-                  timeoutMs: deps.env.LLM_FALLBACK_OPENAI_TIMEOUT_MS,
-                },
-              } : {}),
-              log: app.log,
-            },
+    const routerPromise: Promise<RouterResult> =
+      assistantText !== undefined
+        ? Promise.resolve({
+            targets: [],
+            reason: `semantic_router_live:${semanticActivatedRouteKey ?? 'handled'}`,
           })
-        : Promise.reject(new Error('router_disabled'));
+        : semanticActivatedTarget
+          ? Promise.resolve({
+              targets: [semanticActivatedTarget],
+              reason: `semantic_router_activated:${semanticActivatedRouteKey ?? semanticActivatedTarget.agentId}`,
+            })
+          : routerEnabled
+            ? routeUserRequest({
+                text: assistantInputText,
+                agents: allAgentEntries,
+                summary: threadBefore.summary?.trim() || undefined,
+                recentMessages,
+                options: {
+                  openAiApiKey: deps.env.OPENAI_API_KEY!,
+                  openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                  model: deps.env.OPENAI_MODEL_ROUTER,
+                  timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
+                  maxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_ROUTER,
+                  confidenceThreshold: threshold,
+                  generalAgentId,
+                  log: app.log,
+                },
+              })
+            : Promise.reject(new Error('router_disabled'));
 
     // Early SSE ack: fire as soon as the router decides, without waiting for HA general.
     // This gives the user immediate feedback ("Je cherche...") before Perplexity/todo/mail respond.
     if (sseStream !== null && routerEnabled) {
       const _earlyAckEntryMap = new Map(allAgentEntries.map((e) => [e.agentId, e]));
-      routerPromise.then((routerRes) => {
-        const validTargets = routerRes.targets.filter((t) => t.confidence >= threshold);
-        const specTargets = validTargets.filter((t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId);
-        if (specTargets.length > 0) {
-          const ackText = getIngestAckText(specTargets.map((t) => _earlyAckEntryMap.get(t.agentId)?.key));
-          if (ackText) pushSseAck(ackText);
-        }
-      }).catch(() => { /* ack is best-effort — main flow handles the real result */ });
+      routerPromise
+        .then((routerRes) => {
+          const validTargets = routerRes.targets.filter((t) => t.confidence >= threshold);
+          const specTargets = validTargets.filter(
+            (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId
+          );
+          if (specTargets.length > 0) {
+            const ackText = getIngestAckText(
+              specTargets.map((t) => _earlyAckEntryMap.get(t.agentId)?.key)
+            );
+            if (ackText) pushSseAck(ackText);
+          }
+        })
+        .catch(() => {
+          /* ack is best-effort — main flow handles the real result */
+        });
     }
 
     const routerResult = await routerPromise.then(
       (value) => ({ status: 'fulfilled' as const, value }),
-      (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      (reason: unknown) => ({ status: 'rejected' as const, reason })
     );
 
     if (routerResult.status === 'rejected' && routerEnabled) {
@@ -3411,9 +4122,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           routing_config_hash: ROUTING_CONFIG_HASH,
           semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
         },
-        'ingest_routing_trace',
+        'ingest_routing_trace'
       );
-      app.log.warn({ threadId, requestId, err: routerResult.reason }, 'ha_agent_router_failed_fallback_general');
+      app.log.warn(
+        { threadId, requestId, err: routerResult.reason },
+        'ha_agent_router_failed_fallback_general'
+      );
       gracefulFallback = true;
     }
 
@@ -3421,7 +4135,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (routerResult.status === 'fulfilled') {
       const validTargets = routerResult.value.targets.filter((t) => t.confidence >= threshold);
-      const externalWeatherCandidate = isClearlyExternalWeather(assistantInputText) && !isLikelyLocalWeatherQuery(assistantInputText);
+      const permissionEntryByAgentId = new Map(
+        allAgentEntries.map((entry) => [entry.agentId, entry])
+      );
+      const selectedPermissions = new Set(
+        validTargets.map((target) => {
+          if (target.agentId === SPOTIFY_AGENT_ID) return 'music' as const;
+          if (target.agentId === generalAgentId) return 'home' as const;
+          const key = permissionEntryByAgentId.get(target.agentId)?.key;
+          if (key === 'weather') return 'home' as const;
+          if (isSearchAgentKey(key)) return 'chat' as const;
+          return permissionForCapabilityAgent(key);
+        })
+      );
+      for (const permission of selectedPermissions) {
+        if (denyUnless(permission)) return reply;
+      }
+      const externalWeatherCandidate =
+        isClearlyExternalWeather(assistantInputText) &&
+        !isLikelyLocalWeatherQuery(assistantInputText);
 
       app.log.info(
         {
@@ -3429,18 +4161,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           requestId,
           router_status: 'fulfilled',
           router_reason: routerResult.value.reason,
-          router_targets_raw: routerResult.value.targets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
+          router_targets_raw: routerResult.value.targets
+            .map((t) => `${t.agentId}:${t.confidence}`)
+            .join(','),
           router_targets_final: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
           routing_config_version: ROUTING_CONFIG_VERSION,
           routing_config_hash: ROUTING_CONFIG_HASH,
           semantic_router_config_hash: SEMANTIC_ROUTER_CONFIG_HASH,
         },
-        'ingest_routing_trace',
+        'ingest_routing_trace'
       );
 
       const spotifyTarget = validTargets.find((t) => t.agentId === SPOTIFY_AGENT_ID);
       const haSpecTargets = validTargets.filter(
-        (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId,
+        (t) => t.agentId !== SPOTIFY_AGENT_ID && t.agentId !== generalAgentId
       );
 
       app.log.info(
@@ -3450,7 +4184,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           router_targets: validTargets.map((t) => `${t.agentId}:${t.confidence}`).join(','),
           router_reason: routerResult.value.reason,
         },
-        'ha_agent_router_result',
+        'ha_agent_router_result'
       );
 
       if (validTargets.length > 0) {
@@ -3473,11 +4207,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           // EXCEPT for search_and_play without a query slot: the router reliably picks
           // the action but often omits the query. Fall through to the music planner
           // in that case so it can extract the proper search terms from the text.
-          const routerActionParsed = spotifyTarget.action ? spotifyActionSchema.safeParse(spotifyTarget.action) : null;
+          const routerActionParsed = spotifyTarget.action
+            ? spotifyActionSchema.safeParse(spotifyTarget.action)
+            : null;
           const routerHasUsableSearchAndPlay =
             routerActionParsed?.success &&
             routerActionParsed.data === 'search_and_play' &&
-            typeof (spotifyTarget.slots as Record<string, unknown> | undefined)?.['query'] === 'string' &&
+            typeof (spotifyTarget.slots as Record<string, unknown> | undefined)?.['query'] ===
+              'string' &&
             ((spotifyTarget.slots as Record<string, unknown>)['query'] as string).trim().length > 0;
           const routerDirectUsable =
             routerActionParsed?.success &&
@@ -3497,10 +4234,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 })
               : planSpotifyActionFromTextWithOpenAi({
                   env: deps.env,
-                  spotifyWebApi: deps.spotifyWebApi,
+                  spotifyWebApi: spotifyWebApi(),
                   text: assistantInputText,
                   correlationId: correlationId || undefined,
-                  userId: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+                  userId:
+                    typeof parsed.data.user_id === 'string'
+                      ? parsed.data.user_id.trim() || undefined
+                      : undefined,
                   log: app.log,
                 });
 
@@ -3508,29 +4248,43 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             resolveSpotifyPayload
               .then(async (musicPlan): Promise<SpecializedResult | null> => {
                 if (musicPlan.route !== 'spotify' || !musicPlan.request) {
-                  app.log.info({ threadId, requestId, reason: musicPlan.reason }, 'music_agent_route_none_despite_router');
+                  app.log.info(
+                    { threadId, requestId, reason: musicPlan.reason },
+                    'music_agent_route_none_despite_router'
+                  );
                   return null;
                 }
                 const spotifyPayload = ingestSpotifyRequestSchema.safeParse({
                   threadId,
                   correlation_id: correlationId || undefined,
-                  user_id: typeof parsed.data.user_id === 'string' ? parsed.data.user_id.trim() || undefined : undefined,
+                  user_id:
+                    typeof parsed.data.user_id === 'string'
+                      ? parsed.data.user_id.trim() || undefined
+                      : undefined,
                   ...musicPlan.request,
                   text,
                 });
                 if (!spotifyPayload.success) {
-                  app.log.warn({ threadId, requestId, issues: spotifyPayload.error.issues }, 'music_agent_invalid_payload');
+                  app.log.warn(
+                    { threadId, requestId, issues: spotifyPayload.error.issues },
+                    'music_agent_invalid_payload'
+                  );
                   return null;
                 }
                 const spotifyResp = await executeSpotifyCapability({
                   request: spotifyPayload.data,
-                  spotifyWebApi: deps.spotifyWebApi,
+                  spotifyWebApi: spotifyWebApi(),
                   env: deps.env,
                   log: app.log,
                 });
                 app.log.info(
-                  { threadId, requestId, action: spotifyPayload.data.action, status: spotifyResp.status },
-                  'ingest_spotify_capability_done',
+                  {
+                    threadId,
+                    requestId,
+                    action: spotifyPayload.data.action,
+                    status: spotifyResp.status,
+                  },
+                  'ingest_spotify_capability_done'
                 );
                 return {
                   kind: 'spotify_tts',
@@ -3549,7 +4303,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               .catch((err) => {
                 app.log.warn({ threadId, requestId, err }, 'spotify_task_failed');
                 return null;
-              }),
+              })
           );
         }
 
@@ -3560,36 +4314,52 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
-          const isSearchAgent   = isSearchAgentKey(agentEntry?.key);
-          const isTodoAgent     = isTodoAgentKey(agentEntry?.key);
-          const isMailAgent     = isMailAgentKey(agentEntry?.key);
+          const isSearchAgent = isSearchAgentKey(agentEntry?.key);
+          const isTodoAgent = isTodoAgentKey(agentEntry?.key);
+          const isMailAgent = isMailAgentKey(agentEntry?.key);
           const isCalendarAgent = isCalendarAgentKey(agentEntry?.key);
           const isWeatherAgent = agentEntry?.key === 'weather';
           if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
-            const searchAgentKey = externalWeatherCandidate && agentEntry?.key === 'search.news'
-              ? 'search.news.external_weather'
-              : agentEntry!.key ?? 'search';
-            app.log.info({ threadId, requestId, agent: haTarget.agentId, searchAgentKey }, 'search_agent_direct');
+            const searchAgentKey =
+              externalWeatherCandidate && agentEntry?.key === 'search.news'
+                ? 'search.news.external_weather'
+                : (agentEntry!.key ?? 'search');
+            app.log.info(
+              { threadId, requestId, agent: haTarget.agentId, searchAgentKey },
+              'search_agent_direct'
+            );
             tasks.push(
               callSearchAgent(searchAgentKey, {
                 text: assistantInputText,
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
+                openAiModel: deps.env.OPENAI_MODEL_SYNTHESIS,
                 perplexityApiKey: deps.env.PERPLEXITY_API_KEY,
                 perplexityBaseUrl: deps.env.PERPLEXITY_BASE_URL,
                 timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
                 log: app.log,
               })
                 .then((result): SpecializedResult | null => {
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'search_agent_direct_done');
-                  return { kind: 'ha_text', agentId: haTarget.agentId, text: result.text, sources: result.sources };
+                  app.log.info(
+                    { threadId, requestId, agent: haTarget.agentId },
+                    'search_agent_direct_done'
+                  );
+                  return {
+                    kind: 'ha_text',
+                    agentId: haTarget.agentId,
+                    text: result.text,
+                    sources: result.sources,
+                  };
                 })
                 .catch((err) => {
                   // Search agents bypass HA entirely — no HA entity exists for them.
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, searchAgentKey, err }, 'search_agent_direct_failed');
+                  app.log.warn(
+                    { threadId, requestId, agent: haTarget.agentId, searchAgentKey, err },
+                    'search_agent_direct_failed'
+                  );
                   return null;
-                }),
+                })
             );
           } else if (isTodoAgent) {
             // Todo agent: LLM planner → Microsoft Graph Tasks — bypass HA entirely.
@@ -3602,33 +4372,45 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               routeKey: agentEntry?.key,
             });
             if (pendingText) {
-              tasks.push(Promise.resolve({
-                kind: 'ha_text' as const,
-                agentId: haTarget.agentId,
-                text: pendingText,
-              }));
+              tasks.push(
+                Promise.resolve({
+                  kind: 'ha_text' as const,
+                  agentId: haTarget.agentId,
+                  text: pendingText,
+                })
+              );
               continue;
             }
             tasks.push(
-              callTodoAgent(assistantInputText, {
-                MICROSOFT_CLIENT_ID:      deps.env.MICROSOFT_CLIENT_ID,
-                MICROSOFT_CLIENT_SECRET:  deps.env.MICROSOFT_CLIENT_SECRET,
-                MICROSOFT_REFRESH_TOKEN:  deps.env.MICROSOFT_REFRESH_TOKEN,
-                MICROSOFT_TENANT_ID:      deps.env.MICROSOFT_TENANT_ID,
-                OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                OPENAI_API_KEY:           deps.env.OPENAI_API_KEY,
-                OPENAI_BASE_URL:          deps.env.OPENAI_BASE_URL,
-                OPENAI_TIMEOUT_MS:        deps.env.OPENAI_TIMEOUT_MS,
-                OPENAI_MODEL_SUMMARY:     deps.env.OPENAI_MODEL_SUMMARY,
-              }, app.log)
+              callTodoAgent(
+                assistantInputText,
+                {
+                  MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
+                  MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
+                  MICROSOFT_REFRESH_TOKEN: deps.env.MICROSOFT_REFRESH_TOKEN,
+                  MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
+                  OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+                  OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+                  OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+                  OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+                  OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+                },
+                app.log
+              )
                 .then((txt): SpecializedResult | null => {
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'todo_agent_direct_done');
+                  app.log.info(
+                    { threadId, requestId, agent: haTarget.agentId },
+                    'todo_agent_direct_done'
+                  );
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                 })
                 .catch((err) => {
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'todo_agent_direct_failed');
+                  app.log.warn(
+                    { threadId, requestId, agent: haTarget.agentId, err },
+                    'todo_agent_direct_failed'
+                  );
                   return null;
-                }),
+                })
             );
           } else if (isMailAgent) {
             // Mail agent: LLM planner → Gmail / Outlook Graph — bypass HA entirely.
@@ -3641,50 +4423,66 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               routeKey: agentEntry?.key,
             });
             if (pendingText) {
-              tasks.push(Promise.resolve({
-                kind: 'ha_text' as const,
-                agentId: haTarget.agentId,
-                text: pendingText,
-              }));
+              tasks.push(
+                Promise.resolve({
+                  kind: 'ha_text' as const,
+                  agentId: haTarget.agentId,
+                  text: pendingText,
+                })
+              );
               continue;
             }
             tasks.push(
-              callMailAgent(assistantInputText, {
-                mailAccounts:    buildMailAccounts(deps.env),
-                OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                OPENAI_API_KEY:  deps.env.OPENAI_API_KEY,
-                OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-                OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-                OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-              }, app.log)
+              callMailAgent(
+                assistantInputText,
+                buildMailEnv(),
+                app.log
+              )
                 .then((txt): SpecializedResult | null => {
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'mail_agent_direct_done');
+                  app.log.info(
+                    { threadId, requestId, agent: haTarget.agentId },
+                    'mail_agent_direct_done'
+                  );
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                 })
                 .catch((err) => {
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'mail_agent_direct_failed');
+                  app.log.warn(
+                    { threadId, requestId, agent: haTarget.agentId, err },
+                    'mail_agent_direct_failed'
+                  );
                   return null;
-                }),
+                })
             );
           } else if (isCalendarAgent) {
             // Calendar agent: LLM planner → Google Calendar API — bypass HA entirely.
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct');
             tasks.push(
-              planPendingCalendarMutation(effectiveThreadId, assistantInputText, clientChannel ?? undefined)
+              planPendingCalendarMutation(
+                effectiveThreadId,
+                assistantInputText,
+                clientChannel ?? undefined
+              )
                 .then((txt): SpecializedResult | null => {
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'calendar_agent_direct_done');
+                  app.log.info(
+                    { threadId, requestId, agent: haTarget.agentId },
+                    'calendar_agent_direct_done'
+                  );
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                 })
                 .catch((err) => {
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'calendar_agent_direct_failed');
+                  app.log.warn(
+                    { threadId, requestId, agent: haTarget.agentId, err },
+                    'calendar_agent_direct_failed'
+                  );
                   return null;
-                }),
+                })
             );
           } else if (isWeatherAgent) {
             app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'weather_agent_direct');
             tasks.push(
               deps.ha
-                ? deps.ha.getStates()
+                ? deps.ha
+                    .getStates()
                     .then((statesRaw) => {
                       const haStates = toEntityStates(statesRaw);
                       const weather = buildWeatherSnapshotFromStates(haStates);
@@ -3697,7 +4495,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         log: app.log,
                       });
                       if (deterministicReply) {
-                        app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'weather_deterministic_used');
+                        app.log.info(
+                          { threadId, requestId, agent: haTarget.agentId },
+                          'weather_deterministic_used'
+                        );
                         return deterministicReply;
                       }
 
@@ -3705,7 +4506,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       return synthesizeWeatherReplyWithOpenAi({
                         openAiApiKey: deps.env.OPENAI_API_KEY!,
                         openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-                        model: deps.env.OPENAI_MODEL_SUMMARY,
+                        model: deps.env.OPENAI_MODEL_SYNTHESIS,
+                        maxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
                         timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
                         userText: assistantInputText,
                         weather,
@@ -3717,10 +4519,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                     })
                     .catch((err) => {
-                      app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'weather_agent_direct_failed');
+                      app.log.warn(
+                        { threadId, requestId, agent: haTarget.agentId, err },
+                        'weather_agent_direct_failed'
+                      );
                       return null;
                     })
-                : Promise.resolve(null),
+                : Promise.resolve(null)
             );
           } else {
             tasks.push(
@@ -3729,34 +4534,44 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
                   effectiveThreadId,
                   undefined,
-                  haTarget.agentId,
+                  haTarget.agentId
                 )
                 .then((txt): SpecializedResult | null => {
                   if (/^\s*OUT_OF_SCOPE\s*$/i.test(txt)) {
-                    app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_out_of_scope');
+                    app.log.info(
+                      { threadId, requestId, agent: haTarget.agentId },
+                      'ha_specialized_agent_out_of_scope'
+                    );
                     return null;
                   }
-                  app.log.info({ threadId, requestId, agent: haTarget.agentId }, 'ha_specialized_agent_done');
+                  app.log.info(
+                    { threadId, requestId, agent: haTarget.agentId },
+                    'ha_specialized_agent_done'
+                  );
                   return { kind: 'ha_text', agentId: haTarget.agentId, text: txt };
                 })
                 .catch((err) => {
-                  app.log.warn({ threadId, requestId, agent: haTarget.agentId, err }, 'ha_specialized_agent_failed');
+                  app.log.warn(
+                    { threadId, requestId, agent: haTarget.agentId, err },
+                    'ha_specialized_agent_failed'
+                  );
                   return null;
-                }),
+                })
             );
           }
         }
 
         const taskResults = await Promise.all(tasks);
         const goodResults = taskResults.filter((r): r is SpecializedResult => r !== null);
-        const aggregatedSearchSources = Array.from(new Set(goodResults.flatMap((r) => (
-          r.kind === 'ha_text' ? (r.sources ?? []) : []
-        ))));
+        const aggregatedSearchSources = Array.from(
+          new Set(goodResults.flatMap((r) => (r.kind === 'ha_text' ? (r.sources ?? []) : [])))
+        );
         if (aggregatedSearchSources.length > 0) searchSources = aggregatedSearchSources;
 
         if (goodResults.length > 0) {
           const spotifyRes = goodResults.find(
-            (r): r is Extract<SpecializedResult, { kind: 'spotify_tts' }> => r.kind === 'spotify_tts',
+            (r): r is Extract<SpecializedResult, { kind: 'spotify_tts' }> =>
+              r.kind === 'spotify_tts'
           );
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
@@ -3768,11 +4583,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   mode: voiceMode,
                 })
               : spotifyRes.tts;
-            void conversationService.persistMessages(effectiveThreadId, text, spotifyVoiceText).then(async () => {
-              if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-                summarizationService.startPresummarize(effectiveThreadId);
-              }
-            });
+            void conversationService
+              .persistMessages(effectiveThreadId, text, spotifyVoiceText)
+              .then(async () => {
+                if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+                  summarizationService.startPresummarize(effectiveThreadId);
+                }
+              });
             const spotifyOnlyPayload = buildSpotifyIngestPayload({
               threadId: effectiveThreadId,
               responseText: spotifyVoiceText,
@@ -3780,9 +4597,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               action: spotifyRes.action,
               routingPath: inferSpotifyRoutingPath(spotifyRes.musicPlanReason),
               correlationId: correlationId || undefined,
-              planner: { source: 'openai_music_agent', route: spotifyRes.musicPlanRoute, reason: spotifyRes.musicPlanReason },
+              planner: {
+                source: 'openai_music_agent',
+                route: spotifyRes.musicPlanRoute,
+                reason: spotifyRes.musicPlanReason,
+              },
             });
-            if (sseStream !== null) { pushSseResponse(spotifyOnlyPayload); return reply; }
+            if (sseStream !== null) {
+              pushSseResponse(spotifyOnlyPayload);
+              return reply;
+            }
             return reply.code(200).send(spotifyOnlyPayload);
           }
 
@@ -3794,15 +4618,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           if (parts.length === 1) {
             // Single non-Spotify result — no synthesis needed
             assistantText = parts[0].text;
-            if (parts[0].agentId === 'gmail' || parts[0].agentId === 'mail') responseDomain = 'mail';
+            if (parts[0].agentId === 'gmail' || parts[0].agentId === 'mail')
+              responseDomain = 'mail';
             else if (parts[0].agentId === 'todo') responseDomain = 'todo';
             else if (parts[0].agentId === 'calendar') responseDomain = 'calendar';
             else if (parts[0].agentId.startsWith('search')) {
               responseDomain = 'search';
               const searchResult = goodResults[0];
               if (searchResult?.kind === 'ha_text') searchSources = searchResult.sources ?? [];
-            }
-            else if (parts[0].agentId === 'weather') responseDomain = 'weather';
+            } else if (parts[0].agentId === 'weather') responseDomain = 'weather';
             else responseDomain = 'executor';
           } else {
             app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesizing');
@@ -3812,8 +4636,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               options: {
                 openAiApiKey: deps.env.OPENAI_API_KEY!,
                 openAiBaseUrl: deps.env.OPENAI_BASE_URL,
-                model: deps.env.OPENAI_MODEL_ROUTER,
+                model: deps.env.OPENAI_MODEL_SYNTHESIS,
                 timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                maxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
                 log: app.log,
               },
             });
@@ -3829,45 +4654,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     // ── General conversation fallback ────────────────────────────────────────
-    // Ollama is the nominal local runtime. The legacy OpenAI profile keeps the
-    // historical HA conversation fallback as dormant compatibility.
     if (assistantText === undefined) {
-      if (deps.env.LLM_PROVIDER === 'openai') {
-        try {
-          assistantText = await conversationService.callHomeAssistantConversation(
-            applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
-            effectiveThreadId,
-            undefined,
-            generalAgentId,
-          );
-          if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
-            assistantText = toDeterministicHaFailureMessage();
-            gracefulFallback = true;
-          }
-          responseDomain = 'general';
-        } catch (err) {
-          app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_home_assistant_call_failed');
+      if (denyUnless('home')) return reply;
+      try {
+        assistantText = await conversationService.callHomeAssistantConversation(
+          applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+          effectiveThreadId,
+          undefined,
+          generalAgentId
+        );
+        if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
           assistantText = toDeterministicHaFailureMessage();
-          responseDomain = 'general';
           gracefulFallback = true;
         }
-      } else {
-        try {
-          const t0 = Date.now();
-          assistantText = await answerGeneralConversationWithOllama({
-            text: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
-            baseUrl: deps.env.OLLAMA_BASE_URL,
-            model: deps.env.OLLAMA_MODEL ?? deps.env.OPENAI_MODEL_ROUTER,
-            timeoutMs: deps.env.ROUTER_TIMEOUT_MS,
-          });
-          app.log.info({ threadId, requestId, elapsed_ms: Date.now() - t0 }, 'ingest_ollama_general_done');
-          responseDomain = 'general';
-        } catch (err) {
-          app.log.warn({ threadId, requestId, correlation_id: correlationId || undefined, err }, 'ingest_ollama_general_failed');
-          assistantText = 'Je suis là. Que puis-je faire pour toi ?';
-          responseDomain = 'general';
-          gracefulFallback = true;
-        }
+        responseDomain = 'general';
+      } catch (err) {
+        app.log.warn(
+          { threadId, requestId, correlation_id: correlationId || undefined, err },
+          'ingest_home_assistant_call_failed'
+        );
+        assistantText = toDeterministicHaFailureMessage();
+        responseDomain = 'general';
+        gracefulFallback = true;
       }
     }
 
@@ -3879,11 +4687,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           mode: voiceMode,
         })
       : assistantTextForClient;
-    const hasDedicatedTtsRuntime = typeof deps.env.OPENAI_TTS_BASE_URL === 'string'
-      && deps.env.OPENAI_TTS_BASE_URL.trim().length > 0;
-    const shouldPrepareTts = voiceEnabled || (hasDedicatedTtsRuntime && Boolean(clientChannel?.startsWith('desktop')));
-    const shouldInlineVoiceAudio = hasDedicatedTtsRuntime
-      && (supportsInlineVoiceAudio || Boolean(clientChannel?.startsWith('desktop')));
+    const shouldPrepareTts = voiceEnabled;
+    const shouldInlineVoiceAudio = voiceEnabled && supportsInlineVoiceAudio;
 
     if (responseDomain === 'mail') {
       const parsedMail = extractMailStateFromReply(assistantText);
@@ -3893,11 +4698,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
     }
 
-    void conversationService.persistMessages(effectiveThreadId, text, assistantTextVoice).then(async () => {
-      if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-        summarizationService.startPresummarize(effectiveThreadId);
-      }
-    });
+    void conversationService
+      .persistMessages(effectiveThreadId, text, assistantTextVoice)
+      .then(async () => {
+        if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+          summarizationService.startPresummarize(effectiveThreadId);
+        }
+      });
 
     // Pre-warm TTS in background so voice clients can display text immediately
     // while a subsequent /v1/tts call can hit warm cache/in-flight audio.
@@ -3905,7 +4712,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       warmTtsInBackground(toSingleParagraphPlainText(assistantTextVoice));
     }
 
-    const activeProposalForResponse = await pendingMutationRepository.findActiveByThread(effectiveThreadId) as PendingMutation | null;
+    const activeProposalForResponse = (await pendingMutationRepository.findActiveByThread(
+      effectiveThreadId
+    )) as PendingMutation | null;
     const voiceAudio = shouldInlineVoiceAudio
       ? await resolveInlineVoiceAudio(toSingleParagraphPlainText(assistantTextVoice))
       : null;
@@ -3918,28 +4727,50 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ...(voiceAudio ? { voiceAudio } : {}),
       replyMeta: {
         kind: responseDomain,
-        source: semanticActivatedRouteKey ? 'semantic_router' : (gracefulFallback ? 'ha_general' : 'router_or_specialized'),
+        source: semanticActivatedRouteKey
+          ? 'semantic_router'
+          : gracefulFallback
+            ? 'ha_general'
+            : 'router_or_specialized',
         ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
-        semanticDecision: semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
-          ? (activeProposalForResponse?.agent === 'calendar' && activeProposalForResponse.routeKey === semanticActivatedRouteKey && activeProposalForResponse.action !== 'disambiguate_event' ? 'confirmation_required' : 'clarification_required')
-          : (semanticActivatedRouteKey ? 'activated' : (routerResult.status === 'rejected' ? 'rejected' : 'not_activated')),
-        ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain ? {
-          proposalId: activeProposalForResponse.proposalId,
-          pendingAction: `${activeProposalForResponse.agent}.${activeProposalForResponse.action}`,
-        } : {}),
+        semanticDecision:
+          semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
+            ? activeProposalForResponse?.agent === 'calendar' &&
+              activeProposalForResponse.routeKey === semanticActivatedRouteKey &&
+              activeProposalForResponse.action !== 'disambiguate_event'
+              ? 'confirmation_required'
+              : 'clarification_required'
+            : semanticActivatedRouteKey
+              ? 'activated'
+              : routerResult.status === 'rejected'
+                ? 'rejected'
+                : 'not_activated',
+        ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain
+          ? {
+              proposalId: activeProposalForResponse.proposalId,
+              pendingAction: `${activeProposalForResponse.agent}.${activeProposalForResponse.action}`,
+            }
+          : {}),
         ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
-        ...(routerResult.status === 'fulfilled' ? {
-          llmProvider: routerResult.value.provider,
-          llmModel: routerResult.value.model,
-          llmLatencyMs: routerResult.value.latencyMs,
-          ...(routerResult.value.fallbackReason ? { llmFallbackReason: routerResult.value.fallbackReason } : {}),
-        } : {}),
+        ...(routerResult.status === 'fulfilled'
+          ? {
+              llmProvider: routerResult.value.provider,
+              llmModel: routerResult.value.model,
+              llmLatencyMs: routerResult.value.latencyMs,
+              ...(routerResult.value.fallbackReason
+                ? { llmFallbackReason: routerResult.value.fallbackReason }
+                : {}),
+            }
+          : {}),
       },
     };
 
     const validated = responseSchema.safeParse(payload);
     if (!validated.success) {
-      if (sseStream !== null) { sseStream.push(null); return reply; }
+      if (sseStream !== null) {
+        sseStream.push(null);
+        return reply;
+      }
       return reply.code(500).send({ error: 'response_validation_failed' });
     }
 
@@ -3947,8 +4778,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
 
     recordPerf('ingest', Date.now() - t0);
-    app.log.info({ threadId: effectiveThreadId, requestId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'ingest_complete');
-    if (sseStream !== null) { pushSseResponse(payload); return reply; }
+    app.log.info(
+      {
+        threadId: effectiveThreadId,
+        requestId,
+        elapsed_ms: Date.now() - t0,
+        voice_turn_id: voiceTurnId || undefined,
+      },
+      'ingest_complete'
+    );
+    if (sseStream !== null) {
+      pushSseResponse(payload);
+      return reply;
+    }
     return reply.code(200).send(payload);
   });
 
@@ -3963,38 +4805,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: 'invalid_audio_body' });
     }
 
-    const incomingContentType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : 'audio/wav';
+    const incomingContentType =
+      typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : 'audio/wav';
     const t0 = Date.now();
-    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
-
-    // Desktop and APK call Jarvis directly. Home Assistant is intentionally not
-    // part of the STT path: Jarvis streams PCM directly to local Whisper.
-    const tryLocalStt = async (): Promise<{ text: string; engineId: string } | null> => {
-      try {
-        const text = toSingleParagraphPlainText(await transcribeWithWyoming(body, {
-          host: deps.env.LOCAL_STT_HOST,
-          port: deps.env.LOCAL_STT_PORT,
-          timeoutMs: deps.env.LOCAL_STT_TIMEOUT_MS,
-          language: deps.env.OPENAI_STT_LANGUAGE,
-        }));
-        return text ? { text, engineId: 'local:wyoming-whisper' } : null;
-      } catch {
-        return null;
-      }
-    };
-
-    if (deps.env.STT_LOCAL_FIRST) {
-      const localResult = await tryLocalStt();
-      if (localResult) {
-        recordPerf('stt', Date.now() - t0);
-        app.log.info({ engineId: localResult.engineId, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined, local_first: true }, 'stt_complete');
-        return reply.code(200).send({ text: localResult.text, result: localResult.text, engineId: localResult.engineId });
-      }
-      if (!deps.env.STT_REMOTE_FALLBACK_ENABLED) {
-        app.log.warn({ voice_turn_id: voiceTurnId || undefined }, 'stt_local_unavailable_remote_fallback_disabled');
-        return reply.code(503).send({ error: 'stt_not_available', hint: 'Le STT local est indisponible.' });
-      }
-    }
+    const voiceTurnId =
+      typeof req.headers['x-voice-turn-id'] === 'string'
+        ? req.headers['x-voice-turn-id'].trim()
+        : '';
 
     try {
       const openAiResult = await transcribeWithOpenAi({
@@ -4004,7 +4821,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
 
       recordPerf('stt', Date.now() - t0);
-      app.log.info({ engineId: `openai:${openAiResult.model}`, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'stt_complete');
+      app.log.info(
+        {
+          engineId: `openai:${openAiResult.model}`,
+          elapsed_ms: Date.now() - t0,
+          voice_turn_id: voiceTurnId || undefined,
+        },
+        'stt_complete'
+      );
       return reply.code(200).send({
         text: openAiResult.text,
         result: openAiResult.text,
@@ -4012,11 +4836,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     } catch (err) {
       if (err instanceof Error && err.message === 'openai_stt_empty_transcript') {
-        app.log.info({ engineId: 'openai', voice_turn_id: voiceTurnId || undefined }, 'stt_openai_empty_silence_skip');
+        app.log.info(
+          { engineId: 'openai', voice_turn_id: voiceTurnId || undefined },
+          'stt_openai_empty_silence_skip'
+        );
         return reply.code(422).send({ error: 'stt_empty_transcript', engineId: 'openai' });
       }
       app.log.warn({ err }, 'stt_openai_failed');
-      return reply.code(503).send({ error: 'stt_not_available', hint: 'Le STT local et le secours OpenAI sont indisponibles.' });
+      return reply.code(503).send({
+        error: 'stt_not_available',
+        hint: 'Le service de transcription cloud est indisponible.',
+      });
     }
   });
 
@@ -4058,109 +4888,127 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
   const registerTtsRoute = (path: string, defaultMode: TtsRouteMode): void => {
     app.post(path, async (req, reply) => {
-    const parsed = ttsRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
-    }
-
-    const mode = defaultMode === 'ha'
-      ? 'ha'
-      : defaultMode === 'openai'
-        ? 'openai'
-        : (parsed.data.provider === 'ha' ? 'ha' : (parsed.data.provider === 'openai' ? 'openai' : 'auto'));
-    const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
-    if (mode === 'ha') {
-      return reply.code(410).send({ error: 'ha_tts_disabled', provider: 'openai_only' });
-    }
-
-    if (!openAiTtsCfg) {
-      return reply.code(503).send({ error: 'tts_not_configured', provider: mode });
-    }
-
-    const text = toSingleParagraphPlainText(parsed.data.text);
-    const t0 = Date.now();
-    const voiceTurnId = typeof req.headers['x-voice-turn-id'] === 'string' ? req.headers['x-voice-turn-id'].trim() : '';
-
-    // ── Warm cache check ──────────────────────────────────────────────────────
-    // ingest pre-warms TTS while building the response. If the Desktop calls
-    // /v1/tts shortly after, we serve the pre-generated audio immediately.
-    const ttsKey = text.trim().slice(0, 512);
-    if (mode === 'auto') {
-      const warmHit = ttsWarmCache.get(ttsKey);
-      if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
-        recordPerf('tts', Date.now() - t0);
-        app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_cache', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-        return reply.code(200).header('content-type', warmHit.contentType).header('x-tts-provider', 'warm_cache').send(warmHit.bytes);
+      const parsed = ttsRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
       }
-      // If pre-warm is still in-flight, join it instead of racing a duplicate request
-      const warmPending = ttsWarmInFlight.get(ttsKey);
-      if (warmPending) {
-        const prewarmed = await warmPending;
-        if (prewarmed) {
+
+      const mode =
+        defaultMode === 'ha'
+          ? 'ha'
+          : defaultMode === 'openai'
+            ? 'openai'
+            : parsed.data.provider === 'ha'
+              ? 'ha'
+              : parsed.data.provider === 'openai'
+                ? 'openai'
+                : 'auto';
+      const openAiTtsCfg = resolveOpenAiTtsRuntimeConfig(deps.env);
+      if (mode === 'ha') {
+        return reply.code(410).send({ error: 'ha_tts_disabled', provider: 'openai_only' });
+      }
+
+      if (!openAiTtsCfg) {
+        return reply.code(503).send({ error: 'tts_not_configured', provider: mode });
+      }
+
+      const text = toSingleParagraphPlainText(parsed.data.text);
+      const t0 = Date.now();
+      const voiceTurnId =
+        typeof req.headers['x-voice-turn-id'] === 'string'
+          ? req.headers['x-voice-turn-id'].trim()
+          : '';
+
+      // ── Warm cache check ──────────────────────────────────────────────────────
+      // ingest pre-warms TTS while building the response. If the Desktop calls
+      // /v1/tts shortly after, we serve the pre-generated audio immediately.
+      const ttsKey = text.trim().slice(0, 512);
+      if (mode === 'auto') {
+        const warmHit = ttsWarmCache.get(ttsKey);
+        if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
           recordPerf('tts', Date.now() - t0);
-          app.log.info({ elapsed_ms: Date.now() - t0, via: 'warm_inflight', voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-          return reply.code(200).header('content-type', prewarmed.contentType).header('x-tts-provider', 'warm_inflight').send(prewarmed.bytes);
+          app.log.info(
+            {
+              elapsed_ms: Date.now() - t0,
+              via: 'warm_cache',
+              voice_turn_id: voiceTurnId || undefined,
+            },
+            'tts_complete'
+          );
+          return reply
+            .code(200)
+            .header('content-type', warmHit.contentType)
+            .header('x-tts-provider', 'warm_cache')
+            .send(warmHit.bytes);
+        }
+        // If pre-warm is still in-flight, join it instead of racing a duplicate request
+        const warmPending = ttsWarmInFlight.get(ttsKey);
+        if (warmPending) {
+          const prewarmed = await warmPending;
+          if (prewarmed) {
+            recordPerf('tts', Date.now() - t0);
+            app.log.info(
+              {
+                elapsed_ms: Date.now() - t0,
+                via: 'warm_inflight',
+                voice_turn_id: voiceTurnId || undefined,
+              },
+              'tts_complete'
+            );
+            return reply
+              .code(200)
+              .header('content-type', prewarmed.contentType)
+              .header('x-tts-provider', 'warm_inflight')
+              .send(prewarmed.bytes);
+          }
         }
       }
-    }
-    type TtsWin = { bytes: Buffer; contentType: string; engineId: string; via: string };
+      type TtsWin = { bytes: Buffer; contentType: string; engineId: string; via: string };
 
-    // OpenAI-only TTS coroutine
-    const doOpenAiTts = async (): Promise<TtsWin> => {
-      if (!openAiTtsCfg) throw new Error('openai_tts_not_configured');
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), openAiTtsCfg.timeoutMs);
-      const response = await fetch(`${openAiTtsCfg.baseUrl.replace(/\/$/, '')}/audio/speech`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${openAiTtsCfg.apiKey}`, 'content-type': 'application/json' },
-        // Speed is passed natively to OpenAI API (0.25–4.0); voice character via instructions if set
-        body: JSON.stringify({
-          model: openAiTtsCfg.model,
-          voice: openAiTtsCfg.voice,
-          input: text,
-          response_format: openAiTtsCfg.format,
-          speed: openAiTtsCfg.speed,
-          ...(openAiTtsCfg.instructions ? { instructions: openAiTtsCfg.instructions } : {}),
-        }),
-        signal: controller.signal,
-      }).finally(() => {
-        clearTimeout(timeoutId);
-      });
-      if (!response.ok) {
-        const errBody = await response.text();
-        throw new Error(`openai_tts_failed:${response.status}:${errBody.slice(0, 300)}`);
+      // OpenAI-only TTS coroutine
+      const doOpenAiTts = async (): Promise<TtsWin> => {
+        if (!openAiTtsCfg) throw new Error('openai_tts_not_configured');
+        const { bytes, contentType } = await synthesizeOpenAiSpeech(openAiTtsCfg, text);
+        return {
+          bytes,
+          contentType,
+          engineId: `openai:${openAiTtsCfg.model}`,
+          via: `openai:${openAiTtsCfg.model}`,
+        };
+      };
+
+      // ── OpenAI-only speech synthesis ─────────────────────────────────────────
+      let winner: TtsWin;
+      try {
+        winner = await doOpenAiTts();
+      } catch (err) {
+        app.log.warn({ err, voice_turn_id: voiceTurnId || undefined }, 'tts_openai_failed');
+        return reply.code(502).send({ error: 'tts_openai_failed' });
       }
-      const contentType = response.headers.get('content-type') ?? 'audio/mpeg';
-      // OpenAI: speed handled natively by API param, voice character via instructions.
-      // NO ffmpeg processing — any filter stacks on top of already-processed audio and causes artifacts.
-      const openAiFilters = buildFfmpegFilters({ speed: deps.env.TTS_SPEED, pitchSemitones: 0, clarity: false }, true);
-      const openAiBody = response.body;
-      const bytes = openAiFilters.length > 0 && openAiBody
-        ? await pipeStreamThroughFfmpeg(openAiBody, openAiFilters)
-        : Buffer.from(await response.arrayBuffer());
-      return { bytes, contentType, engineId: `openai:${openAiTtsCfg.model}`, via: `openai:${openAiTtsCfg.model}` };
-    };
 
-    // ── Race: ElevenLabs vs OpenAI — first success wins, loser aborted ────────
-    let winner: TtsWin;
-    try {
-      winner = await doOpenAiTts();
-    } catch (err) {
-      app.log.warn({ err, voice_turn_id: voiceTurnId || undefined }, 'tts_openai_failed');
-      return reply.code(502).send({ error: 'tts_openai_failed' });
-    }
-
-    recordPerf('tts', Date.now() - t0);
-    app.log.info({ engineId: winner.engineId, via: winner.via, elapsed_ms: Date.now() - t0, voice_turn_id: voiceTurnId || undefined }, 'tts_complete');
-    // Store in warm cache so any duplicate call within 30s is instant
-    if (mode === 'auto') {
-      ttsWarmCache.set(ttsKey, { bytes: winner.bytes, contentType: winner.contentType, at: Date.now() });
-    }
-    return reply
-      .code(200)
-      .header('content-type', winner.contentType)
-      .header('x-tts-provider', winner.via)
-      .send(winner.bytes);
+      recordPerf('tts', Date.now() - t0);
+      app.log.info(
+        {
+          engineId: winner.engineId,
+          via: winner.via,
+          elapsed_ms: Date.now() - t0,
+          voice_turn_id: voiceTurnId || undefined,
+        },
+        'tts_complete'
+      );
+      // Store in warm cache so any duplicate call within 30s is instant
+      if (mode === 'auto') {
+        ttsWarmCache.set(ttsKey, {
+          bytes: winner.bytes,
+          contentType: winner.contentType,
+          at: Date.now(),
+        });
+      }
+      return reply
+        .code(200)
+        .header('content-type', winner.contentType)
+        .header('x-tts-provider', winner.via)
+        .send(winner.bytes);
     });
   };
 
@@ -4247,7 +5095,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     for (const key of keys) {
       stats[key] = computePercentiles(key);
     }
-    return reply.code(200).send({ latency_ms: stats, tts_circuit_breaker: {} });
+    return reply.code(200).send({
+      latency_ms: stats,
+      openai: getOpenAiResilienceSnapshot(),
+    });
   });
-
 }

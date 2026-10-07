@@ -1,0 +1,24 @@
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://jarvis.localhost:8443 {
+	# PC validation is loopback-only. Internet publication is deliberately absent.
+	bind 127.0.0.1
+	tls internal
+
+	reverse_proxy 127.0.0.1:8090 {
+		# Overwrite any client-supplied value with the origin credential.
+		header_up X-Jarvis-Edge-Secret {$EDGE_PROXY_SECRET}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Host jarvis.localhost:8443
+
+		health_uri /health
+		health_headers {
+			X-Jarvis-Edge-Secret {$EDGE_PROXY_SECRET}
+			X-Forwarded-Proto https
+			X-Forwarded-Host jarvis.localhost:8443
+		}
+	}
+}

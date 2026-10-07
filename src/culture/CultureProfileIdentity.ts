@@ -1,4 +1,7 @@
+import type { FastifyRequest } from 'fastify';
 import { z } from 'zod';
+
+import { getRequestPrincipal } from '../identity/requestIdentity';
 
 export const trustedCultureUserIdSchema = z.string().trim().min(1).max(128).refine((value) => (
   [...value].every((character) => {
@@ -16,4 +19,15 @@ export function resolveTrustedCultureProfileId(
   defaultProfileId: string,
 ): string {
   return trustedCultureUserIdSchema.parse(userId?.trim() || defaultProfileId.trim());
+}
+
+export function resolveRequestCultureProfileId(
+  request: FastifyRequest,
+  trustedServiceUserId: string | undefined,
+  defaultProfileId: string,
+): string {
+  const principal = getRequestPrincipal(request);
+  if (principal?.kind === 'user') return `user:${principal.userId}`;
+  if (principal?.kind === 'service') return `service:${principal.serviceId ?? 'legacy'}`;
+  return resolveTrustedCultureProfileId(trustedServiceUserId, defaultProfileId);
 }

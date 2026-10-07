@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { getGoogleCalendarConfigState } from '../calendar/googleCalendarClient';
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
+import { getRequestPrincipal } from '../identity/requestIdentity';
 import type { AppDeps } from '../server';
 
 type GoogleCalendarListItem = {
@@ -59,6 +60,7 @@ type GoogleCalendarEvent = {
 
 type GoogleTokenPayload = {
   access_token?: string;
+  refresh_token?: string;
 };
 
 const GOOGLE_CALENDAR_BASE = 'https://www.googleapis.com/calendar/v3';
@@ -90,8 +92,21 @@ const writableEventSchema = z.object({
   }).strict().optional(),
 }).strict();
 
-async function ensureCalendarReady(env: AppDeps['env']): Promise<{ ok: true } | { ok: false; error: string }> {
-  const state = await getGoogleCalendarConfigState(env);
+async function ensureCalendarReady(
+  deps: AppDeps,
+  request: Parameters<typeof getRequestPrincipal>[0],
+  connectionId?: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const principal = getRequestPrincipal(request);
+  if (principal?.kind === 'user') {
+    const token = deps.integrations?.resolveRefreshToken(
+      principal.userId,
+      'google-calendar',
+      connectionId
+    );
+    return token ? { ok: true } : { ok: false, error: 'missing_refresh_token' };
+  }
+  const state = await getGoogleCalendarConfigState(deps.env);
   if (state === 'ready') return { ok: true };
   return { ok: false, error: state };
 }
@@ -118,8 +133,23 @@ function parseSendUpdates(value: unknown): 'none' | 'all' | 'externalOnly' | nul
   return parsed.success ? parsed.data : null;
 }
 
-async function refreshGoogleAccessToken(env: AppDeps['env']): Promise<string> {
-  const credentials = await resolveGoogleCredentials(env);
+async function refreshGoogleAccessToken(
+  deps: AppDeps,
+  request: Parameters<typeof getRequestPrincipal>[0],
+  connectionId?: string
+): Promise<string> {
+  const principal = getRequestPrincipal(request);
+  const personalToken = principal?.kind === 'user'
+    ? deps.integrations?.resolveRefreshToken(principal.userId, 'google-calendar', connectionId)
+    : null;
+  const credentials = principal?.kind === 'user'
+    ? personalToken && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
+      ? {
+        clientId: deps.env.GOOGLE_CLIENT_ID,
+        clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
+        refreshToken: personalToken,
+      } : null
+    : await resolveGoogleCredentials(deps.env);
   if (!credentials) {
     throw new Error('google_calendar_credentials_missing');
   }
@@ -143,6 +173,14 @@ async function refreshGoogleAccessToken(env: AppDeps['env']): Promise<string> {
 
   const payload = await response.json() as GoogleTokenPayload;
   if (!payload.access_token) throw new Error('google_calendar_token_refresh_no_token');
+  if (payload.refresh_token && principal?.kind === 'user') {
+    deps.integrations?.rotateRefreshToken(
+      principal.userId,
+      'google-calendar',
+      payload.refresh_token,
+      connectionId
+    );
+  }
   return payload.access_token;
 }
 
@@ -188,13 +226,19 @@ function asStringQuery(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function connectionIdFromRequest(request: { query: unknown }): string | undefined {
+  const value = (request.query as Record<string, unknown> | null)?.connectionId;
+  const parsed = typeof value === 'string' ? value.trim() : '';
+  return parsed || undefined;
+}
+
 export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps): void {
-  app.get('/v1/calendar/google/calendars', async (_req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+  app.get('/v1/calendar/google/calendars', async (req, reply) => {
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       const payload = await googleCalendarRequest<{ items?: GoogleCalendarListItem[] }>(
         '/users/me/calendarList?showHidden=true&maxResults=250',
         token,
@@ -218,7 +262,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.get('/v1/calendar/google/events', async (req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const query = req.query as Record<string, unknown>;
@@ -246,7 +290,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     if (pageToken) params.set('pageToken', pageToken);
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       const payload = await googleCalendarRequest<{
         items?: GoogleCalendarEvent[];
         nextPageToken?: string;
@@ -266,7 +310,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.get('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
@@ -279,7 +323,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     const calendarId = encodeURIComponent(resolvedCalendarId);
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       const item = await googleCalendarRequest<GoogleCalendarEvent>(
         `/calendars/${calendarId}/events/${encodeURIComponent(eventId)}?conferenceDataVersion=1`,
         token,
@@ -292,7 +336,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.post('/v1/calendar/google/events', async (req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const query = req.query as Record<string, unknown>;
@@ -309,7 +353,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     }
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       const item = await googleCalendarRequest<GoogleCalendarEvent>(
         `/calendars/${calendarId}/events?sendUpdates=${encodeURIComponent(sendUpdates)}`,
         token,
@@ -323,7 +367,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.patch('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
@@ -341,7 +385,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     const body = parsedBody.data;
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       const item = await googleCalendarRequest<GoogleCalendarEvent>(
         `/calendars/${calendarId}/events/${encodeURIComponent(eventId)}?sendUpdates=${encodeURIComponent(sendUpdates)}`,
         token,
@@ -355,7 +399,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
   });
 
   app.delete('/v1/calendar/google/events/:eventId', async (req, reply) => {
-    const ready = await ensureCalendarReady(deps.env);
+    const ready = await ensureCalendarReady(deps, req, connectionIdFromRequest(req));
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const params = req.params as { eventId?: string };
@@ -370,7 +414,7 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     if (!sendUpdates) return reply.code(400).send({ error: 'invalid_send_updates' });
 
     try {
-      const token = await refreshGoogleAccessToken(deps.env);
+      const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
       await googleCalendarRequest<void>(
         `/calendars/${calendarId}/events/${encodeURIComponent(eventId)}?sendUpdates=${encodeURIComponent(sendUpdates)}`,
         token,

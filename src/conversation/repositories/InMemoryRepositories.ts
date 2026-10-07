@@ -130,7 +130,7 @@ export class InMemoryThreadRepository implements ThreadRepository {
     return this.threads.delete(threadId);
   }
 
-  async purgeThreadsOlderThan(_cutoffMs: number): Promise<number> {
+  async purgeThreadsOlderThan(_cutoffMs: number, _options?: { allOwners?: boolean }): Promise<number> {
     // In-memory repository does not track timestamps; no automatic purge.
     return 0;
   }

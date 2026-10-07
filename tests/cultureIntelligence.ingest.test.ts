@@ -97,8 +97,10 @@ function env(dbPath: string, proactiveEnabled = false): Env {
     CULTURE_PROACTIVE_LOOKAHEAD_HOURS: 48,
     AGORA_HOME_RADIUS_KM: 15,
     OPENAI_TIMEOUT_MS: 500,
-    OLLAMA_BASE_URL: 'http://ollama:11434/v1',
-    OLLAMA_MODEL: 'qwen3:8b',
+    OPENAI_API_KEY: 'test-openai-key',
+    OPENAI_BASE_URL: 'https://openai.test/v1',
+    OPENAI_MODEL_SYNTHESIS: 'gpt-6.1-sol',
+    OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS: 768,
     LIMIT_K: 10,
     LIMIT_M: 20,
     HA_AGENT_MAP: '',
@@ -114,11 +116,24 @@ function deps(runtimeEnv: Env): AppDeps {
   };
 }
 
+function cultureSynthesisCalls(fetchMock: { mock: { calls: unknown[][] } }): unknown[][] {
+  return fetchMock.mock.calls.filter(([, init]) => {
+    const body = (init as RequestInit | undefined)?.body;
+    if (typeof body !== 'string') return false;
+    try {
+      const parsed = JSON.parse(body) as { input?: Array<{ content?: string }> };
+      return parsed.input?.[0]?.content?.includes('Utilise uniquement les candidats JSON') === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function installFetchMock() {
   return jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
     const url = new URL(String(input));
-    if (url.hostname === 'ollama') {
-      return new Response(JSON.stringify({ message: { content: 'Recommandation personnalisée locale.' } }), { status: 200 });
+    if (url.hostname === 'openai.test') {
+      return new Response(JSON.stringify({ status: 'completed', output_text: 'Recommandation personnalisée cloud.' }), { status: 200 });
     }
     if (url.pathname === '/v1/discover') {
       const requestedTypes = url.searchParams.get('types')?.split(',') ?? [];
@@ -148,6 +163,9 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
   let dbPath: string;
 
   beforeEach(() => {
+    jest.useFakeTimers({
+      doNotFake: ['clearImmediate', 'clearTimeout', 'nextTick', 'queueMicrotask', 'setImmediate', 'setTimeout'],
+    }).setSystemTime(new Date('2026-08-29T09:00:00.000Z'));
     directory = mkdtempSync(join(tmpdir(), 'jarvis-culture-intelligence-'));
     dbPath = join(directory, 'conversation.sqlite');
     app = Fastify({ logger: false });
@@ -196,11 +214,11 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
     expect(recommendation.statusCode).toBe(200);
     expect(recommendation.json<{ cultureCandidates: Array<{ title: string; personalizationReasons: string[] }> }>().cultureCandidates[0])
       .toMatchObject({ title: 'Expo photo', personalizationReasons: expect.arrayContaining(['matches_preference:photo']) });
-    const ollamaCalls = fetchMock.mock.calls.filter(([url]) => new URL(String(url)).hostname === 'ollama');
-    const body = JSON.parse(String((ollamaCalls.at(-1)?.[1] as RequestInit | undefined)?.body)) as {
-      messages: Array<{ content: string }>;
+    const cloudCalls = cultureSynthesisCalls(fetchMock);
+    const body = JSON.parse(String((cloudCalls.at(-1)?.[1] as RequestInit | undefined)?.body)) as {
+      input: Array<{ content: string }>;
     };
-    const prompt = body.messages.map((message) => message.content).join('\n');
+    const prompt = body.input.map((message) => message.content).join('\n');
     expect(prompt.indexOf('Expo photo')).toBeLessThan(prompt.indexOf('Théâtre classique'));
     expect(prompt).toContain('matches_preference:photo');
 
@@ -226,11 +244,11 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
       payload: { threadId: 'exploration', text: 'Propose-moi quelque chose de différent.', ...profile },
     });
     expect(exploration.statusCode).toBe(200);
-    const explorationCall = fetchMock.mock.calls.filter(([url]) => new URL(String(url)).hostname === 'ollama').at(-1);
+    const explorationCall = cultureSynthesisCalls(fetchMock).at(-1);
     const explorationBody = JSON.parse(String((explorationCall?.[1] as RequestInit | undefined)?.body)) as {
-      messages: Array<{ content: string }>;
+      input: Array<{ content: string }>;
     };
-    expect(explorationBody.messages.map((message) => message.content).join('\n')).toContain('exploration_pick');
+    expect(explorationBody.input.map((message) => message.content).join('\n')).toContain('exploration_pick');
 
     const favorites = await app.inject({
       method: 'POST', url: '/v1/ingest',
@@ -287,9 +305,9 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
       payload: { threadId: 'negative-2', text: 'Trouve-moi quelque chose qui devrait me plaire demain.', ...profile },
     });
     expect(generic.statusCode).toBe(200);
-    const ollamaCall = fetchMock.mock.calls.filter(([url]) => new URL(String(url)).hostname === 'ollama').at(-1);
-    const body = JSON.parse(String((ollamaCall?.[1] as RequestInit | undefined)?.body)) as { messages: Array<{ content: string }> };
-    const prompt = body.messages.map((message) => message.content).join('\n');
+    const cloudCall = cultureSynthesisCalls(fetchMock).at(-1);
+    const body = JSON.parse(String((cloudCall?.[1] as RequestInit | undefined)?.body)) as { input: Array<{ content: string }> };
+    const prompt = body.input.map((message) => message.content).join('\n');
     expect(prompt.indexOf('Théâtre classique')).toBeGreaterThan(prompt.indexOf('Expo photo'));
 
     const explicit = await app.inject({
@@ -318,9 +336,9 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
       method: 'POST', url: '/v1/ingest',
       payload: { threadId: 'recommend-b', user_id: 'b', text: 'Qu’est-ce que tu me conseilles samedi ?' },
     });
-    const prompts = fetchMock.mock.calls.filter(([url]) => new URL(String(url)).hostname === 'ollama').map((call) => {
-      const body = JSON.parse(String((call[1] as RequestInit | undefined)?.body)) as { messages: Array<{ content: string }> };
-      return body.messages.map((message) => message.content).join('\n');
+    const prompts = cultureSynthesisCalls(fetchMock).map((call) => {
+      const body = JSON.parse(String((call[1] as RequestInit | undefined)?.body)) as { input: Array<{ content: string }> };
+      return body.input.map((message) => message.content).join('\n');
     });
     expect(prompts.at(-2)?.indexOf('Expo photo')).toBeLessThan(prompts.at(-2)?.indexOf('Concert jazz') ?? 0);
     expect(prompts.at(-1)?.indexOf('Concert jazz')).toBeLessThan(prompts.at(-1)?.indexOf('Expo photo') ?? 0);

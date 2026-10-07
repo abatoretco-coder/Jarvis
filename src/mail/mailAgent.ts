@@ -1,6 +1,6 @@
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
 import { googleRefreshTokenStoreKey } from '../google/googleCredentialService';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import { cleanMailDetailText } from './mailContentCleaner';
 import { qualifyMail, shouldMentionMail } from './mailQualification';
 import { buildMailSynthesisSystemPrompt } from './prompts/mailSynthesisSystemPrompt';
@@ -53,6 +53,8 @@ export interface MailAccount {
   clientSecret: string;
   refreshToken: string;
   tenantId?: string;
+  credentialKey?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
 }
 
 // Env surface required by buildMailAccounts() — a subset of the full zod env.
@@ -145,8 +147,11 @@ export type MailEnv = MailAccountsEnv & {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
-  // OpenAI synthesis model (defaults to gpt-4o-mini)
+  OPENAI_MODEL_AGENT?: string;
   OPENAI_MODEL_SUMMARY?: string;
+  OPENAI_MODEL_SYNTHESIS?: string;
+  OPENAI_MAX_OUTPUT_TOKENS_AGENT?: number;
+  OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS?: number;
 };
 
 type MinLogger = {
@@ -157,7 +162,7 @@ type MinLogger = {
 // ─── Account token helper ─────────────────────────────────────────────────────
 
 async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: string): Promise<string> {
-  const cacheBase = `${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
+  const cacheBase = acc.credentialKey ?? `${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
   const storeBase = acc.provider === 'gmail' ? googleRefreshTokenStoreKey(acc.clientId) : `mail:${acc.provider}:${acc.label.toLowerCase()}:${acc.clientId}`;
   return refreshGoogleToken({
     GOOGLE_CLIENT_ID:     acc.clientId,
@@ -166,6 +171,7 @@ async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: str
     cacheKey:             cacheBase,
     storeKey:             storeBase,
     OAUTH_REFRESH_TOKEN_STORE_PATH: refreshStorePath,
+    onRefreshToken: acc.onRefreshToken,
   });
 }
 
@@ -198,6 +204,7 @@ async function refreshGoogleToken(env: {
   cacheKey?: string;
   storeKey?: string;
   OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
 }): Promise<string> {
   const cacheKey = env.cacheKey?.trim() || env.GOOGLE_CLIENT_ID;
   const storeKey = env.storeKey?.trim() || `mail:gmail:${env.GOOGLE_CLIENT_ID}`;
@@ -221,8 +228,7 @@ async function refreshGoogleToken(env: {
   });
   if (!resp.ok) {
     _googleTokenCache.delete(cacheKey);
-    const body = await resp.text().catch(() => '');
-    throw new Error(`mail_google_token_refresh_failed:${resp.status}:${body.slice(0, 200)}`);
+    throw new Error(`mail_google_token_refresh_failed:${resp.status}`);
   }
   const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
   if (!data.access_token) throw new Error('mail_google_token_refresh_no_token');
@@ -230,6 +236,7 @@ async function refreshGoogleToken(env: {
   if (data.refresh_token) {
     _googleLiveRefreshToken.set(cacheKey, data.refresh_token);
     await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
+    await env.onRefreshToken?.(data.refresh_token);
   }
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
@@ -316,45 +323,28 @@ async function synthesizeMailReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
   model: string;
+  maxOutputTokens?: number;
   timeoutMs: number;
   userText: string;
   executorResult: string;
 }): Promise<string> {
-  if (isOllamaBaseUrl(params.openAiBaseUrl)) {
-    try {
-      const content = await completeOllamaChat({
-        baseUrl: params.openAiBaseUrl, model: params.model, temperature: 0.2, numPredict: 180,
-        messages: [{ role: 'system', content: MAIL_SYNTHESIS_SYSTEM_PROMPT }, { role: 'user', content: buildMailSynthesisUserPrompt(params.userText, params.executorResult) }],
-        signal: AbortSignal.timeout(params.timeoutMs),
-      });
-      return content || compactMailListForFallback(params.executorResult);
-    } catch { return compactMailListForFallback(params.executorResult); }
-  }
-  const resp = await fetch(`${params.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${params.openAiApiKey}`,
-    },
-    body: JSON.stringify({
+  try {
+    return await completeOpenAiResponse({
+      apiKey: params.openAiApiKey,
+      baseUrl: params.openAiBaseUrl,
       model: params.model,
-      temperature: 0.2,
-      max_tokens: 180,
+      capability: 'synthesis',
       messages: [
         { role: 'system', content: MAIL_SYNTHESIS_SYSTEM_PROMPT },
-        { role: 'user',   content: buildMailSynthesisUserPrompt(params.userText, params.executorResult) },
+        { role: 'user', content: buildMailSynthesisUserPrompt(params.userText, params.executorResult) },
       ],
-    }),
-    signal: AbortSignal.timeout(params.timeoutMs),
-  });
-
-  if (!resp.ok) {
+      maxOutputTokens: Math.min(240, params.maxOutputTokens ?? 768),
+      timeoutMs: params.timeoutMs,
+      reasoningEffort: 'low',
+    });
+  } catch {
     return compactMailListForFallback(params.executorResult);
   }
-
-  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim() ?? '';
-  return content || compactMailListForFallback(params.executorResult);
 }
 
 // ─── LLM planner ─────────────────────────────────────────────────────────────
@@ -439,54 +429,31 @@ async function planMailAction(
   openAiBaseUrl: string,
   timeoutMs: number,
   accountLabels: string[] = [],
+  model = 'gpt-6-luna',
+  maxOutputTokens = 512,
 ): Promise<MailAction> {
   const _PLANNER_SYSTEM = buildPlannerSystem(accountLabels);
-  if (isOllamaBaseUrl(openAiBaseUrl)) {
-    const content = await completeOllamaChat({
-      baseUrl: openAiBaseUrl, model: 'qwen3:8b', temperature: 0, numPredict: 300, format: 'json',
-      messages: [{ role: 'system', content: _PLANNER_SYSTEM }, { role: 'user', content: text }], signal: AbortSignal.timeout(timeoutMs),
-    });
-    let parsed: unknown;
-    try { parsed = JSON.parse(content || '{}'); } catch { throw new Error(`mail_planner_invalid_json:${content.slice(0, 100)}`); }
-    if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) throw new Error(`mail_planner_missing_action:${content.slice(0, 100)}`);
-    return parsed as MailAction;
-  }
-  const resp = await fetch(`${openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${openAiApiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 300,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: _PLANNER_SYSTEM },
-        { role: 'user',   content: text },
-      ],
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
+  const content = await completeOpenAiResponse({
+    apiKey: openAiApiKey,
+    baseUrl: openAiBaseUrl,
+    model,
+    capability: 'agent',
+    messages: [{ role: 'system', content: _PLANNER_SYSTEM }, { role: 'user', content: text }],
+    maxOutputTokens,
+    timeoutMs,
+    jsonMode: true,
+    reasoningEffort: 'none',
   });
-
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`mail_planner_llm_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-
-  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim() ?? '{}';
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error(`mail_planner_invalid_json:${content.slice(0, 100)}`);
+    throw new Error('mail_planner_invalid_json');
   }
 
   if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) {
-    throw new Error(`mail_planner_missing_action:${content.slice(0, 100)}`);
+    throw new Error('mail_planner_missing_action');
   }
 
   return parsed as MailAction;
@@ -505,7 +472,15 @@ export async function planMailAgentAction(
     if ('clarification' in preclassified) log?.info({ reason: 'preclassified_clarification' }, 'mail_agent_clarification');
     return preclassified;
   }
-  return planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, accounts.map((account) => account.label));
+  return planMailAction(
+    text,
+    env.OPENAI_API_KEY,
+    env.OPENAI_BASE_URL,
+    env.OPENAI_TIMEOUT_MS,
+    accounts.map((account) => account.label),
+    env.OPENAI_MODEL_AGENT,
+    env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
+  );
 }
 
 export function formatMailActionPreview(action: MailAction): string {
@@ -557,7 +532,8 @@ export async function executeMailAgentAction(
     return synthesizeMailReplyWithOpenAi({
       openAiApiKey: env.OPENAI_API_KEY,
       openAiBaseUrl: env.OPENAI_BASE_URL,
-      model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      model: env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+      maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
       timeoutMs: env.OPENAI_TIMEOUT_MS,
       userText: options?.userText ?? action.action,
       executorResult: combined,
@@ -572,7 +548,8 @@ export async function executeMailAgentAction(
   return synthesizeMailReplyWithOpenAi({
     openAiApiKey: env.OPENAI_API_KEY,
     openAiBaseUrl: env.OPENAI_BASE_URL,
-    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    model: env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+    maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
     timeoutMs: env.OPENAI_TIMEOUT_MS,
     userText: options?.userText ?? action.action,
     executorResult: rawResult,
@@ -649,8 +626,7 @@ async function gmailGet<T>(path: string, token: string): Promise<T> {
     signal: AbortSignal.timeout(8_000),
   });
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`mail_gmail_get_failed:${resp.status}:${body.slice(0, 200)}`);
+    throw new Error(`mail_gmail_get_failed:${resp.status}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -663,8 +639,7 @@ async function gmailPost<T>(path: string, token: string, body: object): Promise<
     signal: AbortSignal.timeout(8_000),
   });
   if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`mail_gmail_post_failed:${resp.status}:${raw.slice(0, 200)}`);
+    throw new Error(`mail_gmail_post_failed:${resp.status}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -968,7 +943,15 @@ export async function callMailAgent(
 
   const action = preclassified && !('clarification' in preclassified)
     ? preclassified
-    : await planMailAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS, labels);
+    : await planMailAction(
+      text,
+      env.OPENAI_API_KEY,
+      env.OPENAI_BASE_URL,
+      env.OPENAI_TIMEOUT_MS,
+      labels,
+      env.OPENAI_MODEL_AGENT,
+      env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
+    );
   log?.info({ action: action.action, accounts: labels.length }, 'mail_agent_planned');
 
   // list_inbox and search_emails aggregate across all accounts (unless a specific account is requested)
@@ -994,7 +977,8 @@ export async function callMailAgent(
     const synthesized = await synthesizeMailReplyWithOpenAi({
       openAiApiKey: env.OPENAI_API_KEY!,
       openAiBaseUrl: env.OPENAI_BASE_URL,
-      model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      model: env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+      maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
       timeoutMs: env.OPENAI_TIMEOUT_MS,
       userText: text,
       executorResult: combined,
@@ -1013,7 +997,8 @@ export async function callMailAgent(
   const synthesized = await synthesizeMailReplyWithOpenAi({
     openAiApiKey: env.OPENAI_API_KEY!,
     openAiBaseUrl: env.OPENAI_BASE_URL,
-    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    model: env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+    maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
     timeoutMs: env.OPENAI_TIMEOUT_MS,
     userText: text,
     executorResult: rawResult,

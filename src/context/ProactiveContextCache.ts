@@ -4,7 +4,7 @@ import { AsyncSnapshotCache } from '../cache/AsyncSnapshotCache';
 import type { Env } from '../env';
 import type { HomeAssistantClient } from '../haClient';
 import type { NasStatusClient } from '../nas/NasStatusClient';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import {
   buildAgendaFromGoogle,
   buildMailSection,
@@ -379,13 +379,6 @@ function buildFallbackDailyBrief(draft: DailyBriefDraft): string {
   return parts.length
     ? `Brief du jour: ${parts.join(' ')}`
     : 'Brief du jour indisponible pour le moment: aucun contexte exploitable.';
-}
-
-function extractOpenAiText(payload: unknown): string | undefined {
-  if (!isRecord(payload) || !Array.isArray(payload.choices)) return undefined;
-  const first = payload.choices[0];
-  if (!isRecord(first) || !isRecord(first.message)) return undefined;
-  return asString(first.message.content);
 }
 
 function parseSpotifyNowPlaying(data: Record<string, unknown>): SpotifyNowPlaying {
@@ -1013,46 +1006,16 @@ export class ProactiveContextCache {
       'N invente pas de source, de deadline ou de meteo absente.',
     ].join(' ');
 
-    if (isOllamaBaseUrl(this.deps.env.OPENAI_BASE_URL)) {
-      const content = await completeOllamaChat({
-        baseUrl: this.deps.env.OPENAI_BASE_URL,
-        model: this.deps.env.OPENAI_MODEL_SUMMARY,
-        temperature: 0.2,
-        numPredict: 280,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(draft) }],
-        signal: AbortSignal.timeout(this.deps.env.OPENAI_TIMEOUT_MS),
-      });
-      if (!content) return null;
-      const cleaned = content.replace(/\s+/g, ' ').trim();
-      return /^brief du jour\s*:/iu.test(cleaned) ? cleaned : `Brief du jour: ${cleaned}`;
-    }
-
-    const response = await fetch(`${this.deps.env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.deps.env.OPENAI_MODEL_SUMMARY,
-        temperature: 0.2,
-        max_tokens: 280,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: JSON.stringify(draft) },
-        ],
-      }),
-      signal: AbortSignal.timeout(Math.min(this.deps.env.OPENAI_TIMEOUT_MS, 10_000)),
+    const text = await completeOpenAiResponse({
+      apiKey,
+      baseUrl: this.deps.env.OPENAI_BASE_URL,
+      model: this.deps.env.OPENAI_MODEL_SUMMARY,
+      capability: 'summary',
+      messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(draft) }],
+      maxOutputTokens: Math.min(280, this.deps.env.OPENAI_MAX_OUTPUT_TOKENS_SUMMARY),
+      timeoutMs: Math.min(this.deps.env.OPENAI_TIMEOUT_MS, 10_000),
+      reasoningEffort: 'none',
     });
-
-    if (!response.ok) {
-      this.deps.log?.warn({ status: response.status }, 'daily_brief_openai_failed');
-      return null;
-    }
-
-    const payload = await response.json().catch(() => null);
-    const text = extractOpenAiText(payload);
-    if (!text) return null;
     const cleaned = text.replace(/\s+/g, ' ').trim();
     return /^brief du jour\s*:/iu.test(cleaned) ? cleaned : `Brief du jour: ${cleaned}`;
   }

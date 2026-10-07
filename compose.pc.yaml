@@ -1,0 +1,119 @@
+name: jarvis-pc
+
+services:
+  jarvis:
+    profiles: [pc-preprod, pc-preprod-full]
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - ${JARVIS_ENV_FILE:-./ops/pc/env/pc-preprod.env.example}
+    environment:
+      BIND_HOST: 0.0.0.0
+      PORT: 8090
+      CONVERSATION_DB_PATH: /app/data/conversation-memory.sqlite
+      HOME_CONFIG_ROOT: /app/config/homes
+      HOME_DATA_ROOT: /app/data/homes
+      PUBLIC_EDGE_ENABLED: "false"
+    ports:
+      - 127.0.0.1:${JARVIS_PC_PORT:-8090}:8090
+    volumes:
+      - ${JARVIS_PC_DATA_DIR:-./runtime/pc-preprod/data}:/app/data
+      - ./config:/app/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8090/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  jarvis-dev:
+    profiles: [dev]
+    build:
+      context: .
+      target: deps
+    command: npm run dev
+    user: node
+    env_file:
+      - ${JARVIS_DEV_ENV_FILE:-./ops/pc/env/dev.env.example}
+    environment:
+      BIND_HOST: 0.0.0.0
+      PORT: 8090
+      CONVERSATION_DB_PATH: /app/data/conversation-memory.sqlite
+      HOME_CONFIG_ROOT: /app/config/homes
+      HOME_DATA_ROOT: /app/data/homes
+      PUBLIC_EDGE_ENABLED: "false"
+    ports:
+      - 127.0.0.1:${JARVIS_DEV_PORT:-18090}:8090
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./package.json:/app/package.json:ro
+      - ${JARVIS_DEV_DATA_DIR:-./runtime/dev/data}:/app/data
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  jarvis-test:
+    profiles: [test]
+    build:
+      context: .
+      target: deps
+    command: npm run verify
+    user: node
+    environment:
+      REQUIRE_API_KEY: "false"
+      CONVERSATION_DB_PATH: /tmp/conversation-memory.sqlite
+      HOME_CONFIG_ROOT: /app/config/homes
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./scripts:/app/scripts:ro
+      - ./config:/app/config:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.test.json:/app/tsconfig.test.json:ro
+      - ./jest.config.cjs:/app/jest.config.cjs:ro
+      - ./eslint.config.cjs:/app/eslint.config.cjs:ro
+      - ./.eslintrc.cjs:/app/.eslintrc.cjs:ro
+      - ./.prettierrc.json:/app/.prettierrc.json:ro
+    tmpfs:
+      - /app/dist:size=64m,mode=1777
+      - /tmp:size=128m,mode=1777
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  identity:
+    profiles: [pc-preprod-full]
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME:-jarvis-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - 127.0.0.1:${JARVIS_IDENTITY_PORT:-8180}:8080
+    volumes:
+      - ${JARVIS_IDENTITY_DATA_DIR:-./runtime/pc-preprod/identity}:/opt/keycloak/data
+      - ./ops/pc/keycloak/realm-jarvis.json:/opt/keycloak/data/import/realm-jarvis.json:ro
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

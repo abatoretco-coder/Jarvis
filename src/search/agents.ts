@@ -16,8 +16,6 @@ export interface SearchAgentConfig {
   key: string;
   /** Perplexity model id — used when PERPLEXITY_API_KEY is set */
   model: string;
-  /** OpenAI fallback model used when no Perplexity key */
-  openAiModel: string;
   temperature: number;
   /** Nucleus sampling — use 0.9 for factual, higher for creative */
   topP: number;
@@ -41,7 +39,6 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   'search.news': {
     key: 'search.news',
     model: 'sonar',
-    openAiModel: 'gpt-4o-search-preview',
     temperature: 0.1,
     topP: 0.9,
     maxTokens: 120,
@@ -60,7 +57,6 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   'search.web': {
     key: 'search.web',
     model: 'sonar',
-    openAiModel: 'gpt-4o-search-preview',
     temperature: 0.1,
     topP: 0.9,
     maxTokens: 120,
@@ -77,7 +73,6 @@ const SEARCH_AGENTS_MAP: Record<string, SearchAgentConfig> = {
   'search.deep': {
     key: 'search.deep',
     model: 'sonar-pro',
-    openAiModel: 'gpt-4o-search-preview',
     temperature: 0.3,
     topP: 0.9,
     maxTokens: 400,

@@ -44,7 +44,7 @@ src/routing/
 ├── ARCHITECTURE.md                    ← Doc technique détaillée
 ├── semanticRouter.types.ts            ← Types TS (Phase 0) ✅
 ├── semanticRouteCatalog.ts            ← Catalogue 50 routes (16 E2 + 34 E1) ✅
-├── embeddingClient.ts                 ← Client Ollama/OpenAI (Phase 1A) ✅
+├── embeddingClient.ts                 ← Client embeddings OpenAI (Phase 1A) ✅
 ├── routeScoring.ts                    ← Scoring cosine (Phase 1A) ✅
 ├── routeDecision.ts                   ← Logique décision (Phase 1A) ✅
 ├── semanticRouter.ts                  ← Orchestration (Phase 1A) ✅
@@ -259,9 +259,8 @@ tests/
 # .env — Phase 1A (Shadow Mode)
 SEMANTIC_ROUTER_ENABLED=true
 SEMANTIC_ROUTER_SHADOW_MODE=true               # évaluation seulement
-SEMANTIC_ROUTER_PROVIDER=ollama
-SEMANTIC_ROUTER_BASE_URL=http://localhost:11434
-SEMANTIC_ROUTER_MODEL=nomic-embed-text
+OPENAI_BASE_URL=https://api.openai.com/v1
+SEMANTIC_ROUTER_EMBEDDING_MODEL=text-embedding-3-small
 SEMANTIC_ROUTER_ACCEPT_SCORE=0.84
 SEMANTIC_ROUTER_MIN_MARGIN=0.08
 SEMANTIC_ROUTER_TIMEOUT_MS=5000

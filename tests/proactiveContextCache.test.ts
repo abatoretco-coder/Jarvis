@@ -199,8 +199,8 @@ describe('ProactiveContextCache', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-04T06:00:00+02:00'));
     const fetchMock = jest.fn(async (_url: unknown, init?: RequestInit) => {
       const body = String(init?.body ?? '');
-      const parsedBody = JSON.parse(body) as { messages: Array<{ role: string; content: string }> };
-      const systemPrompt = parsedBody.messages.find((message) => message.role === 'system')?.content ?? '';
+      const parsedBody = JSON.parse(body) as { input: Array<{ role: string; content: string }> };
+      const systemPrompt = parsedBody.input.find((message) => message.role === 'system')?.content ?? '';
       expect(body).toContain('currentTemperature');
       expect(body).toContain('rainRiskPercent');
       expect(systemPrompt).toContain('ignore newsletters');
@@ -208,11 +208,8 @@ describe('ProactiveContextCache', () => {
       expect(body).not.toContain('Actu');
       expect(body).not.toContain('news.headlines');
       return new Response(JSON.stringify({
-        choices: [{
-          message: {
-            content: 'Brief du jour: dehors il fait 18 degres, avec 24 au maximum. Agenda calme, surveille surtout les deux taches en retard.',
-          },
-        }],
+        status: 'completed',
+        output_text: 'Brief du jour: dehors il fait 18 degres, avec 24 au maximum. Agenda calme, surveille surtout les deux taches en retard.',
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -258,7 +255,7 @@ describe('ProactiveContextCache', () => {
     });
     expect(JSON.stringify(result?.snapshot.value)).not.toContain('news');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://openai.test/v1/chat/completions');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://openai.test/v1/responses');
   });
 
   it('exposes provider status and domain snapshots through the route', async () => {

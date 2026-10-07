@@ -36,7 +36,7 @@ describe('conversation services', () => {
       minDeltaM: 20,
       triggerEveryInteractions: 10,
       llmApiKey: undefined,
-      llmBaseUrl: 'http://ollama.test/v1',
+      llmBaseUrl: 'http://llm.test/v1',
       llmModel: 'qwen-test',
       llmTimeoutMs: 3000,
     });

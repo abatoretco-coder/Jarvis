@@ -4,7 +4,7 @@
 
 Agora remains the factual discovery engine. Jarvis stores the local profile,
 feedback, favorites and proactive notification history, then performs deterministic
-personal reranking. Ollama receives only the bounded candidates and their computed
+personal reranking. OpenAI receives only the bounded candidates and their computed
 reasons for presentation; it never selects entity IDs or computes the score.
 
 The persistent identity is `user_id`. It is currently a trusted-client identity,
@@ -70,4 +70,4 @@ A historical snapshot is never reported as current.
 Profile and feedback rows remain in Jarvis SQLite. Jarvis sends only geographic,
 temporal and explicit discovery filters to Agora, and Agora alone owns provider
 credentials. The full profile and feedback history are never sent to Agora,
-providers or Ollama. Global profile reset requires explicit confirmation.
+providers or OpenAI. Global profile reset requires explicit confirmation.

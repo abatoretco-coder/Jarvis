@@ -12,14 +12,22 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck:test": "tsc -p tsconfig.test.json",
     "check:capabilities": "tsx scripts/check-capabilities.ts",
+    "security:dependencies": "npm audit --omit=dev --audit-level=high",
+    "security:abuse": "jest --runInBand tests/security.test.ts tests/conversationAuthorization.test.ts tests/userDataOwnership.test.ts tests/adminControlPlane.test.ts tests/openAiResilience.test.ts",
+    "security:edge-config": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-edge-config.ps1",
+    "security:image": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan-runtime-image.ps1",
+    "pc": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-runtime.ps1",
     "oauth:helper": "tsx scripts/oauth-helper.ts",
     "oauth:microsoft:url": "tsx scripts/oauth-helper.ts microsoft:url",
     "oauth:microsoft:exchange": "tsx scripts/oauth-helper.ts microsoft:exchange",
     "oauth:google:url": "tsx scripts/oauth-helper.ts google:url",
     "oauth:google:exchange": "tsx scripts/oauth-helper.ts google:exchange",
     "tokens:generate": "tsx scripts/generate-api-keys.ts",
+    "db:conversation": "tsx scripts/conversation-db.ts",
     "preview:replies": "tsx scripts/preview-replies.ts",
     "eval:routing": "tsx scripts/evaluate-semantic-router.ts",
+    "eval:openai:capabilities": "tsx scripts/evaluate-openai-capabilities.ts",
+    "eval:openai:audio": "tsx scripts/evaluate-openai-audio.ts",
     "verify:music-routing": "tsx scripts/verify-music-routing.ts",
     "archive:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/archive-prod-snapshot.ps1",
     "verify": "npm run lint && npm run build && npm run typecheck:test && npm test && npm run check:capabilities",
@@ -28,7 +36,8 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "fastify": "^5.9.0",
+    "fastify": "^5.12.5",
+    "jose": "^5.10.0",
     "pino": "^10.3.1",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
@@ -51,7 +60,7 @@
     "typescript": "^6.0.3"
   },
   "overrides": {
-    "fast-uri": "3.1.2",
-    "js-yaml": "4.3.0"
+    "fast-uri": "3.1.8",
+    "js-yaml": "4.3.2"
   }
 }

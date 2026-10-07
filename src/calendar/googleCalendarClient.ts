@@ -6,6 +6,8 @@
  * the dashboard agenda section and the calendar conversation agent.
  */
 
+import { createHash } from 'node:crypto';
+
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -76,7 +78,11 @@ const LOCAL_TEMPORAL_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}
 export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<string> {
   const credentials = await resolveGoogleCredentials(env);
   if (!credentials) throw new Error('calendar_credentials_missing');
-  const cacheKey = `gcal:${credentials.clientId}`;
+  const tokenFingerprint = createHash('sha256')
+    .update(credentials.refreshToken, 'utf8')
+    .digest('base64url')
+    .slice(0, 16);
+  const cacheKey = `gcal:${credentials.clientId}:${tokenFingerprint}`;
   const cached = _tokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
 

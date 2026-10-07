@@ -1,10 +1,10 @@
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import { toSingleParagraphPlainText } from './plainText';
 import {
-  OLLAMA_SYSTEM_PROMPT_SUMMARIZER,
-  OLLAMA_TITLE_SYSTEM_PROMPT,
-  OLLAMA_USER_TEMPLATE_SUMMARIZER,
-} from './prompts/ollamaConversationPrompts';
+  CONVERSATION_SUMMARY_SYSTEM_PROMPT,
+  CONVERSATION_SUMMARY_USER_TEMPLATE,
+  CONVERSATION_TITLE_SYSTEM_PROMPT,
+} from './prompts/conversationSummaryPrompts';
 import type { MessageRepository } from './repositories/MessageRepository';
 import type { ThreadRepository } from './repositories/ThreadRepository';
 
@@ -16,6 +16,7 @@ export type SummarizationServiceOptions = {
   llmBaseUrl: string;
   llmModel: string;
   llmTimeoutMs: number;
+  llmMaxOutputTokens?: number;
 };
 
 function sanitizeSummaryOutput(input: string): string {
@@ -93,65 +94,26 @@ export class SummarizationService {
       return merged.length <= 2200 ? merged : `${merged.slice(0, 2199)}…`;
     }
 
-    const prompt = OLLAMA_USER_TEMPLATE_SUMMARIZER.replace('{{old_summary}}', normalizedOld || 'Aucune.').replace(
+    const prompt = CONVERSATION_SUMMARY_USER_TEMPLATE.replace('{{old_summary}}', normalizedOld || 'Aucune.').replace(
       '{{messages_delta}}',
       normalizedDelta
     );
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.llmTimeoutMs);
-
-    try {
-      if (isOllamaBaseUrl(this.options.llmBaseUrl)) {
-        const content = await completeOllamaChat({
-          baseUrl: this.options.llmBaseUrl,
-          model: this.options.llmModel,
-          temperature: 0.2,
-          numPredict: 220,
-          messages: [{ role: 'system', content: OLLAMA_SYSTEM_PROMPT_SUMMARIZER }, { role: 'user', content: prompt }],
-          signal: controller.signal,
-        });
-        return sanitizeSummaryOutput(content || normalizedOld) || normalizedOld;
-      }
-      const resp = await fetch(`${this.options.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.options.llmApiKey}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: this.options.llmModel,
-          temperature: 0.2,
-          messages: [
-            { role: 'system', content: OLLAMA_SYSTEM_PROMPT_SUMMARIZER },
-            { role: 'user', content: prompt },
-          ],
-        }),
-        signal: controller.signal,
-      });
-
-      const raw = await resp.text();
-      let data: unknown = raw;
-      try {
-        data = raw ? (JSON.parse(raw) as unknown) : {};
-      } catch {
-        data = raw;
-      }
-
-      if (!resp.ok) {
-        throw new Error(`summary_provider_error:${resp.status}`);
-      }
-
-      const choices =
-        data && typeof data === 'object' && Array.isArray((data as { choices?: unknown[] }).choices)
-          ? ((data as { choices: Array<{ message?: { content?: string } }> }).choices ?? [])
-          : [];
-      const content = choices[0]?.message?.content ?? '';
-      const cleaned = sanitizeSummaryOutput(content || normalizedOld);
-      return cleaned || normalizedOld;
-    } finally {
-      clearTimeout(timeout);
-    }
+    const content = await completeOpenAiResponse({
+      apiKey: this.options.llmApiKey,
+      baseUrl: this.options.llmBaseUrl,
+      model: this.options.llmModel,
+      capability: 'summary',
+      messages: [
+        { role: 'system', content: CONVERSATION_SUMMARY_SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+      maxOutputTokens: Math.min(320, this.options.llmMaxOutputTokens ?? 512),
+      timeoutMs: this.options.llmTimeoutMs,
+      reasoningEffort: 'none',
+    });
+    const cleaned = sanitizeSummaryOutput(content || normalizedOld);
+    return cleaned || normalizedOld;
   }
 
   private async runPresummarize(threadId: string): Promise<void> {
@@ -187,52 +149,21 @@ export class SummarizationService {
   }
 
   private async runTitleGeneration(threadId: string, userText: string, assistantText: string): Promise<void> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.llmTimeoutMs);
     try {
-      if (isOllamaBaseUrl(this.options.llmBaseUrl)) {
-        const raw = await completeOllamaChat({
-          baseUrl: this.options.llmBaseUrl,
-          model: this.options.llmModel,
-          temperature: 0.15,
-          numPredict: 30,
-          messages: [
-            { role: 'system', content: OLLAMA_TITLE_SYSTEM_PROMPT },
-            { role: 'user', content: `Utilisateur: ${toSingleParagraphPlainText(userText)}\nJarvis: ${toSingleParagraphPlainText(assistantText)}` },
-          ],
-          signal: controller.signal,
-        });
-        const title = toSingleParagraphPlainText(raw)
-          .replace(/^\s*(titre\s*:|title\s*:)/i, '').replace(/^["'«`]+|["'»`]+$/g, '').replace(/[.!?;:]+$/g, '').trim().split(/\s+/).slice(0, 7).join(' ');
-        if (title) await this.threadRepository.updateTitle(threadId, title);
-        return;
-      }
-      const response = await fetch(`${this.options.llmBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.options.llmApiKey}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: this.options.llmModel,
-          temperature: 0.15,
-          max_tokens: 30,
-          messages: [
-            {
-              role: 'system',
-              content: OLLAMA_TITLE_SYSTEM_PROMPT,
-            },
-            {
-              role: 'user',
-              content: `Utilisateur: ${toSingleParagraphPlainText(userText)}\nJarvis: ${toSingleParagraphPlainText(assistantText)}`,
-            },
-          ],
-        }),
-        signal: controller.signal,
+      if (!this.options.llmApiKey) return;
+      const raw = await completeOpenAiResponse({
+        apiKey: this.options.llmApiKey,
+        baseUrl: this.options.llmBaseUrl,
+        model: this.options.llmModel,
+        capability: 'summary',
+        messages: [
+          { role: 'system', content: CONVERSATION_TITLE_SYSTEM_PROMPT },
+          { role: 'user', content: `Utilisateur: ${toSingleParagraphPlainText(userText)}\nJarvis: ${toSingleParagraphPlainText(assistantText)}` },
+        ],
+        maxOutputTokens: Math.min(64, this.options.llmMaxOutputTokens ?? 512),
+        timeoutMs: this.options.llmTimeoutMs,
+        reasoningEffort: 'none',
       });
-      if (!response.ok) return;
-      const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const raw = data.choices?.[0]?.message?.content ?? '';
       const title = toSingleParagraphPlainText(raw)
         .replace(/^\s*(titre\s*:|title\s*:)/i, '')
         .replace(/^["'«`]+|["'»`]+$/g, '')
@@ -244,8 +175,6 @@ export class SummarizationService {
       if (title) await this.threadRepository.updateTitle(threadId, title);
     } catch {
       // The immediate deterministic title remains available on provider failure.
-    } finally {
-      clearTimeout(timeout);
     }
   }
 }

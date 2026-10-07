@@ -1,9 +1,18 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { AdminControlPlaneRepository } from './admin/AdminControlPlaneRepository';
 import { ProactiveContextCache } from './context/ProactiveContextCache';
+import { createConversationDb } from './conversation/repositories/SqliteRepositories';
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
+import { IdentityRepository } from './identity/IdentityRepository';
+import { IdentityService } from './identity/IdentityService';
+import { OidcTokenVerifier } from './identity/OidcTokenVerifier';
+import { IntegrationRepository } from './integrations/IntegrationRepository';
+import { IntegrationService } from './integrations/IntegrationService';
 import { NasStatusClient } from './nas/NasStatusClient';
+import { configureOpenAiResilience, shutdownOpenAiResilience } from './openai/resilience';
+import { registerAdminRoutes } from './routes/admin';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
 import { registerContextCacheRoute } from './routes/contextCache';
@@ -12,11 +21,14 @@ import { registerDashboardRoute } from './routes/dashboard';
 import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
+import { registerHomeRoutes } from './routes/home';
+import { registerIdentityRoutes } from './routes/identity';
 import { registerIngestRoute } from './routes/ingest';
+import { registerIntegrationRoutes } from './routes/integrations';
 import { registerNasStatusRoute } from './routes/nasStatus';
 import { registerNewsSummaryRoute } from './routes/newsSummary';
-import { registerOAuthRoutes } from './routes/oauth';
-import { registerSecurityHooks } from './routes/securityHooks';
+import { registerPrincipalRateLimitHook, registerSecurityHooks } from './routes/securityHooks';
+import { parseTrustedProxyCidrs } from './security/edgePolicy';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 
 export type AppDeps = {
@@ -25,19 +37,35 @@ export type AppDeps = {
   spotifyWebApi: SpotifyWebApiClient;
   nasStatus?: NasStatusClient;
   contextCache?: ProactiveContextCache;
+  integrations?: IntegrationService;
+  adminAudit?: AdminControlPlaneRepository;
 };
 
 export function buildApp(env: Env): FastifyInstance {
+  configureOpenAiResilience(env);
   const ha = env.HA_BASE_URL && env.HA_TOKEN ? new HomeAssistantClient(env) : undefined;
+  const trustedProxies = parseTrustedProxyCidrs(env.TRUSTED_PROXY_CIDRS);
 
   const app = Fastify({
+    trustProxy: trustedProxies.length ? trustedProxies : false,
     logger: {
       level: env.LOG_LEVEL,
+      serializers: {
+        req(request) {
+          return {
+            method: request.method,
+            url: request.url?.split('?')[0],
+            hostname: request.hostname,
+            remoteAddress: request.ip,
+          };
+        },
+      },
       redact: {
         paths: [
           'req.headers.authorization',
           'req.headers.cookie',
           'req.headers.x-api-key',
+          'req.headers.x-jarvis-edge-secret',
           'req.body.apiKey',
           'req.body.token',
           'req.body.access_token',
@@ -57,20 +85,53 @@ export function buildApp(env: Env): FastifyInstance {
   const nasStatus = new NasStatusClient(env);
   spotifyWebApi.startSituationPrefetch();
 
-  const contextCache = new ProactiveContextCache({ env, ha, spotifyWebApi, nasStatus, log: app.log });
+  const contextCache = new ProactiveContextCache({
+    env,
+    ha,
+    spotifyWebApi,
+    nasStatus,
+    log: app.log,
+  });
   contextCache.start();
   app.addHook('onClose', async () => {
     contextCache.stop();
+    shutdownOpenAiResilience();
   });
 
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache };
+  const identityDb = env.OIDC_ENABLED ? createConversationDb(env.CONVERSATION_DB_PATH) : undefined;
+  const issuer = env.OIDC_ISSUER_URL?.replace(/\/$/u, '');
+  const identityService =
+    identityDb && issuer && env.OIDC_AUDIENCE
+      ? new IdentityService(
+          new IdentityRepository(identityDb),
+          new OidcTokenVerifier({
+            issuer,
+            audience: env.OIDC_AUDIENCE,
+            jwksUrl: env.OIDC_JWKS_URL ?? `${issuer}/protocol/openid-connect/certs`,
+            algorithms: env.OIDC_ALLOWED_ALGORITHMS.split(',')
+              .map((item) => item.trim())
+              .filter(Boolean),
+            clockToleranceSeconds: env.OIDC_CLOCK_TOLERANCE_SECONDS,
+            maxTokenBytes: env.OIDC_MAX_TOKEN_BYTES,
+          }),
+          env.OIDC_BOOTSTRAP_OWNER_SUBJECT
+        )
+      : undefined;
+  const adminRepository = identityDb ? new AdminControlPlaneRepository(identityDb) : undefined;
+  deps.adminAudit = adminRepository;
+  const integrations = identityDb
+    ? new IntegrationService(new IntegrationRepository(identityDb), env)
+    : undefined;
+  deps.integrations = integrations;
+  if (identityDb) app.addHook('onClose', async () => identityDb.close());
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();
   const spotifyWebApiAnyProvided = Boolean(
-    env.SPOTIFY_WEBAPI_CLIENT_ID
-    || env.SPOTIFY_WEBAPI_CLIENT_SECRET
-    || env.SPOTIFY_WEBAPI_REFRESH_TOKEN
+    env.SPOTIFY_WEBAPI_CLIENT_ID ||
+    env.SPOTIFY_WEBAPI_CLIENT_SECRET ||
+    env.SPOTIFY_WEBAPI_REFRESH_TOKEN
   );
   if (spotifyWebApiAnyProvided && !spotifyWebApiConfigured) {
     app.log.warn(
@@ -85,12 +146,25 @@ export function buildApp(env: Env): FastifyInstance {
   }
 
   if (!spotifyWebApiConfigured && !env.SPOTIFY_DEFAULT_PLAY_URI) {
-    app.log.info('Spotify Web API is disabled and SPOTIFY_DEFAULT_PLAY_URI is not set; “mets la musique” may need an explicit Spotify URI/link');
+    app.log.info(
+      'Spotify Web API is disabled and SPOTIFY_DEFAULT_PLAY_URI is not set; “mets la musique” may need an explicit Spotify URI/link'
+    );
   }
 
-  registerHealthRoute(app, deps);
   registerSecurityHooks(app, env);
-  registerApiKeyHook(app, env);
+  registerApiKeyHook(app, env, identityService, adminRepository);
+  registerPrincipalRateLimitHook(app, env);
+
+  // Hooks must be registered before routes so every route receives the same
+  // edge, authentication and rate-limit policy.
+  registerHealthRoute(app, deps);
+  registerHomeRoutes(app, deps);
+
+  if (identityService && adminRepository) {
+    registerIdentityRoutes(app, identityService, adminRepository);
+    registerAdminRoutes(app, deps, adminRepository);
+    if (integrations) registerIntegrationRoutes(app, integrations);
+  }
 
   registerCapabilitiesRoute(app, deps);
   registerContextCacheRoute(app, deps);
@@ -100,7 +174,6 @@ export function buildApp(env: Env): FastifyInstance {
   registerHaIndexRoute(app, deps);
   registerNewsSummaryRoute(app, deps);
   registerNasStatusRoute(app, deps);
-  registerOAuthRoutes(app, deps);
   registerIngestRoute(app, deps);
 
   return app;

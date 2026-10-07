@@ -1,8 +1,19 @@
 import type { FastifyInstance } from 'fastify';
 
+import { verifyConversationDatabase } from '../conversation/conversationDbBackup';
 import type { AppDeps } from '../server';
 
 export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void {
+  app.get('/ready', async (_request, reply) => {
+    if (!deps) return { status: 'ok' };
+    try {
+      const verification = verifyConversationDatabase(deps.env.CONVERSATION_DB_PATH);
+      return { status: 'ready', schemaVersion: verification.schemaVersion };
+    } catch {
+      return reply.code(503).send({ status: 'not_ready', dependency: 'database' });
+    }
+  });
+
   app.get('/health', async () => {
     const timestamp = new Date().toISOString();
     
@@ -22,20 +33,13 @@ export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void 
     const dependencies: Record<string, unknown> = {
       llm: {
         provider: deps.env.LLM_PROVIDER,
-        model: deps.env.OPENAI_MODEL_SUMMARY,
-        baseUrl: deps.env.OPENAI_BASE_URL,
-        fallback: deps.env.LLM_PROVIDER === 'hybrid'
-          ? {
-              provider: 'openai',
-              configured: Boolean(deps.env.LLM_FALLBACK_OPENAI_API_KEY),
-              model: deps.env.LLM_FALLBACK_OPENAI_MODEL_ROUTER,
-              timeoutMs: deps.env.LLM_FALLBACK_OPENAI_TIMEOUT_MS,
-            }
-          : { configured: false },
+        api: 'responses',
+        configured: Boolean(deps.env.OPENAI_API_KEY?.trim()),
       },
       voice: {
-        localSttFirst: deps.env.STT_LOCAL_FIRST,
-        dedicatedTts: Boolean(deps.env.OPENAI_TTS_BASE_URL?.trim() && deps.env.OPENAI_TTS_API_KEY?.trim()),
+        sttProvider: 'openai',
+        ttsProvider: 'openai',
+        configured: Boolean(deps.env.OPENAI_API_KEY?.trim()),
       },
       planner: {
         status: 'ok',

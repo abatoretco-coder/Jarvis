@@ -1,0 +1,64 @@
+{
+  "realm": "jarvis",
+  "enabled": true,
+  "displayName": "Jarvis Home",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "rememberMe": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": false,
+  "resetPasswordAllowed": true,
+  "clients": [
+    {
+      "clientId": "jarvis-api",
+      "name": "Jarvis API audience",
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false
+    },
+    {
+      "clientId": "jarvis-desktop",
+      "name": "Jarvis Desktop",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["com.jarvis.desktop:/oauth/callback"],
+      "protocolMappers": [
+        {
+          "name": "jarvis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jarvis-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "jarvis-android",
+      "name": "Jarvis Android",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["com.jarvisremote.app:/oauth/callback"],
+      "protocolMappers": [
+        {
+          "name": "jarvis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jarvis-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}
+

@@ -1,4 +1,4 @@
-import { completeOllamaChat, isOllamaBaseUrl } from '../../ollamaChat';
+import { completeOpenAiResponse } from '../../openai/responsesClient';
 import { getSpotifyResponse } from '../deterministic/spotifyResponses';
 import { RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG } from './openAiConfig';
 import { resolveRenderPolicy } from './policies';
@@ -10,6 +10,7 @@ type RenderDeps = {
   openAiApiKey?: string;
   openAiBaseUrl?: string;
   openAiModel?: string;
+  maxOutputTokens?: number;
   timeoutMs: number;
   log?: {
     warn: (obj: Record<string, unknown>, msg: string) => void;
@@ -101,53 +102,24 @@ async function renderWithDomainPrompt(result: ActionExecutionResult, deps: Rende
   const source = normalizeText(result.rawText ?? '');
   if (!source) return null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), deps.timeoutMs);
   try {
-    if (isOllamaBaseUrl(deps.openAiBaseUrl)) {
-      const text = await completeOllamaChat({
-        baseUrl: deps.openAiBaseUrl, model: deps.openAiModel, temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
-        numPredict: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
-        messages: [{ role: 'system', content: buildDomainRephraseSystemPrompt() }, { role: 'user', content: buildDomainRephraseUserPrompt(result, source) }], signal: controller.signal,
-      });
-      return normalizeText(text) || null;
-    }
-    const response = await fetch(`${deps.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${deps.openAiApiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: deps.openAiModel,
-        temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
-        max_tokens: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
-        messages: [
-          {
-            role: 'system',
-            content: buildDomainRephraseSystemPrompt(),
-          },
-          {
-            role: 'user',
-            content: buildDomainRephraseUserPrompt(result, source),
-          },
-        ],
-      }),
-      signal: controller.signal,
+    const text = await completeOpenAiResponse({
+      apiKey: deps.openAiApiKey,
+      baseUrl: deps.openAiBaseUrl,
+      model: deps.openAiModel,
+      capability: 'synthesis',
+      messages: [
+        { role: 'system', content: buildDomainRephraseSystemPrompt() },
+        { role: 'user', content: buildDomainRephraseUserPrompt(result, source) },
+      ],
+      maxOutputTokens: Math.min(RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens, deps.maxOutputTokens ?? 768),
+      timeoutMs: deps.timeoutMs,
+      reasoningEffort: 'low',
     });
-
-    if (!response.ok) return null;
-    const raw = await response.json() as Record<string, unknown>;
-    const choices = Array.isArray(raw.choices) ? raw.choices : [];
-    const first = choices[0] as Record<string, unknown> | undefined;
-    const msg = first && typeof first.message === 'object' ? first.message as Record<string, unknown> : undefined;
-    const text = typeof msg?.content === 'string' ? msg.content : '';
     return normalizeText(text) || null;
   } catch (err) {
     deps.log?.warn({ err, actionKey: result.actionKey, domain: result.domain }, 'render_policy_llm_rephrase_failed');
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -189,8 +161,6 @@ export async function renderMultipleExecutionResults(results: ActionExecutionRes
   if (usable.length === 1) return renderSingleExecutionResult(usable[0]!, deps);
 
   if (deps.openAiApiKey && deps.openAiBaseUrl && deps.openAiModel) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), deps.timeoutMs);
     try {
       const summaries = await Promise.all(usable.map(async (result) => ({
         domain: result.domain,
@@ -198,52 +168,22 @@ export async function renderMultipleExecutionResults(results: ActionExecutionRes
         status: result.status,
         text: await renderSingleExecutionResult(result, { ...deps, openAiApiKey: undefined }),
       })));
-      if (isOllamaBaseUrl(deps.openAiBaseUrl)) {
-        const text = await completeOllamaChat({
-          baseUrl: deps.openAiBaseUrl, model: deps.openAiModel, temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
-          numPredict: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
-          messages: [
-            { role: 'system', content: 'Tu combines plusieurs resultats d actions Jarvis en une reponse courte, factuelle, en francais. N invente rien.' },
-            { role: 'user', content: JSON.stringify({ results: summaries }) },
-          ], signal: controller.signal,
-        });
-        if (text) return clamp(normalizeText(text), 700);
-      }
-      const response = await fetch(`${deps.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${deps.openAiApiKey}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: deps.openAiModel,
-          temperature: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.temperature,
-          max_tokens: RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens,
-          messages: [
-            {
-              role: 'system',
-              content: 'Tu combines plusieurs resultats d actions Jarvis en une reponse courte, factuelle, en francais. N invente rien.',
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({ results: summaries }),
-            },
-          ],
-        }),
-        signal: controller.signal,
+      const text = await completeOpenAiResponse({
+        apiKey: deps.openAiApiKey,
+        baseUrl: deps.openAiBaseUrl,
+        model: deps.openAiModel,
+        capability: 'synthesis',
+        messages: [
+          { role: 'system', content: 'Tu combines plusieurs resultats d actions Jarvis en une reponse courte, factuelle, en francais. N invente rien.' },
+          { role: 'user', content: JSON.stringify({ results: summaries }) },
+        ],
+        maxOutputTokens: Math.min(RENDER_DOMAIN_REPHRASE_OPENAI_CONFIG.maxTokens, deps.maxOutputTokens ?? 768),
+        timeoutMs: deps.timeoutMs,
+        reasoningEffort: 'low',
       });
-      if (response.ok) {
-        const raw = await response.json() as Record<string, unknown>;
-        const choices = Array.isArray(raw.choices) ? raw.choices : [];
-        const first = choices[0] as Record<string, unknown> | undefined;
-        const msg = first && typeof first.message === 'object' ? first.message as Record<string, unknown> : undefined;
-        const text = typeof msg?.content === 'string' ? normalizeText(msg.content) : '';
-        if (text) return clamp(text, 700);
-      }
+      if (text) return clamp(normalizeText(text), 700);
     } catch (err) {
       deps.log?.warn({ err, count: usable.length }, 'render_policy_multi_synthesis_failed');
-    } finally {
-      clearTimeout(timeout);
     }
   }
 

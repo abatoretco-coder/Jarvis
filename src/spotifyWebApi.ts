@@ -204,6 +204,12 @@ type SpotifyLogger = {
   error(obj: Record<string, unknown>, msg: string): void;
 };
 
+export type SpotifyCredentialOptions = {
+  refreshToken?: string;
+  persistTokenFile?: boolean;
+  onRefreshToken?: (token: string) => Promise<void> | void;
+};
+
 export class SpotifyWebApiClient {
   private env: Env;
   private logger?: SpotifyLogger;
@@ -220,13 +226,18 @@ export class SpotifyWebApiClient {
   private readonly shortCacheTtlMs = 65_000;
   private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
+  private readonly persistTokenFile: boolean;
+  private readonly onRefreshToken?: (token: string) => Promise<void> | void;
 
-  constructor(env: Env, logger?: SpotifyLogger) {
+  constructor(env: Env, logger?: SpotifyLogger, credentialOptions: SpotifyCredentialOptions = {}) {
     this.env = env;
     this.logger = logger;
     this.tokenFilePath = env.SPOTIFY_WEBAPI_TOKEN_STORE_PATH;
+    this.persistTokenFile = credentialOptions.persistTokenFile ?? true;
+    this.onRefreshToken = credentialOptions.onRefreshToken;
+    this.refreshTokenOverride = credentialOptions.refreshToken?.trim() || undefined;
     // Load persisted token on startup (non-blocking)
-    this.loadTokenFromDisk().catch(() => {
+    if (this.persistTokenFile) this.loadTokenFromDisk().catch(() => {
       // Ignore errors (file may not exist on first run)
     });
   }
@@ -266,6 +277,7 @@ export class SpotifyWebApiClient {
   }
 
   private async saveTokenToDisk(token: string, expiresAtMs: number, refreshToken?: string): Promise<void> {
+    if (!this.persistTokenFile) return;
     try {
       const data: PersistedToken = { token, expiresAtMs, ...(refreshToken ? { refreshToken } : {}) };
       const dir = dirname(this.tokenFilePath);
@@ -420,6 +432,7 @@ export class SpotifyWebApiClient {
     const previousRefreshToken = this.refreshTokenOverride;
     if (typeof parsed.refresh_token === 'string' && parsed.refresh_token.trim()) {
       this.refreshTokenOverride = parsed.refresh_token.trim();
+      if (this.refreshTokenOverride !== previousRefreshToken) await this.onRefreshToken?.(this.refreshTokenOverride);
     }
     this.log('info', 'token_refreshed', {
       expiresInSec: Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000)),

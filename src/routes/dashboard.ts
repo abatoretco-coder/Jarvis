@@ -9,6 +9,7 @@ import {
   resolveEventStart,
 } from '../calendar/googleCalendarClient';
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
+import { getRequestPrincipal } from '../identity/requestIdentity';
 import { buildMailAccounts, type MailAccount } from '../mail/mailAgent';
 import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import { type MailQualification,qualifyMail } from '../mail/mailQualification';
@@ -1455,7 +1456,16 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
   app.get('/v1/dashboard', async (req, reply) => {
     const query = (req.query ?? {}) as Record<string, unknown>;
     const deviceLocation = parseDashboardGeoLocation(query);
-    const cacheKey = weatherCacheKeyForLocation(deviceLocation);
+    const principal = getRequestPrincipal(req);
+    const ownerCacheKey = principal?.kind === 'user'
+      ? `user:${principal.userId}`
+      : principal?.kind === 'service'
+        ? `service:${principal.serviceId ?? 'legacy'}`
+        : 'legacy';
+    const requestedConnectionId = typeof query.connectionId === 'string'
+      ? query.connectionId.trim().slice(0, 128)
+      : '';
+    const cacheKey = `${ownerCacheKey}:${requestedConnectionId}:${weatherCacheKeyForLocation(deviceLocation)}`;
     const cached = dashboardCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < dashboardCacheTtlMs) {
       return reply.code(200).send({
@@ -1463,18 +1473,36 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         cache: { hit: true, fetchedAt: new Date(cached.fetchedAt).toISOString() },
       });
     }
-    const mailPromise = buildMailSection(deps.env, app.log).catch((error) => {
+    const mailPromise = principal?.kind === 'user'
+      ? Promise.resolve(makeSection('Mail', 'jarvis-mail', 'Connecte Gmail dans tes services personnels pour activer les emails.'))
+      : buildMailSection(deps.env, app.log).catch((error) => {
       app.log.warn({ error }, 'dashboard_mail_failed');
       return makeSection('Mail', 'jarvis-mail', 'Impossible de recuperer les emails pour le moment.');
     });
 
-    const todoPromise = buildTasksSection(deps.env).catch((error) => {
+    const todoPromise = principal?.kind === 'user'
+      ? Promise.resolve(makeSection('Taches', 'jarvis-todo', 'Connecte Microsoft To Do dans tes services personnels pour activer les taches.'))
+      : buildTasksSection(deps.env).catch((error) => {
       app.log.warn({ error }, 'dashboard_todo_failed');
       return makeSection('Taches', 'jarvis-todo', 'Impossible de recuperer les taches pour le moment.');
     });
 
     // Agenda: read directly from Google Calendar and keep failures visible.
-    const agendaPromise = buildAgendaFromGoogle(deps.env).catch((error) => {
+    const personalCalendarToken = principal?.kind === 'user'
+      ? deps.integrations?.resolveRefreshToken(
+          principal.userId,
+          'google-calendar',
+          requestedConnectionId || undefined
+        )
+      : undefined;
+    const agendaEnv = principal?.kind === 'user'
+      ? {
+          ...deps.env,
+          GOOGLE_REFRESH_TOKEN: personalCalendarToken ?? undefined,
+          OAUTH_REFRESH_TOKEN_STORE_PATH: '',
+        }
+      : deps.env;
+    const agendaPromise = buildAgendaFromGoogle(agendaEnv).catch((error) => {
       app.log.warn({ error }, 'dashboard_agenda_google_failed');
       return {
         ...makeSection('Agenda', 'google-calendar', 'Je n ai pas pu lire Google Calendar pour le moment.'),

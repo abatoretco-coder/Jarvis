@@ -19,7 +19,7 @@
  */
 
 import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import { buildTodoSynthesisSystemPrompt } from './prompts/todoSynthesisSystemPrompt';
 import { buildTodoSynthesisUserPrompt } from './prompts/todoSynthesisUserTemplate';
 
@@ -120,48 +120,41 @@ export type TodoEnv = {
   MICROSOFT_REFRESH_TOKEN?: string;
   MICROSOFT_TENANT_ID?: string;
   OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
+  credentialKey?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
   OPENAI_MODEL_SUMMARY?: string;
+  OPENAI_MODEL_AGENT?: string;
+  OPENAI_MODEL_SYNTHESIS?: string;
+  OPENAI_MAX_OUTPUT_TOKENS_AGENT?: number;
+  OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS?: number;
 };
 
 async function synthesizeTodoReplyWithOpenAi(params: {
   openAiApiKey: string;
   openAiBaseUrl: string;
   model: string;
+  maxOutputTokens?: number;
   timeoutMs: number;
   userText: string;
   executorResult: string;
 }): Promise<string> {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), params.timeoutMs);
-    if (isOllamaBaseUrl(params.openAiBaseUrl)) {
-      const content = await completeOllamaChat({
-        baseUrl: params.openAiBaseUrl, model: params.model, temperature: 0.2, numPredict: 180,
-        messages: [{ role: 'system', content: TODO_SYNTHESIS_SYSTEM_PROMPT }, { role: 'user', content: buildTodoSynthesisUserPrompt(params.userText, params.executorResult) }], signal: controller.signal,
-      });
-      clearTimeout(timer);
-      return content || compactTodoListForFallback(params.executorResult);
-    }
-    const res = await fetch(`${params.openAiBaseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${params.openAiApiKey}` },
-      body: JSON.stringify({
-        model: params.model,
-        max_tokens: 180,
-        messages: [
-          { role: 'system', content: TODO_SYNTHESIS_SYSTEM_PROMPT },
-          { role: 'user',   content: buildTodoSynthesisUserPrompt(params.userText, params.executorResult) },
-        ],
-      }),
-      signal: controller.signal,
+    return await completeOpenAiResponse({
+      apiKey: params.openAiApiKey,
+      baseUrl: params.openAiBaseUrl,
+      model: params.model,
+      capability: 'synthesis',
+      messages: [
+        { role: 'system', content: TODO_SYNTHESIS_SYSTEM_PROMPT },
+        { role: 'user', content: buildTodoSynthesisUserPrompt(params.userText, params.executorResult) },
+      ],
+      maxOutputTokens: Math.min(240, params.maxOutputTokens ?? 768),
+      timeoutMs: params.timeoutMs,
+      reasoningEffort: 'low',
     });
-    clearTimeout(timer);
-    if (!res.ok) return compactTodoListForFallback(params.executorResult);
-    const data = await res.json() as { choices?: { message?: { content?: string } }[] };
-    return data.choices?.[0]?.message?.content?.trim() || compactTodoListForFallback(params.executorResult);
   } catch {
     return compactTodoListForFallback(params.executorResult);
   }
@@ -200,6 +193,7 @@ async function refreshMicrosoftToken(env: {
   cacheKey?: string;
   storeKey?: string;
   OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
 }): Promise<string> {
   const cacheKey = env.cacheKey?.trim() || env.MICROSOFT_CLIENT_ID;
   const storeKey = env.storeKey?.trim() || `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`;
@@ -229,8 +223,7 @@ async function refreshMicrosoftToken(env: {
   );
   if (!resp.ok) {
     _msTokenCache.delete(cacheKey);
-    const body = await resp.text().catch(() => '');
-    throw new Error(`todo_ms_token_refresh_failed:${resp.status}:${body.slice(0, 200)}`);
+    throw new Error(`todo_ms_token_refresh_failed:${resp.status}`);
   }
   const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
   if (!data.access_token) throw new Error('todo_ms_token_refresh_no_token');
@@ -239,6 +232,7 @@ async function refreshMicrosoftToken(env: {
   if (data.refresh_token) {
     _msLiveRefreshToken.set(cacheKey, data.refresh_token);
     await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
+    await env.onRefreshToken?.(data.refresh_token);
   }
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
@@ -297,8 +291,7 @@ async function graphGet<T>(path: string, token: string): Promise<T> {
     signal: AbortSignal.timeout(8_000),
   });
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`todo_graph_get_failed:${resp.status}:${body.slice(0, 200)}`);
+    throw new Error(`todo_graph_get_failed:${resp.status}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -315,8 +308,7 @@ async function graphPost<T>(path: string, token: string, body: object): Promise<
     signal: AbortSignal.timeout(8_000),
   });
   if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`todo_graph_post_failed:${resp.status}:${raw.slice(0, 200)}`);
+    throw new Error(`todo_graph_post_failed:${resp.status}`);
   }
   return resp.json() as Promise<T>;
 }
@@ -332,8 +324,7 @@ async function graphPatch(path: string, token: string, body: object): Promise<vo
     signal: AbortSignal.timeout(8_000),
   });
   if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`todo_graph_patch_failed:${resp.status}:${raw.slice(0, 200)}`);
+    throw new Error(`todo_graph_patch_failed:${resp.status}`);
   }
 }
 
@@ -577,53 +568,33 @@ async function planTodoAction(
   openAiApiKey: string,
   openAiBaseUrl: string,
   timeoutMs: number,
+  model = 'gpt-6-luna',
+  maxOutputTokens = 512,
 ): Promise<TodoAction> {
-  if (isOllamaBaseUrl(openAiBaseUrl)) {
-    const content = await completeOllamaChat({
-      baseUrl: openAiBaseUrl, model: 'qwen3:8b', temperature: 0, numPredict: 350, format: 'json',
-      messages: [{ role: 'system', content: _PLANNER_SYSTEM }, { role: 'user', content: `TODAY=${todayIsoInParis()}\n${text}` }], signal: AbortSignal.timeout(timeoutMs),
-    });
-    let parsed: unknown;
-    try { parsed = JSON.parse(content || '{}'); } catch { throw new Error(`todo_planner_invalid_json:${content.slice(0, 100)}`); }
-    if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) throw new Error(`todo_planner_missing_action:${content.slice(0, 100)}`);
-    return parsed as TodoAction;
-  }
-  const resp = await fetch(`${openAiBaseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${openAiApiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 350,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: _PLANNER_SYSTEM },
-        { role: 'user',   content: `TODAY=${todayIsoInParis()}\n${text}` },
-      ],
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
+  const content = await completeOpenAiResponse({
+    apiKey: openAiApiKey,
+    baseUrl: openAiBaseUrl,
+    model,
+    capability: 'agent',
+    messages: [
+      { role: 'system', content: _PLANNER_SYSTEM },
+      { role: 'user', content: `TODAY=${todayIsoInParis()}\n${text}` },
+    ],
+    maxOutputTokens,
+    timeoutMs,
+    jsonMode: true,
+    reasoningEffort: 'none',
   });
-
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`todo_planner_llm_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-
-  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim() ?? '{}';
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error(`todo_planner_invalid_json:${content.slice(0, 100)}`);
+    throw new Error('todo_planner_invalid_json');
   }
 
   if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) {
-    throw new Error(`todo_planner_missing_action:${content.slice(0, 100)}`);
+    throw new Error('todo_planner_missing_action');
   }
 
   return parsed as TodoAction;
@@ -639,7 +610,14 @@ export async function planTodoAgentAction(
   }
   if (!env.OPENAI_API_KEY) return { clarification: 'Je ne peux pas gerer les taches pour l instant, la cle OpenAI est manquante.' };
   try {
-    let action = await planTodoAction(text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS);
+    let action = await planTodoAction(
+      text,
+      env.OPENAI_API_KEY,
+      env.OPENAI_BASE_URL,
+      env.OPENAI_TIMEOUT_MS,
+      env.OPENAI_MODEL_AGENT,
+      env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
+    );
     if (action.action === 'list_tasks' && !action.period) {
       const inferred = inferListTasksPeriodFromText(text);
       if (inferred) {
@@ -1104,9 +1082,10 @@ export async function executeTodoAgentAction(
       MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
       MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
       MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
-      cacheKey:                `todo:${env.MICROSOFT_CLIENT_ID}`,
+      cacheKey:                env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
       storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
       OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+      onRefreshToken:          env.onRefreshToken,
     });
   } catch (err) {
     options?.log?.warn({ err: String(err) }, 'todo_agent_token_error');
@@ -1119,7 +1098,8 @@ export async function executeTodoAgentAction(
   return synthesizeTodoReplyWithOpenAi({
     openAiApiKey: env.OPENAI_API_KEY,
     openAiBaseUrl: env.OPENAI_BASE_URL,
-    model: env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+    model: env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+    maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
     timeoutMs: env.OPENAI_TIMEOUT_MS,
     userText: options?.userText ?? action.action,
     executorResult: rawResult,
@@ -1151,7 +1131,12 @@ export async function callTodoAgent(
   let action: TodoAction;
   try {
     action = await planTodoAction(
-      text, env.OPENAI_API_KEY, env.OPENAI_BASE_URL, env.OPENAI_TIMEOUT_MS,
+      text,
+      env.OPENAI_API_KEY,
+      env.OPENAI_BASE_URL,
+      env.OPENAI_TIMEOUT_MS,
+      env.OPENAI_MODEL_AGENT,
+      env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
     );
   } catch (err) {
     log?.warn({ err: String(err) }, 'todo_agent_planner_error');
@@ -1176,9 +1161,10 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
       MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
       MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
       MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
-      cacheKey:                `todo:${env.MICROSOFT_CLIENT_ID}`,
+      cacheKey:                env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
       storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
       OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+      onRefreshToken:          env.onRefreshToken,
     });
   } catch (err) {
     log?.warn({ err: String(err) }, 'todo_agent_token_error');
@@ -1198,7 +1184,8 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
     const synthesized = await synthesizeTodoReplyWithOpenAi({
       openAiApiKey:  env.OPENAI_API_KEY!,
       openAiBaseUrl: env.OPENAI_BASE_URL,
-      model:         env.OPENAI_MODEL_SUMMARY ?? 'gpt-4o-mini',
+      model:         env.OPENAI_MODEL_SYNTHESIS ?? env.OPENAI_MODEL_SUMMARY ?? 'gpt-6.1-sol',
+      maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS,
       timeoutMs:     env.OPENAI_TIMEOUT_MS,
       userText:      text,
       executorResult: rawResult,

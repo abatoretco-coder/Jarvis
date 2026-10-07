@@ -1,5 +1,5 @@
 /**
- * HA Agent Router — LLM-based orchestrator (gpt-4o-mini, structured output).
+ * HA Agent Router — OpenAI Responses orchestrator with structured output.
  *
  * Receives the user text + minimal context (summary + 3 recent messages) and
  * returns which HA conversation agent to call, plus a confidence score.
@@ -10,6 +10,7 @@
  *  - Does NOT transform the user text — routing only.
  */
 
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import { buildOrchestratorSystemPrompt } from './prompts/orchestratorSystemPrompt';
 import { buildOrchestratorUserPrompt } from './prompts/orchestratorUserTemplate';
 import type { MessageRecord } from './repositories/MessageRepository';
@@ -54,7 +55,7 @@ export type RouterTarget = {
 export type RouterResult = {
   targets: RouterTarget[];
   reason: string;
-  provider?: 'ollama' | 'openai';
+  provider?: 'openai';
   model?: string;
   latencyMs?: number;
   fallbackReason?: string;
@@ -65,15 +66,9 @@ export type RouterOptions = {
   openAiBaseUrl: string;
   model: string;
   timeoutMs: number;
+  maxOutputTokens?: number;
   confidenceThreshold: number;
   generalAgentId: string;
-  provider?: 'ollama' | 'openai';
-  fallback?: {
-    openAiApiKey: string;
-    openAiBaseUrl: string;
-    model: string;
-    timeoutMs: number;
-  };
   log?: MinLogger;
 };
 
@@ -89,48 +84,14 @@ export async function routeUserRequest(params: {
   recentMessages: MessageRecord[];
   options: RouterOptions;
 }): Promise<RouterResult> {
-  const { options } = params;
-  const log = options.log;
-  const primaryProvider = options.provider ?? 'openai';
-
-  try {
-    return await routeWithProvider(params, {
-      provider: primaryProvider,
-      openAiApiKey: options.openAiApiKey,
-      openAiBaseUrl: options.openAiBaseUrl,
-      model: options.model,
-      timeoutMs: options.timeoutMs,
-    });
-  } catch (error) {
-    if (!options.fallback || primaryProvider !== 'ollama') throw error;
-    const fallbackReason = normalizeFallbackReason(error);
-    log?.warn({ fallback_reason: fallbackReason, err: error }, 'ha_agent_router_local_fallback_openai');
-    const result = await routeWithProvider(params, { provider: 'openai', ...options.fallback });
-    return { ...result, fallbackReason };
-  }
+  return routeWithOpenAi(params);
 }
 
-type ProviderRequest = {
-  provider: 'ollama' | 'openai';
-  openAiApiKey: string;
-  openAiBaseUrl: string;
-  model: string;
-  timeoutMs: number;
-};
-
-/**
- * Ollama can constrain output against a JSON Schema through its OpenAI
- * compatibility endpoint.  This is stricter than JSON mode and prevents a
- * local model from inventing an unavailable agent identifier.
- */
-export function buildOrchestratorResponseFormat(
-  provider: 'ollama' | 'openai',
-  routerIds: string[],
-): Record<string, unknown> {
-  if (provider !== 'ollama') return { type: 'json_object' };
+/** Builds the strict Responses API schema and prevents unknown agent identifiers. */
+export function buildOrchestratorResponseFormat(routerIds: string[]): { name: string; schema: Record<string, unknown> } {
   return {
-    type: 'json_schema',
-    json_schema: { name: 'jarvis_orchestrator_route', strict: true, schema: buildOrchestratorJsonSchema(routerIds) },
+    name: 'jarvis_orchestrator_route',
+    schema: buildOrchestratorJsonSchema(routerIds),
   };
 }
 
@@ -161,13 +122,13 @@ function buildOrchestratorJsonSchema(routerIds: string[]): Record<string, unknow
   };
 }
 
-async function routeWithProvider(params: {
+async function routeWithOpenAi(params: {
   text: string;
   agents: AgentRouteEntry[];
   summary?: string;
   recentMessages: MessageRecord[];
   options: RouterOptions;
-}, providerRequest: ProviderRequest): Promise<RouterResult> {
+}): Promise<RouterResult> {
   const { options } = params;
   const log = options.log;
   const t0 = Date.now();
@@ -176,68 +137,32 @@ async function routeWithProvider(params: {
   const routerIdToAgentId = new Map(routingAgents.map((agent) => [agent.routerId ?? agent.agentId, agent.agentId]));
 
   log?.info(
-    { provider: providerRequest.provider, model: providerRequest.model, agents: [...routerIdToAgentId.keys()], timeout_ms: providerRequest.timeoutMs },
+    { provider: 'openai', model: options.model, agents: [...routerIdToAgentId.keys()], timeout_ms: options.timeoutMs },
     'ha_agent_router_start',
   );
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), providerRequest.timeoutMs);
-
   try {
-    const ollama = providerRequest.provider === 'ollama';
-    const endpoint = ollama
-      ? `${providerRequest.openAiBaseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '')}/api/chat`
-      : `${providerRequest.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`;
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: buildOrchestratorUserPrompt({ ...params, agents: routingAgents }) },
+      { role: 'system' as const, content: SYSTEM_PROMPT },
+      { role: 'user' as const, content: buildOrchestratorUserPrompt({ ...params, agents: routingAgents }) },
     ];
-    const response = await fetch(
-      endpoint,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${providerRequest.openAiApiKey}`,
-        },
-        body: JSON.stringify(ollama
-          ? {
-              model: providerRequest.model,
-              messages,
-              stream: false,
-              think: false,
-              format: buildOrchestratorJsonSchema([...routerIdToAgentId.keys()]),
-              options: { temperature: 0, top_p: 1, seed: 17, num_predict: 160 },
-            }
-          : {
-              model: providerRequest.model,
-              temperature: 0,
-              top_p: 1,
-              max_tokens: 160,
-              response_format: buildOrchestratorResponseFormat('openai', [...routerIdToAgentId.keys()]),
-              messages,
-            }),
-        signal: controller.signal,
-      }
-    );
-
-    if (!response.ok) {
-      log?.warn({ status: response.status, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_openai_http_error');
-      throw new Error(`router_${providerRequest.provider}_http_${response.status}`);
-    }
-
-    const raw = await response.json() as Record<string, unknown>;
-    const content = ollama
-      ? ((raw.message as { content?: string } | undefined)?.content
-        ?? (raw.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content
-        ?? '')
-      : ((raw?.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? '');
+    const content = await completeOpenAiResponse({
+      apiKey: options.openAiApiKey,
+      baseUrl: options.openAiBaseUrl,
+      model: options.model,
+      capability: 'router',
+      messages,
+      maxOutputTokens: options.maxOutputTokens ?? 256,
+      timeoutMs: options.timeoutMs,
+      jsonSchema: buildOrchestratorResponseFormat([...routerIdToAgentId.keys()]),
+      reasoningEffort: 'none',
+    });
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
     } catch {
-      log?.warn({ content: content.slice(0, 200), elapsed_ms: Date.now() - t0 }, 'ha_agent_router_invalid_json');
+      log?.warn({ output_chars: content.length, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_invalid_json');
       throw new Error('router_invalid_json');
     }
 
@@ -266,7 +191,7 @@ async function routeWithProvider(params: {
       .filter((t) => t.agentId);
 
     if (targets.length === 0) {
-      log?.warn({ rawTargets, knownIds: [...knownIds], elapsed_ms: Date.now() - t0 }, 'ha_agent_router_no_valid_targets');
+      log?.warn({ raw_target_count: rawTargets.length, known_agent_count: knownIds.size, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_no_valid_targets');
       throw new Error('router_no_valid_targets');
     }
 
@@ -279,12 +204,10 @@ async function routeWithProvider(params: {
       { targets: targets.map((t) => `${t.agentId}:${t.confidence}`), reason, elapsed_ms: Date.now() - t0 },
       'ha_agent_router_done',
     );
-    return { targets, reason, provider: providerRequest.provider, model: providerRequest.model, latencyMs: Date.now() - t0 };
+    return { targets, reason, provider: 'openai', model: options.model, latencyMs: Date.now() - t0 };
   } catch (error) {
-    if (controller.signal.aborted) throw new Error('router_timeout', { cause: error });
+    if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error('router_timeout', { cause: error });
     throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -305,16 +228,6 @@ function withGeneralRoutingAgent(agents: AgentRouteEntry[], generalAgentId: stri
     },
     ...agents,
   ];
-}
-
-function normalizeFallbackReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message === 'router_timeout') return 'local_timeout';
-  if (message === 'router_invalid_json') return 'local_invalid_json';
-  if (message === 'router_no_valid_targets') return 'local_invalid_target';
-  if (message === 'router_low_confidence') return 'local_low_confidence';
-  if (message.startsWith('router_ollama_http_')) return 'local_http_error';
-  return 'local_error';
 }
 
 /**
@@ -365,6 +278,7 @@ export async function synthesizeAgentResponses(params: {
     openAiBaseUrl: string;
     model: string;
     timeoutMs: number;
+    maxOutputTokens?: number;
     log?: MinLogger;
   };
 }): Promise<string> {
@@ -386,45 +300,24 @@ export async function synthesizeAgentResponses(params: {
     `Demande originale de l'utilisateur : "${params.userText}"\n\n` +
     `Réponses des sous-agents :\n${agentLines}\n\nSynthèse :`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs);
-
   try {
-    const response = await fetch(
-      `${options.openAiBaseUrl.replace(/\/$/, '')}/chat/completions`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${options.openAiApiKey}`,
-        },
-        body: JSON.stringify({
-          model: options.model,
-          temperature: 0.3,
-          max_tokens: 350,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-        }),
-        signal: controller.signal,
-      },
-    );
-
-    if (!response.ok) {
-      options.log?.warn({ status: response.status }, 'synthesize_agent_responses_http_error');
-      throw new Error(`synthesizer_http_${response.status}`);
-    }
-
-    const raw = (await response.json()) as Record<string, unknown>;
-    const content =
-      (raw?.choices as Array<{ message?: { content?: string } }>)?.[0]?.message?.content ?? '';
+    const content = await completeOpenAiResponse({
+      apiKey: options.openAiApiKey,
+      baseUrl: options.openAiBaseUrl,
+      model: options.model,
+      capability: 'synthesis',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      maxOutputTokens: options.maxOutputTokens ?? 768,
+      timeoutMs: options.timeoutMs,
+      reasoningEffort: 'low',
+    });
     return content.trim() || fallbackJoin(params.parts);
   } catch (err) {
     options.log?.warn({ err }, 'synthesize_agent_responses_failed_fallback');
     return fallbackJoin(params.parts);
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

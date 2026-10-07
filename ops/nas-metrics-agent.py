@@ -16,7 +16,6 @@ PROTOCOLS = {
     "nfs": 2049,
     "plex": 32400,
     "syncthing": 22000,
-    "ollama": 11434,
 }
 
 

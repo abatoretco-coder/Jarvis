@@ -7,7 +7,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import type { Env } from '../src/env';
+import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { callMailAgent } from '../src/mail/mailAgent';
+import { resetOpenAiResilienceForTests } from '../src/openai/resilience';
 import { registerIngestRoute } from '../src/routes/ingest';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
 import type { AppDeps } from '../src/server';
@@ -65,6 +67,14 @@ function makeEnv(dbPath: string, overrides: Partial<Env> = {}): Env {
     OPENAI_BASE_URL: 'https://api.openai.com/v1',
     OPENAI_MODEL_ROUTER: 'gpt-4o-mini',
     OPENAI_MODEL_SUMMARY: 'gpt-4o-mini',
+    OPENAI_MODEL_AGENT: 'gpt-4o-mini',
+    OPENAI_MODEL_MUSIC_AGENT: 'gpt-4o-mini',
+    OPENAI_MODEL_SYNTHESIS: 'gpt-4o-mini',
+    OPENAI_MAX_OUTPUT_TOKENS_ROUTER: 256,
+    OPENAI_MAX_OUTPUT_TOKENS_SUMMARY: 512,
+    OPENAI_MAX_OUTPUT_TOKENS_AGENT: 512,
+    OPENAI_MAX_OUTPUT_TOKENS_MUSIC_AGENT: 384,
+    OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS: 768,
     OPENAI_TIMEOUT_MS: 1000,
     ROUTER_TIMEOUT_MS: 500,
     ROUTER_CONFIDENCE_THRESHOLD: 0.7,
@@ -117,8 +127,8 @@ function nonTitleFetchCalls(fetchMock: { mock: { calls: unknown[][] } }): unknow
       : '';
     if (!body) return true;
     try {
-      const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
-      const systemPrompt = parsed.messages?.[0]?.content ?? '';
+      const parsed = JSON.parse(body) as { input?: Array<{ content?: string }> };
+      const systemPrompt = parsed.input?.[0]?.content ?? '';
       return !systemPrompt.includes('titre francais factuel') && !systemPrompt.includes('Donne un titre');
     } catch {
       return true;
@@ -131,6 +141,7 @@ describe('/v1/ingest integration', () => {
   let app: FastifyInstance;
 
   beforeEach(() => {
+    resetOpenAiResilienceForTests();
     tempDir = mkdtempSync(join(tmpdir(), 'jarvis-ingest-test-'));
     app = Fastify({ logger: false });
     mockedRouteUserRequest.mockReset();
@@ -654,10 +665,10 @@ describe('/v1/ingest integration', () => {
     ];
 
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (url: string) => {
-      expect(url).toContain('/chat/completions');
+      expect(url).toContain('/responses');
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: 'Demain prends une veste imperméable et des chaussures fermées.' } }],
+          status: 'completed', output_text: 'Demain prends une veste imperméable et des chaussures fermées.',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
@@ -827,7 +838,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Prévision fallback.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Prévision fallback.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown as typeof fetch;
@@ -936,7 +947,7 @@ describe('/v1/ingest integration', () => {
     });
     const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Demain a Florence, attends-toi a 27 degres et du soleil.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Demain a Florence, attends-toi a 27 degres et du soleil.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     ));
@@ -989,7 +1000,7 @@ describe('/v1/ingest integration', () => {
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
     const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
+        JSON.stringify({ status: 'completed', output_text: searchReply }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     ));
@@ -1022,9 +1033,9 @@ describe('/v1/ingest integration', () => {
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('tts openai route uses dedicated TTS base URL without HA', async () => {
+  it('tts openai route uses the shared cloud runtime without HA', async () => {
     const fetchMock = jest.fn(async (url: string) => {
-      expect(url).toBe('http://127.0.0.1:8880/v1/audio/speech');
+      expect(url).toBe('https://api.openai.com/v1/audio/speech');
       return new Response(new Uint8Array([1, 2, 3]), {
         status: 200,
         headers: { 'content-type': 'audio/mpeg' },
@@ -1036,11 +1047,9 @@ describe('/v1/ingest integration', () => {
     const env = makeEnv(dbPath, {
       HA_BASE_URL: undefined,
       HA_TOKEN: undefined,
-      OPENAI_API_KEY: undefined,
-      OPENAI_TTS_API_KEY: 'test-tts-key',
-      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
-      OPENAI_TTS_MODEL: 'kokoro',
-      OPENAI_TTS_VOICE: 'fr_siwis',
+      OPENAI_API_KEY: 'test-openai-key',
+      OPENAI_TTS_MODEL: 'test-speech-model',
+      OPENAI_TTS_VOICE: 'marin',
     });
 
     registerIngestRoute(app, makeDeps(env, []));
@@ -1052,13 +1061,37 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.headers['x-tts-provider']).toBe('openai:kokoro');
+    expect(res.headers['x-tts-provider']).toBe('openai:test-speech-model');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('tts auto route falls back to dedicated OpenAI-compatible TTS when HA is absent', async () => {
+  it('publishes explicit OpenAI resilience state without user content', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const res = await app.inject({ method: 'GET', url: '/v1/stats' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      openai: {
+        status: 'ok',
+        requests: 0,
+        budget: {
+          requests: 0,
+          maxRequests: 2_000,
+          tokens: 0,
+          maxTokens: 2_000_000,
+          exhausted: false,
+        },
+      },
+    });
+    expect(res.body).not.toContain('authorization');
+    expect(res.body).not.toContain('prompt');
+  });
+
+  it('tts auto route uses OpenAI cloud TTS when HA is absent', async () => {
     const fetchMock = jest.fn(async (url: string) => {
-      expect(url).toBe('http://127.0.0.1:8880/v1/audio/speech');
+      expect(url).toBe('https://api.openai.com/v1/audio/speech');
       return new Response(new Uint8Array([9, 8, 7]), {
         status: 200,
         headers: { 'content-type': 'audio/mpeg' },
@@ -1070,11 +1103,9 @@ describe('/v1/ingest integration', () => {
     const env = makeEnv(dbPath, {
       HA_BASE_URL: undefined,
       HA_TOKEN: undefined,
-      OPENAI_API_KEY: undefined,
-      OPENAI_TTS_API_KEY: 'test-tts-key',
-      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
-      OPENAI_TTS_MODEL: 'kokoro',
-      OPENAI_TTS_VOICE: 'fr_siwis',
+      OPENAI_API_KEY: 'test-openai-key',
+      OPENAI_TTS_MODEL: 'test-speech-model',
+      OPENAI_TTS_VOICE: 'marin',
     });
 
     registerIngestRoute(app, makeDeps(env, []));
@@ -1086,13 +1117,17 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.headers['x-tts-provider']).toBe('openai:kokoro');
+    expect(res.headers['x-tts-provider']).toBe('openai:test-speech-model');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('desktop ingest can inline prewarmed voice audio in the final response', async () => {
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_conversation', confidence: 0.99 }],
+      reason: 'general_conversation',
+    });
     const fetchMock = jest.fn(async (url: string) => {
-      if (url === 'http://127.0.0.1:8880/v1/audio/speech') {
+      if (url === 'https://api.openai.com/v1/audio/speech') {
         return new Response(new Uint8Array([7, 1, 7, 2]), {
           status: 200,
           headers: { 'content-type': 'audio/mpeg' },
@@ -1104,10 +1139,9 @@ describe('/v1/ingest integration', () => {
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
-      OPENAI_TTS_API_KEY: 'test-tts-key',
-      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
-      OPENAI_TTS_MODEL: 'kokoro',
-      OPENAI_TTS_VOICE: 'fr_siwis',
+      OPENAI_API_KEY: 'test-openai-key',
+      OPENAI_TTS_MODEL: 'test-speech-model',
+      OPENAI_TTS_VOICE: 'marin',
     });
 
     registerIngestRoute(app, makeDeps(env, []));
@@ -1118,7 +1152,7 @@ describe('/v1/ingest integration', () => {
       payload: {
         threadId: 'thread-desktop-inline-audio',
         text: 'Dis bonjour',
-        clientContext: { channel: 'desktop' },
+        clientContext: { channel: 'voice', deviceType: 'desktop', supportsInlineVoiceAudio: true },
       },
     });
 
@@ -1136,8 +1170,12 @@ describe('/v1/ingest integration', () => {
   });
 
   it('android voice ingest returns text without waiting for inline voice audio', async () => {
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_conversation', confidence: 0.99 }],
+      reason: 'general_conversation',
+    });
     const fetchMock = jest.fn(async (url: string) => {
-      if (url === 'http://127.0.0.1:8880/v1/audio/speech') {
+      if (url === 'https://api.openai.com/v1/audio/speech') {
         return new Response(new Uint8Array([8, 2, 8, 3]), {
           status: 200,
           headers: { 'content-type': 'audio/mpeg' },
@@ -1149,10 +1187,9 @@ describe('/v1/ingest integration', () => {
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
-      OPENAI_TTS_API_KEY: 'test-tts-key',
-      OPENAI_TTS_BASE_URL: 'http://127.0.0.1:8880/v1',
-      OPENAI_TTS_MODEL: 'kokoro',
-      OPENAI_TTS_VOICE: 'fr_siwis',
+      OPENAI_API_KEY: 'test-openai-key',
+      OPENAI_TTS_MODEL: 'test-speech-model',
+      OPENAI_TTS_VOICE: 'marin',
     });
 
     registerIngestRoute(app, makeDeps(env, []));
@@ -1177,7 +1214,7 @@ describe('/v1/ingest integration', () => {
   });
 
   it('semantic activation: definition E2 live bypasses LLM router', async () => {
-    const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules. Source: https://example.com/ztl';
+    const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules.';
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,
       decision: 'accepted_e2',
@@ -1199,7 +1236,17 @@ describe('/v1/ingest integration', () => {
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
     const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
+        JSON.stringify({
+          status: 'completed',
+          output: [{
+            type: 'message',
+            content: [{
+              type: 'output_text',
+              text: searchReply,
+              annotations: [{ type: 'url_citation', url: 'https://example.com/ztl', title: 'ZTL' }],
+            }],
+          }],
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     ));
@@ -1315,7 +1362,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Paris: 20 degres demain.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Paris: 20 degres demain.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -1373,7 +1420,7 @@ describe('/v1/ingest integration', () => {
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
     const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: searchReply } }] }),
+        JSON.stringify({ status: 'completed', output_text: searchReply }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     ));
@@ -1437,9 +1484,9 @@ describe('/v1/ingest integration', () => {
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
     const fetchMock = jest.fn(async (url: string) => {
-      if (url.includes('/chat/completions')) {
+      if (url.includes('/responses')) {
         return new Response(
-          JSON.stringify({ choices: [{ message: { content: 'F-22: superiorite aerienne. F-35: multirole et fusion capteurs.' } }] }),
+          JSON.stringify({ status: 'completed', output_text: 'F-22: superiorite aerienne. F-35: multirole et fusion capteurs.' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
@@ -1602,7 +1649,7 @@ describe('/v1/ingest integration', () => {
     });
     const fetchMock = jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     ));
@@ -1908,7 +1955,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -1964,7 +2011,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM après erreur mail.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur mail.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -2311,7 +2358,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -2367,7 +2414,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM après erreur todo.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur todo.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -2727,7 +2774,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -2841,7 +2888,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -2901,7 +2948,7 @@ describe('/v1/ingest integration', () => {
     });
     (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
       new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Fallback LLM ok.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
     )) as unknown) as typeof fetch;
@@ -3325,6 +3372,53 @@ describe('/v1/ingest integration', () => {
     }
   });
 
+  it('denies a selected Spotify capability when the service principal only has chat', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { OPENAI_API_KEY: undefined, HA_AGENT_MAP: undefined });
+    const getNowPlaying = jest.fn(async () => ({ ok: false, status: 204, error: 'no_active_playback' }));
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      getNowPlaying,
+      scheduleSituationRefresh: jest.fn(),
+    } as unknown as AppDeps['spotifyWebApi'];
+    app.addHook('preHandler', async (request) => {
+      setRequestPrincipal(request, { kind: 'service', serviceId: 'chat-only', permissions: ['chat'] });
+    });
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'denied-music', domain: 'spotify', action: 'pause', clientContext: { channel: 'desktop' } },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'forbidden' });
+    expect(getNowPlaying).not.toHaveBeenCalled();
+  });
+
+  it('allows a selected Spotify capability for a music-scoped service principal', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { OPENAI_API_KEY: undefined, HA_AGENT_MAP: undefined });
+    const getNowPlaying = jest.fn(async () => ({ ok: false, status: 204, error: 'no_active_playback' }));
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      isConfigured: () => true,
+      getNowPlaying,
+      scheduleSituationRefresh: jest.fn(),
+    } as unknown as AppDeps['spotifyWebApi'];
+    app.addHook('preHandler', async (request) => {
+      setRequestPrincipal(request, { kind: 'service', serviceId: 'music-only', permissions: ['music'] });
+    });
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'allowed-music', domain: 'spotify', action: 'pause', clientContext: { channel: 'desktop' } },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(getNowPlaying).toHaveBeenCalledTimes(1);
+  });
+
   it('voice hub simple spotify next bypasses semantic and LLM routing', async () => {
     (global as { fetch: typeof fetch }).fetch = jest.fn() as unknown as typeof fetch;
     mockedRouteUserRequest.mockResolvedValue({
@@ -3583,7 +3677,7 @@ describe('/v1/ingest integration', () => {
         return haSpeechResponse('Minuteur lance.');
       }
       return new Response(
-        JSON.stringify({ choices: [{ message: { content: 'Une ZTL est une zone a trafic limite.' } }] }),
+        JSON.stringify({ status: 'completed', output_text: 'Une ZTL est une zone a trafic limite.' }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     });
@@ -3754,10 +3848,10 @@ describe('/v1/ingest integration', () => {
   it('search external weather: routes to search.news without HA fallback', async () => {
     const searchReply = 'Demain a Paris, prevois 22 degres avec un risque de pluie en fin de journee.';
     const fetchMock = jest.fn(async (url: string) => {
-      expect(url).toContain('/chat/completions');
+      expect(url).toContain('/responses');
       return new Response(
         JSON.stringify({
-          choices: [{ message: { content: searchReply } }],
+          status: 'completed', output_text: searchReply,
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
@@ -3792,6 +3886,91 @@ describe('/v1/ingest integration', () => {
     expect(payload.responseText).toContain('22');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('transcribes audio through the configured cloud endpoint', async () => {
+    const fetchMock = jest.fn(async () => new Response(
+      JSON.stringify({ text: 'Bonjour depuis le cloud' }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'cloud-stt-key',
+      OPENAI_STT_BASE_URL: 'https://speech.example.test/v1',
+      OPENAI_STT_MODEL: 'transcription-model',
+      OPENAI_STT_LANGUAGE: 'fr',
+      OPENAI_STT_TIMEOUT_MS: 1_000,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/stt/default',
+      headers: { 'content-type': 'audio/wav' },
+      payload: Buffer.from('fake-wave'),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      text: 'Bonjour depuis le cloud',
+      result: 'Bonjour depuis le cloud',
+      engineId: 'openai:transcription-model',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://speech.example.test/v1/audio/transcriptions');
+    expect(new Headers(init.headers).get('authorization')).toBe('Bearer cloud-stt-key');
+    const form = init.body as FormData;
+    expect(form.get('model')).toBe('transcription-model');
+    expect(form.get('language')).toBe('fr');
+  });
+
+  it('fails closed when cloud transcription credentials are absent', async () => {
+    const fetchMock = jest.fn();
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: undefined,
+      OPENAI_STT_MODEL: 'transcription-model',
+      OPENAI_STT_TIMEOUT_MS: 1_000,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/stt/default',
+      headers: { 'content-type': 'audio/wav' },
+      payload: Buffer.from('fake-wave'),
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({
+      error: 'stt_not_available',
+      hint: 'Le service de transcription cloud est indisponible.',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('maps an empty cloud transcription to a non-retriable silence response', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn(async () => new Response(
+      JSON.stringify({ text: '   ' }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )) as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'cloud-stt-key',
+      OPENAI_STT_MODEL: 'transcription-model',
+      OPENAI_STT_TIMEOUT_MS: 1_000,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/stt/default',
+      headers: { 'content-type': 'audio/wav' },
+      payload: Buffer.from('silence'),
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toEqual({ error: 'stt_empty_transcript', engineId: 'openai' });
   });
 
   it('returns 404 for an unknown history without creating a phantom thread', async () => {

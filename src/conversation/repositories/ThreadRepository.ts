@@ -41,7 +41,7 @@ export interface ThreadRepository {
   updateTitle(threadId: string, title: string): Promise<void>;
   listRecent(limit: number, options?: { channel?: string | null }): Promise<ThreadListItem[]>;
   deleteThread(threadId: string): Promise<boolean>;
-  purgeThreadsOlderThan(cutoffMs: number): Promise<number>;
+  purgeThreadsOlderThan(cutoffMs: number, options?: { allOwners?: boolean }): Promise<number>;
   updateResponseTime(threadId: string, responseTimeMs: number): Promise<void>;
   getActiveConversationThread(channel?: string | null): Promise<ThreadRecord | null>;
 }

@@ -69,10 +69,8 @@ describe('music agent planner', () => {
 
   test('returns spotify request when OpenAI emits a valid spotify plan', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () => jsonResponse({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify({
+      status: 'completed',
+      output_text: JSON.stringify({
               route: 'spotify',
               reason: 'music request detected',
               request: {
@@ -88,10 +86,7 @@ describe('music agent planner', () => {
                 response_contract: { structured: true },
                 text: 'relance la musique dans le salon',
               },
-            }),
-          },
-        },
-      ],
+      }),
     })) as unknown as typeof fetch;
 
     const result = await planSpotifyActionFromTextWithOpenAi({
@@ -127,16 +122,11 @@ describe('music agent planner', () => {
 
   test('returns none when model routes request out of spotify', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () => jsonResponse({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify({
-              route: 'none',
-              reason: 'not a music command',
-            }),
-          },
-        },
-      ],
+      status: 'completed',
+      output_text: JSON.stringify({
+        route: 'none',
+        reason: 'not a music command',
+      }),
     })) as unknown as typeof fetch;
 
     const result = await planSpotifyActionFromTextWithOpenAi({
@@ -151,10 +141,8 @@ describe('music agent planner', () => {
 
   test('normalizes generic resume intent to play when model emits search_and_play without target', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () => jsonResponse({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify({
+      status: 'completed',
+      output_text: JSON.stringify({
               route: 'spotify',
               reason: 'music request detected',
               request: {
@@ -163,10 +151,7 @@ describe('music agent planner', () => {
                 slots: { device: 'alias:pc' },
                 text: 'lance la musique sur le pc',
               },
-            }),
-          },
-        },
-      ],
+      }),
     })) as unknown as typeof fetch;
 
     const result = await planSpotifyActionFromTextWithOpenAi({

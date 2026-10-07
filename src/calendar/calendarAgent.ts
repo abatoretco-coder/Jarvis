@@ -13,7 +13,7 @@
 
 import { z } from 'zod';
 
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
   calendarApiRequest,
@@ -54,7 +54,8 @@ export interface CalendarAgentEnv {
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
-  OPENAI_MODEL_SUMMARY?: string;
+  OPENAI_MODEL_AGENT?: string;
+  OPENAI_MAX_OUTPUT_TOKENS_AGENT?: number;
 }
 
 // ─── Planner types ────────────────────────────────────────────────────────────
@@ -409,55 +410,32 @@ async function planCalendarAction(
   const simpleRead = preplanSimpleCalendarRead(text, isoDate);
   if (simpleRead) return parseCalendarAction(simpleRead, env);
 
-  if (isOllamaBaseUrl(env.OPENAI_BASE_URL)) {
-    const content = await completeOllamaChat({
-      baseUrl: env.OPENAI_BASE_URL, model: env.OPENAI_MODEL_SUMMARY ?? 'qwen3:8b',
-      temperature: 0, numPredict: 250, format: 'json',
-      messages: [{ role: 'system', content: buildPlannerSystemPrompt(dateStr, isoDate) }, { role: 'user', content: text }],
-      signal: AbortSignal.timeout(env.OPENAI_TIMEOUT_MS),
-    });
-    let parsed: unknown;
-    try { parsed = JSON.parse(content || '{}'); } catch { throw new Error(`calendar_planner_invalid_json:${content.slice(0, 100)}`); }
-    if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) throw new Error(`calendar_planner_missing_action:${content.slice(0, 100)}`);
-    return parseCalendarAction(parsed, env);
-  }
-
-  const resp = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${env.OPENAI_API_KEY?.trim() ?? ''}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 250,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: buildPlannerSystemPrompt(dateStr, isoDate) },
-        { role: 'user', content: text },
-      ],
-    }),
-    signal: AbortSignal.timeout(env.OPENAI_TIMEOUT_MS),
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) throw new Error('openai_api_key_missing');
+  const content = await completeOpenAiResponse({
+    apiKey,
+    baseUrl: env.OPENAI_BASE_URL,
+    model: env.OPENAI_MODEL_AGENT ?? 'gpt-6-luna',
+    capability: 'agent',
+    maxOutputTokens: env.OPENAI_MAX_OUTPUT_TOKENS_AGENT ?? 512,
+    timeoutMs: env.OPENAI_TIMEOUT_MS,
+    jsonMode: true,
+    reasoningEffort: 'none',
+    messages: [
+      { role: 'system', content: buildPlannerSystemPrompt(dateStr, isoDate) },
+      { role: 'user', content: text },
+    ],
   });
-
-  if (!resp.ok) {
-    const raw = await resp.text().catch(() => '');
-    throw new Error(`calendar_planner_llm_failed:${resp.status}:${raw.slice(0, 200)}`);
-  }
-
-  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = data.choices?.[0]?.message?.content?.trim() ?? '{}';
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error(`calendar_planner_invalid_json:${content.slice(0, 100)}`);
+    throw new Error('calendar_planner_invalid_json');
   }
 
   if (typeof parsed !== 'object' || parsed === null || !('action' in parsed)) {
-    throw new Error(`calendar_planner_missing_action:${content.slice(0, 100)}`);
+    throw new Error('calendar_planner_missing_action');
   }
 
   return parseCalendarAction(parsed, env);

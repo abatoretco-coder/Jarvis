@@ -48,7 +48,7 @@ function calendarApp() {
 
 function openAiPlan(plan: Record<string, unknown>): Response {
   return new Response(JSON.stringify({
-    choices: [{ message: { content: JSON.stringify(plan) } }],
+    status: 'completed', output_text: JSON.stringify(plan),
   }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
@@ -77,14 +77,14 @@ describe('calendar ingest confirmation', () => {
 
   it('returns a proposal for create_event without executing Google Calendar write', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
-      expect(url).toContain('/chat/completions');
+      expect(url).toContain('/responses');
       return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({
+        status: 'completed', output_text: JSON.stringify({
           action: 'create_event',
           summary: 'RDV dentiste',
           start: '2026-07-01T15:00:00',
           end: '2026-07-01T16:00:00',
-        }) } }],
+        }),
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -123,7 +123,7 @@ describe('calendar ingest confirmation', () => {
   it('lists today agenda deterministically without OpenAI planner', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ title: 'Agenda' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ title: 'Agenda' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
         return googleEvents([{
@@ -155,7 +155,7 @@ describe('calendar ingest confirmation', () => {
       kind: 'calendar',
       routeKey: 'calendar.list_upcoming',
     });
-    const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/chat/completions'));
+    const chatCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/responses'));
     expect(chatCalls.every(([, init]) => !String((init as RequestInit | undefined)?.body ?? '').includes('list_upcoming'))).toBe(true);
     await app.close();
   });
@@ -163,14 +163,14 @@ describe('calendar ingest confirmation', () => {
   it('executes a pending create_event only after same-thread confirmation', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) {
+      if (rawUrl.includes('/responses')) {
         return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
+          status: 'completed', output_text: JSON.stringify({
             action: 'create_event',
             summary: 'RDV dentiste',
             start: '2026-07-01T15:00:00',
             end: '2026-07-01T16:00:00',
-          }) } }],
+          }),
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       if (rawUrl.includes('oauth2.googleapis.com/token')) {
@@ -239,7 +239,7 @@ describe('calendar ingest confirmation', () => {
   it('confirms a pending mutation through REST idempotently', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) {
+      if (rawUrl.includes('/responses')) {
         return openAiPlan({
           action: 'create_event',
           summary: 'RDV garage',
@@ -298,14 +298,14 @@ describe('calendar ingest confirmation', () => {
 
   it('refuses confirmation with a mismatched proposalId', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
-      expect(String(url)).toContain('/chat/completions');
+      expect(String(url)).toContain('/responses');
       return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({
+        status: 'completed', output_text: JSON.stringify({
           action: 'create_event',
           summary: 'Garage',
           start: '2026-07-02T09:00:00',
           end: '2026-07-02T10:00:00',
-        }) } }],
+        }),
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -346,7 +346,7 @@ describe('calendar ingest confirmation', () => {
     let searchUrl = '';
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
         searchUrl = rawUrl;
@@ -394,7 +394,7 @@ describe('calendar ingest confirmation', () => {
     let searchUrl = '';
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'mail' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'delete_event', q: 'mail' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
         searchUrl = rawUrl;
@@ -436,7 +436,7 @@ describe('calendar ingest confirmation', () => {
   it('executes a pending delete_event from a short affirmative answer', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events?')) return googleEvents([dentistEvent]);
       if (rawUrl.includes('/calendar/v3/calendars/primary/events/event-dentist')) {
@@ -482,7 +482,7 @@ describe('calendar ingest confirmation', () => {
   it('cancels a pending delete_event from a short negative answer', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'delete_event', q: 'dentiste' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events?')) return googleEvents([dentistEvent]);
       throw new Error(`unexpected fetch ${rawUrl}`);
@@ -522,7 +522,7 @@ describe('calendar ingest confirmation', () => {
   it('returns an update_event proposal for changing an event time', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({
+      if (rawUrl.includes('/responses')) return openAiPlan({
         action: 'update_event',
         q: 'reunion',
         start: '2026-07-01T16:00:00',
@@ -562,7 +562,7 @@ describe('calendar ingest confirmation', () => {
     let patchBody = '';
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({
+      if (rawUrl.includes('/responses')) return openAiPlan({
         action: 'update_event',
         q: 'reunion',
         start: '2026-07-01T16:00:00',
@@ -618,7 +618,7 @@ describe('calendar ingest confirmation', () => {
   it('returns a remove_from_event proposal for removing a reminder', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'remove_from_event', q: 'garage', field: 'reminders' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'remove_from_event', q: 'garage', field: 'reminders' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) return googleEvents([{
         id: 'event-garage',
@@ -657,7 +657,7 @@ describe('calendar ingest confirmation', () => {
   it('does not patch when removing an absent attendee', async () => {
     const fetchMock = jest.fn(async (url: string, init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({
+      if (rawUrl.includes('/responses')) return openAiPlan({
         action: 'remove_from_event',
         q: 'garage',
         field: 'attendee',
@@ -711,7 +711,7 @@ describe('calendar ingest confirmation', () => {
   it('asks which event to use when multiple Calendar candidates match', async () => {
     const fetchMock = jest.fn(async (url: string, _init?: RequestInit) => {
       const rawUrl = String(url);
-      if (rawUrl.includes('/chat/completions')) return openAiPlan({ action: 'update_event', q: 'garage', location: 'Atelier' });
+      if (rawUrl.includes('/responses')) return openAiPlan({ action: 'update_event', q: 'garage', location: 'Atelier' });
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) return googleEvents([
         {

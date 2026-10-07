@@ -40,7 +40,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 
 function openAiResponse(content: string, status = 200): Response {
   return jsonResponse(
-    { choices: [{ message: { content } }] },
+    { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: content }] }] },
     status,
   );
 }
@@ -105,17 +105,13 @@ describe('parseAgentMap', () => {
 // ─── routeToHaAgent ───────────────────────────────────────────────────────────
 
 describe('routeToHaAgent', () => {
-  test('uses an Ollama JSON schema constrained to the available router ids', () => {
-    const format = buildOrchestratorResponseFormat('ollama', ['general', SPOTIFY_AGENT_ID]);
+  test('uses a strict Responses schema constrained to the available router ids', () => {
+    const format = buildOrchestratorResponseFormat(['general', SPOTIFY_AGENT_ID]);
     expect(format).toMatchObject({
-      type: 'json_schema',
-      json_schema: {
-        name: 'jarvis_orchestrator_route',
-        strict: true,
-        schema: {
-          properties: {
-            targets: { items: { properties: { agentId: { enum: ['general', SPOTIFY_AGENT_ID] } } } },
-          },
+      name: 'jarvis_orchestrator_route',
+      schema: {
+        properties: {
+          targets: { items: { properties: { agentId: { enum: ['general', SPOTIFY_AGENT_ID] } } } },
         },
       },
     });
@@ -286,7 +282,7 @@ describe('routeToHaAgent', () => {
 
     await expect(
       routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
-    ).rejects.toThrow('router_openai_http_401');
+    ).rejects.toThrow('openai_responses_http_401');
   });
 
   test('throws on invalid JSON in LLM response', async () => {
@@ -298,48 +294,20 @@ describe('routeToHaAgent', () => {
     ).rejects.toThrow('router_invalid_json');
   });
 
-  test('falls back from Ollama to OpenAI when the local response is invalid JSON', async () => {
-    const urls: string[] = [];
-    let call = 0;
-    (global as { fetch: typeof fetch }).fetch = (async (url: unknown) => {
-      urls.push(String(url));
-      call += 1;
-      return call === 1
-        ? openAiResponse('not json')
-        : openAiResponse(JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.94 }], reason: 'music' }));
+  test('calls the Responses endpoint without provider-side storage', async () => {
+    let url = '';
+    let body: Record<string, unknown> = {};
+    (global as { fetch: typeof fetch }).fetch = (async (input: unknown, init?: RequestInit) => {
+      url = String(input);
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return openAiResponse(JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.94 }], reason: 'music' }));
     }) as unknown as typeof fetch;
 
-    const result = await routeToHaAgent({
-      text: 'mets du jazz', agents: AGENTS, recentMessages: [],
-      options: {
-        ...DEFAULT_OPTIONS,
-        provider: 'ollama', openAiBaseUrl: 'http://localhost:11434/v1', model: 'qwen3:4b-instruct',
-        fallback: { openAiApiKey: 'cloud-key', openAiBaseUrl: BASE_URL, model: 'gpt-4o-mini', timeoutMs: 3000 },
-      },
-    });
+    await routeToHaAgent({ text: 'mets du jazz', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS });
 
-    expect(urls).toEqual(['http://localhost:11434/api/chat', `${BASE_URL}/chat/completions`]);
-    expect(result).toMatchObject({ provider: 'openai', model: 'gpt-4o-mini', fallbackReason: 'local_invalid_json' });
-  });
-
-  test('falls back from Ollama to OpenAI when local confidence is too low', async () => {
-    let call = 0;
-    (global as { fetch: typeof fetch }).fetch = (async () => {
-      call += 1;
-      return openAiResponse(JSON.stringify({
-        targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: call === 1 ? 0.25 : 0.94 }], reason: 'music',
-      }));
-    }) as unknown as typeof fetch;
-
-    const result = await routeToHaAgent({
-      text: 'mets du jazz', agents: AGENTS, recentMessages: [],
-      options: {
-        ...DEFAULT_OPTIONS, provider: 'ollama',
-        fallback: { openAiApiKey: 'cloud-key', openAiBaseUrl: BASE_URL, model: 'gpt-4o-mini', timeoutMs: 3000 },
-      },
-    });
-
-    expect(result).toMatchObject({ provider: 'openai', fallbackReason: 'local_low_confidence' });
+    expect(url).toBe(`${BASE_URL}/responses`);
+    expect(body.store).toBe(false);
+    expect(body).toHaveProperty('text.format.type', 'json_schema');
   });
 
   test('throws when targets array is missing from LLM response', async () => {
@@ -373,8 +341,8 @@ describe('routeToHaAgent', () => {
     });
 
     expect(capturedBodies).toHaveLength(1);
-    const body = capturedBodies[0] as { messages: Array<{ role: string; content: string }> };
-    const userMessage = body.messages.find((m) => m.role === 'user')?.content ?? '';
+    const body = capturedBodies[0] as { input: Array<{ role: string; content: string }> };
+    const userMessage = body.input.find((m) => m.role === 'user')?.content ?? '';
     expect(userMessage).toContain('Utilisateur au salon.');
     expect(userMessage).toContain('bonjour');
     expect(userMessage).toContain('mets de la musique');

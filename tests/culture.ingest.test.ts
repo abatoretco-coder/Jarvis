@@ -75,8 +75,10 @@ function makeEnv(dbPath: string): Env {
     CULTURE_DEFAULT_RADIUS_KM: 15,
     AGORA_HOME_RADIUS_KM: 15,
     OPENAI_TIMEOUT_MS: 100,
-    OLLAMA_BASE_URL: 'http://ollama:11434/v1',
-    OLLAMA_MODEL: 'qwen3:8b',
+    OPENAI_API_KEY: 'test-openai-key',
+    OPENAI_BASE_URL: 'https://openai.test/v1',
+    OPENAI_MODEL_SYNTHESIS: 'gpt-6.1-sol',
+    OPENAI_MAX_OUTPUT_TOKENS_SYNTHESIS: 768,
     LIMIT_K: 10,
     LIMIT_M: 20,
     HA_AGENT_MAP: '',
@@ -107,6 +109,23 @@ function itemResponse(id: string, title: string) {
     },
     meta: responseMeta,
   };
+}
+
+function callsForHost(fetchMock: { mock: { calls: unknown[][] } }, hostname: string): unknown[][] {
+  return fetchMock.mock.calls.filter(([url]) => new URL(String(url)).hostname === hostname);
+}
+
+function cultureSynthesisCalls(fetchMock: { mock: { calls: unknown[][] } }): unknown[][] {
+  return fetchMock.mock.calls.filter(([, init]) => {
+    const body = (init as RequestInit | undefined)?.body;
+    if (typeof body !== 'string') return false;
+    try {
+      const parsed = JSON.parse(body) as { input?: Array<{ content?: string }> };
+      return parsed.input?.[0]?.content?.includes('Utilise uniquement les candidats JSON') === true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function itemResponseForCandidates(id: string, title: string, entries: ReturnType<typeof candidate>[]) {
@@ -212,8 +231,8 @@ describe('Culture through /v1/ingest', () => {
       if (url.pathname.includes('item_cccccccccccccccccccccccc')) {
         return new Response(JSON.stringify(itemResponse('item_cccccccccccccccccccccccc', 'Film C')), { status: 200 });
       }
-      if (url.hostname === 'ollama') {
-        return new Response(JSON.stringify({ message: { content: 'Pitch ciblé de Film B.' } }), { status: 200 });
+      if (url.hostname === 'openai.test') {
+        return new Response(JSON.stringify({ status: 'completed', output_text: 'Pitch ciblé de Film B.' }), { status: 200 });
       }
       return new Response('not found', { status: 404 });
     });
@@ -256,14 +275,14 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(pitch.statusCode).toBe(200);
     expect(pitch.json<{ responseText: string }>().responseText).toBe('Pitch ciblé de Film B.');
-    const ollamaCall = fetchMock.mock.calls.find(([url]) => new URL(String(url)).hostname === 'ollama');
-    const ollamaBody = JSON.parse(String((ollamaCall?.[1] as RequestInit | undefined)?.body)) as {
-      messages: Array<{ content: string }>;
+    const cloudCall = cultureSynthesisCalls(fetchMock)[0];
+    const cloudBody = JSON.parse(String((cloudCall?.[1] as RequestInit | undefined)?.body)) as {
+      input: Array<{ content: string }>;
     };
-    const ollamaPrompt = ollamaBody.messages.map((message) => message.content).join('\n');
-    expect(ollamaPrompt).toContain('Film B');
-    expect(ollamaPrompt).not.toContain('Film A');
-    expect(ollamaPrompt).not.toContain('Film C');
+    const cloudPrompt = cloudBody.input.map((message) => message.content).join('\n');
+    expect(cloudPrompt).toContain('Film B');
+    expect(cloudPrompt).not.toContain('Film A');
+    expect(cloudPrompt).not.toContain('Film C');
     const attributed = await app.inject({
       method: 'POST', url: '/v1/ingest', payload: { threadId: 'culture-conversation', text: 'Le film avec Amy Adams' },
     });
@@ -333,7 +352,7 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(explicitShowtime.statusCode).toBe(200);
     expect(explicitShowtime.json<{ responseText: string }>().responseText).toContain('Cinéma B');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(4);
     const itemCalls = fetchMock.mock.calls.map(([url]) => new URL(String(url))).filter((url) => url.pathname.startsWith('/v1/items/'));
     expect(itemCalls).toHaveLength(3);
     expect(itemCalls.every((url) => Date.parse(url.searchParams.get('from') ?? '') >= Date.now() - 1_000)).toBe(true);
@@ -366,8 +385,8 @@ describe('Culture through /v1/ingest', () => {
       expect(response.statusCode).toBe(200);
     }
 
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    const [initial, versionRefinement, radiusRefinement, timeRefinement] = fetchMock.mock.calls
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(4);
+    const [initial, versionRefinement, radiusRefinement, timeRefinement] = callsForHost(fetchMock, 'agora')
       .map(([url]) => new URL(String(url)));
     expect(versionRefinement?.searchParams.get('version')).toBe('VO');
     expect(radiusRefinement?.searchParams.get('version')).toBe('VO');
@@ -389,7 +408,7 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(last.statusCode).toBe(200);
     expect(last.json<{ responseText: string }>().responseText).toContain('Film C');
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(5);
   });
 
   test('reuses the active voice-hub Culture thread before the Home Assistant preflight', async () => {
@@ -425,8 +444,8 @@ describe('Culture through /v1/ingest', () => {
     expect(refinement.statusCode).toBe(200);
     expect(refinement.json()).toMatchObject({ threadId: 'culture-voice-thread-a' });
     expect(refinement.json()).not.toMatchObject({ error: 'ha_not_configured' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [initialUrl, refinementUrl] = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(2);
+    const [initialUrl, refinementUrl] = callsForHost(fetchMock, 'agora').map(([url]) => new URL(String(url)));
     expect(refinementUrl?.searchParams.get('version')).toBe('VO');
     for (const parameter of ['lat', 'lon', 'radiusKm', 'from', 'to', 'types']) {
       expect(refinementUrl?.searchParams.get(parameter)).toBe(initialUrl?.searchParams.get(parameter));
@@ -450,8 +469,8 @@ describe('Culture through /v1/ingest', () => {
     ];
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input, init) => {
       const url = new URL(String(input));
-      if (url.hostname === 'ollama') {
-        return new Response(JSON.stringify({ message: { content: 'Je choisirais la première option.' } }), { status: 200 });
+      if (url.hostname === 'openai.test') {
+        return new Response(JSON.stringify({ status: 'completed', output_text: 'Je choisirais la première option.' }), { status: 200 });
       }
       if (url.pathname.startsWith('/v1/items/')) {
         const itemId = decodeURIComponent(url.pathname.split('/').at(-1) ?? '');
@@ -522,9 +541,9 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(comparison.statusCode).toBe(200);
     expect(comparison.json<{ responseText: string }>().responseText).toBe('Je choisirais la première option.');
-    const ollamaCall = fetchMock.mock.calls.find(([url]) => new URL(String(url)).hostname === 'ollama');
-    const ollamaBody = JSON.parse(String((ollamaCall?.[1] as RequestInit | undefined)?.body)) as { messages: Array<{ content: string }> };
-    const prompt = ollamaBody.messages.map((message) => message.content).join('\n');
+    const cloudCall = cultureSynthesisCalls(fetchMock)[0];
+    const cloudBody = JSON.parse(String((cloudCall?.[1] as RequestInit | undefined)?.body)) as { input: Array<{ content: string }> };
+    const prompt = cloudBody.input.map((message) => message.content).join('\n');
     expect(prompt).toContain('Galerie A');
     expect(prompt).toContain('Galerie C');
     expect(prompt).not.toContain('Galerie B');
@@ -542,8 +561,8 @@ describe('Culture through /v1/ingest', () => {
     ];
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
       const url = new URL(String(input));
-      if (url.hostname === 'ollama') {
-        return new Response(JSON.stringify({ message: { content: 'Voici plusieurs sorties possibles.' } }), { status: 200 });
+      if (url.hostname === 'openai.test') {
+        return new Response(JSON.stringify({ status: 'completed', output_text: 'Voici plusieurs sorties possibles.' }), { status: 200 });
       }
       return new Response(JSON.stringify({
         data: mixed,
@@ -683,9 +702,10 @@ describe('Culture through /v1/ingest', () => {
     });
     expect(focusedVenue.statusCode).toBe(200);
     expect(focusedVenue.json<{ responseText: string }>().responseText).toContain('Cinéma X — Paris · 2.4 km');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
-    expect(new URL(String(fetchMock.mock.calls[2]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
+    const agoraCalls = callsForHost(fetchMock, 'agora');
+    expect(agoraCalls).toHaveLength(3);
+    expect(new URL(String(agoraCalls[1]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
+    expect(new URL(String(agoraCalls[2]?.[0])).pathname).toBe('/v1/venues/venue_cinema_x');
   });
 
   test('returns a bounded clarification for an ambiguous venue reference without guessing an ID', async () => {
@@ -712,7 +732,7 @@ describe('Culture through /v1/ingest', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ responseText: string }>().responseText).toContain('Précise le numéro parmi');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(1);
   });
 
   test('reports an expired ResultSet instead of falling through to another agent', async () => {
@@ -739,7 +759,7 @@ describe('Culture through /v1/ingest', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ responseText: string }>().responseText).toContain('liste précédente a expiré');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(1);
   });
 
   test('reports an out-of-range ordinal without another Agora call', async () => {
@@ -762,7 +782,7 @@ describe('Culture through /v1/ingest', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json<{ responseText: string }>().responseText).toContain('Je ne retrouve pas ce résultat');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(callsForHost(fetchMock, 'agora')).toHaveLength(1);
   });
 
   test('does not leak focus between two threadIds', async () => {

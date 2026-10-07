@@ -1,9 +1,4 @@
-import { getStoredRefreshToken, setStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
-
-export const GOOGLE_OAUTH_SCOPES = [
-  'https://mail.google.com/',
-  'https://www.googleapis.com/auth/calendar',
-] as const;
+import { getStoredRefreshToken } from '../auth/oauthRefreshTokenStore';
 
 export const GOOGLE_REFRESH_TOKEN_STORE_KEY_PREFIX = 'google:primary';
 
@@ -37,10 +32,4 @@ export async function resolveGoogleCredentials(env: GoogleCredentialEnv): Promis
   const envToken = env.GOOGLE_REFRESH_TOKEN?.trim();
   if (envToken) return { clientId, clientSecret, refreshToken: envToken, source: 'env' };
   return null;
-}
-
-export async function storeGoogleRefreshToken(env: GoogleCredentialEnv, refreshToken: string): Promise<void> {
-  const clientId = env.GOOGLE_CLIENT_ID?.trim();
-  if (!clientId) return;
-  await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, googleRefreshTokenStoreKey(clientId), refreshToken);
 }

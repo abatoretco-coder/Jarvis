@@ -1,8 +1,10 @@
 import { loadEnv } from './env';
+import { initializeRuntime } from './runtime/initializeRuntime';
 import { buildApp } from './server';
 
 async function main() {
   const env = loadEnv();
+  initializeRuntime(env);
   const app = buildApp(env);
   await app.listen({ port: env.PORT, host: env.BIND_HOST });
 }

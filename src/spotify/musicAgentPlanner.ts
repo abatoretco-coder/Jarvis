@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import type { Env } from '../env';
-import { completeOllamaChat, isOllamaBaseUrl } from '../ollamaChat';
+import { completeOpenAiResponse } from '../openai/responsesClient';
 import type { SpotifyWebApiClient } from '../spotifyWebApi';
 import { SPOTIFY_CAPABILITIES } from './capabilityRegistry';
 import { spotifyActionSchema } from './contracts';
@@ -104,52 +104,21 @@ async function requestPlannerCandidate(input: {
   userPrompt: string;
   variant: 'primary' | 'strict';
 }): Promise<z.infer<typeof plannerResponseSchema>> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), input.env.OPENAI_TIMEOUT_MS);
-
-  try {
-    if (isOllamaBaseUrl(input.env.OPENAI_BASE_URL)) {
-      const content = await completeOllamaChat({
-        baseUrl: input.env.OPENAI_BASE_URL, model: input.env.OPENAI_MODEL_MUSIC_AGENT,
-        temperature: 0, numPredict: 250, format: 'json',
-        messages: [{ role: 'system', content: input.systemPrompt }, { role: 'user', content: input.userPrompt }], signal: controller.signal,
-      });
-      return plannerResponseSchema.parse(parseJsonObject(content));
-    }
-    const response = await fetch(`${input.env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${input.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: input.env.OPENAI_MODEL_MUSIC_AGENT,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: input.systemPrompt },
-          { role: 'user', content: input.userPrompt },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const raw = await response.text();
-    if (!response.ok) {
-      throw new Error(`music_agent_provider_error:${input.variant}:${response.status}:${raw.slice(0, 500)}`);
-    }
-
-    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
-    const choices =
-      parsed && typeof parsed === 'object' && Array.isArray((parsed as { choices?: unknown[] }).choices)
-        ? ((parsed as { choices: Array<{ message?: { content?: string } }> }).choices ?? [])
-        : [];
-    const content = choices[0]?.message?.content ?? '';
-    const candidateJson = parseJsonObject(content);
-    return plannerResponseSchema.parse(candidateJson);
-  } finally {
-    clearTimeout(timeout);
-  }
+  const content = await completeOpenAiResponse({
+    apiKey: input.apiKey,
+    baseUrl: input.env.OPENAI_BASE_URL,
+    model: input.env.OPENAI_MODEL_MUSIC_AGENT,
+    capability: 'music',
+    messages: [
+      { role: 'system', content: input.systemPrompt },
+      { role: 'user', content: input.userPrompt },
+    ],
+    maxOutputTokens: input.env.OPENAI_MAX_OUTPUT_TOKENS_MUSIC_AGENT,
+    timeoutMs: input.env.OPENAI_TIMEOUT_MS,
+    jsonMode: true,
+    reasoningEffort: 'none',
+  });
+  return plannerResponseSchema.parse(parseJsonObject(content));
 }
 
 function extractNowPlayingSummary(data: Record<string, unknown>): {
@@ -340,61 +309,21 @@ export async function selectBestSpotifyResult(input: {
     })
     .join('\n');
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), env.OPENAI_TIMEOUT_MS);
-
   try {
-    if (isOllamaBaseUrl(env.OPENAI_BASE_URL)) {
-      const content = await completeOllamaChat({
-        baseUrl: env.OPENAI_BASE_URL, model: env.OPENAI_MODEL_MUSIC_AGENT,
-        temperature: 0, numPredict: 20, format: 'json',
-        messages: [
-          { role: 'system', content: 'Sélectionne le meilleur résultat Spotify. Réponse JSON obligatoire, objet unique: {"index":N}.' },
-          { role: 'user', content: `Réponds en JSON strict uniquement avec la clé index.\nCommande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}` },
-        ], signal: controller.signal,
-      });
-      const directNumber = Number(content.trim());
-      if (Number.isFinite(directNumber)) return Math.min(Math.max(0, Math.round(directNumber)), candidates.length - 1);
-      const data = parseJsonObject(content) as { index?: unknown };
-      const index = Number(data.index);
-      if (!Number.isFinite(index)) throw new Error('openai_selection_invalid_index');
-      return Math.min(Math.max(0, Math.round(index)), candidates.length - 1);
-    }
-    const response = await fetch(`${env.OPENAI_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: env.OPENAI_MODEL_MUSIC_AGENT,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        max_tokens: 20,
-        messages: [
-          {
-            role: 'system',
-            content: 'Sélectionne le meilleur résultat Spotify. Réponse JSON obligatoire, objet unique: {"index":N}.',
-          },
-          {
-            role: 'user',
-            content: `Réponds en JSON strict uniquement avec la clé index.\nCommande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}`,
-          },
-        ],
-      }),
-      signal: controller.signal,
+    const content = await completeOpenAiResponse({
+      apiKey,
+      baseUrl: env.OPENAI_BASE_URL,
+      model: env.OPENAI_MODEL_MUSIC_AGENT,
+      capability: 'music',
+      messages: [
+        { role: 'system', content: 'Sélectionne le meilleur résultat Spotify. Réponse JSON obligatoire, objet unique: {"index":N}.' },
+        { role: 'user', content: `Réponds en JSON strict uniquement avec la clé index.\nCommande: "${userText}"\nRecherche: "${query}"\nCandidats:\n${list}` },
+      ],
+      maxOutputTokens: Math.min(64, env.OPENAI_MAX_OUTPUT_TOKENS_MUSIC_AGENT),
+      timeoutMs: env.OPENAI_TIMEOUT_MS,
+      jsonMode: true,
+      reasoningEffort: 'none',
     });
-
-    const raw = await response.text();
-    if (!response.ok) {
-      throw new Error(`openai_selection_failed:${response.status}:${raw.slice(0, 500)}`);
-    }
-
-    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
-    const choices = Array.isArray((parsed as { choices?: unknown[] }).choices)
-      ? (parsed as { choices: Array<{ message?: { content?: string } }> }).choices
-      : [];
-    const content = choices[0]?.message?.content ?? '';
 
     const directNumber = Number(content.trim());
     if (Number.isFinite(directNumber)) {
@@ -414,7 +343,5 @@ export async function selectBestSpotifyResult(input: {
   } catch (err: unknown) {
     if (err instanceof Error) throw err;
     throw new Error('openai_selection_failed_unknown', { cause: err });
-  } finally {
-    clearTimeout(timeout);
   }
 }
