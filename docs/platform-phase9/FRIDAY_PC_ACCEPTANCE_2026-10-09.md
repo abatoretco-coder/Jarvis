@@ -35,6 +35,10 @@ drill base/home-store/identité réussi et aucun secret imprimé.
 
 ## Gate téléphone
 
+Le smoke test émulateur du 7 octobre valide déjà l’installation, le lancement et
+le parcours OIDC jusqu’au compte en attente. La gate ci-dessous doit encore être
+rejouée sur le téléphone physique et sur le Wi-Fi du logement.
+
 Pour la première recette USB locale :
 
 ```powershell

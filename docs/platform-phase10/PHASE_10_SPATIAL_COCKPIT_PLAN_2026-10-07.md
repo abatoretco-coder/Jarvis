@@ -145,8 +145,11 @@ Statut logiciel : **terminé**. L’APK fournit la vue Domicile, la sélection t
 des pièces, le fallback liste, les commandes compatibles et la réconciliation
 périodique avec le backend. Il n’embarque aucune règle d’autorisation locale et
 n’utilise plus de clé API de repli. Le build propre, le lint et 34 tests JVM sont
-verts. L’installation, l’authentification et la reprise réseau restent à valider
-sur le téléphone réel.
+verts. Le 7 octobre 2026, l’APK debug a aussi été installée sur l’émulateur
+Android Studio : discovery OIDC, navigateur Keycloak, callback PKCE, échange de
+jeton, appel `/v1/auth/me` et écran « Compte en attente » ont été validés sans
+crash fatal. La recette sur téléphone physique et la reprise réseau réelle
+restent à valider.
 
 - Réutiliser le contrat spatial et les actions backend, sans logique d’autorisation locale concurrente.
 - Livrer d’abord sélection du domicile, navigation par pièce, carte 2D, liste, fiches et scènes.
