@@ -57,7 +57,7 @@ HTTP n'est autorisé que sur loopback pour le développement. La production exig
 
 ## Client Desktop
 
-Le Desktop génère une transaction PKCE aléatoire, valide la discovery, ouvre le navigateur système et reçoit le callback `com.jarvis.desktop:/oauth/callback` par le plugin deep-link et l'instance unique Tauri. L'access token reste uniquement en mémoire. Le refresh token est stocké dans Stronghold ; le secret du coffre, généré aléatoirement, reste dans le trousseau natif du système et n'est ni codé en dur ni placé dans `localStorage`.
+Le Desktop génère une transaction PKCE aléatoire, valide la discovery, ouvre le navigateur système et reçoit le callback sur un port éphémère lié exclusivement à `127.0.0.1`. Le listener natif expire après deux minutes, vérifie le `state` avant transmission et évite les confirmations de protocole propres aux navigateurs. L'access token reste uniquement en mémoire. Le refresh token est stocké dans Stronghold ; le secret du coffre, généré aléatoirement, reste dans le trousseau natif du système et n'est ni codé en dur ni placé dans `localStorage`.
 
 Au démarrage, le Desktop tente un renouvellement silencieux, relit `/v1/auth/me`, programme le prochain renouvellement et expose les états `signed_out`, `authenticating`, `pending`, `active`, `unavailable` et `error`. L'écran Connexion permet de configurer l'issuer et l'identifiant du client public, de se connecter et de se déconnecter. La clé API historique est explicitement présentée comme une option technique de développement.
 

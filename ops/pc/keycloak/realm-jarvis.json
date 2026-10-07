@@ -9,6 +9,17 @@
   "duplicateEmailsAllowed": false,
   "verifyEmail": false,
   "resetPasswordAllowed": true,
+  "eventsEnabled": true,
+  "enabledEventTypes": [
+    "LOGIN",
+    "LOGIN_ERROR",
+    "CODE_TO_TOKEN",
+    "CODE_TO_TOKEN_ERROR",
+    "REFRESH_TOKEN",
+    "REFRESH_TOKEN_ERROR",
+    "LOGOUT",
+    "LOGOUT_ERROR"
+  ],
   "clients": [
     {
       "clientId": "jarvis-api",
@@ -24,7 +35,8 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
-      "redirectUris": ["com.jarvis.desktop:/oauth/callback"],
+      "redirectUris": ["http://127.0.0.1", "com.jarvis.desktop:/oauth/callback"],
+      "webOrigins": ["http://tauri.localhost"],
       "protocolMappers": [
         {
           "name": "jarvis-api-audience",
@@ -61,4 +73,3 @@
     }
   ]
 }
-
