@@ -167,7 +167,7 @@ function setup(
     { entity_id: 'vacuum.robot', state: 'cleaning', last_changed: '2026-10-08T09:00:00.000Z' },
     { entity_id: 'vacuum.robot', state: 'docked', last_changed: '2026-10-08T09:42:00.000Z' },
   ]]);
-  const getState = jest.fn(async (entityId: string) => {
+  const getState = jest.fn<(entityId: string) => Promise<unknown>>(async (entityId: string) => {
     if (entityId === 'select.robot_suction') {
       return { entity_id: entityId, state: 'Strong', attributes: { options: ['Silent', 'Strong'] } };
     }

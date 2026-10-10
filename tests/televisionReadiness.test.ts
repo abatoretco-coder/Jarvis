@@ -8,12 +8,12 @@ import { ensureTelevisionReady } from '../src/home/TelevisionReadiness';
 describe('television readiness', () => {
   test('wakes an off television and waits until Home Assistant reports it ready', async () => {
     const getState = jest
-      .fn()
+      .fn<HomeAssistantClient['getState']>()
       .mockResolvedValueOnce({ entity_id: 'media_player.lg_tv', state: 'off', attributes: {} })
       .mockResolvedValueOnce({ entity_id: 'media_player.lg_tv', state: 'off', attributes: {} })
       .mockResolvedValueOnce({ entity_id: 'media_player.lg_tv', state: 'on', attributes: {} });
-    const callService = jest.fn(async () => ({ status: 200, data: [] }));
-    const wait = jest.fn(async () => undefined);
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    const wait = jest.fn(async (_milliseconds: number) => undefined);
 
     const result = await ensureTelevisionReady({
       ha: { getState, callService } as unknown as HomeAssistantClient,
@@ -44,7 +44,7 @@ describe('television readiness', () => {
       attributes: {},
     }));
     const callService = jest.fn();
-    const wait = jest.fn(async () => undefined);
+    const wait = jest.fn(async (_milliseconds: number) => undefined);
 
     const result = await ensureTelevisionReady({
       ha: { getState, callService } as unknown as HomeAssistantClient,
@@ -63,8 +63,8 @@ describe('television readiness', () => {
       state: 'off',
       attributes: {},
     }));
-    const callService = jest.fn(async () => ({ status: 200, data: [] }));
-    const wait = jest.fn(async () => undefined);
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    const wait = jest.fn(async (_milliseconds: number) => undefined);
 
     const result = await ensureTelevisionReady({
       ha: { getState, callService } as unknown as HomeAssistantClient,
@@ -93,10 +93,10 @@ describe('television readiness', () => {
       }),
     } as unknown as HomeCatalog;
     const getState = jest
-      .fn()
+      .fn<HomeAssistantClient['getState']>()
       .mockResolvedValueOnce({ entity_id: 'media_player.lg_tv', state: 'off', attributes: {} })
       .mockResolvedValueOnce({ entity_id: 'media_player.lg_tv', state: 'on', attributes: {} });
-    const callService = jest.fn(async () => ({ status: 200, data: [] }));
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
 
     const result = await executeCatalogHomeAction({
       catalog,
