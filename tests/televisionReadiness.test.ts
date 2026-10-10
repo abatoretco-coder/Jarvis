@@ -73,7 +73,11 @@ describe('television readiness', () => {
       wait,
     });
 
-    expect(result).toEqual({ ok: false, code: 'television_state_timeout' });
+    expect(result).toEqual({
+      ok: false,
+      code: 'television_state_timeout',
+      operationStatus: 'uncertain',
+    });
     expect(callService).toHaveBeenCalledWith({
       domain: 'media_player',
       service: 'turn_on',

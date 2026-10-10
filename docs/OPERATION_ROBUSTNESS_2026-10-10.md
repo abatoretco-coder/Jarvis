@@ -7,9 +7,34 @@ Une réponse HTTP 2xx confirme la réception de la requête, pas nécessairement
 - `succeeded` : l'état cible a été relu et confirmé ;
 - `accepted` : le connecteur a accepté la commande, mais l'effet n'est pas encore prouvé ;
 - `partial` : réservé aux opérations composées dont une partie seulement a abouti ;
-- un échec de convergence observable reste une erreur explicite (`home_device_state_timeout`, HTTP 503).
+- `uncertain` : la commande a pu être acceptée, mais la lecture de réconciliation n'a pas permis de conclure ;
+- `failed` : l'exécution a été rejetée ou toutes les étapes ont échoué de manière certaine.
 
-`status: "ok"` (maison) et `status: "success"` (musique) sont conservés pour les clients historiques. Les nouveaux clients utilisent `operationStatus` en complément.
+`status: "ok"` (maison) et `status: "success"` (musique) sont conservés pour les clients historiques. Les nouveaux clients utilisent `operationStatus` en complément. Les scènes exposent en plus `contractVersion: 2` et `outcome: confirmed | accepted | partial | failed | uncertain`; leur champ `status` historique reste présent.
+
+## Idempotence des mutations
+
+Les mutations `/v1/home/**` et `POST /v1/music/actions` acceptent `Idempotency-Key` (8 à 128 caractères ASCII sûrs). La portée associe l'identité authentifiée, la clé, la route, la méthode et l'empreinte canonique des paramètres pendant cinq minutes :
+
+- deux requêtes identiques simultanées partagent une seule exécution et la seconde reçoit `Idempotent-Replay: true` ;
+- une même clé avec des paramètres différents renvoie `409 idempotency_key_conflict` ;
+- une réponse incertaine est conservée et n'est jamais rejouée automatiquement ;
+- l'absence de clé reste temporairement tolérée pour les anciens clients et les parcours vocaux internes.
+
+Le cache est volontairement borné à 2 048 entrées et conservé en mémoire. Il absorbe les doubles clics et retries réseau d'une instance, mais ne constitue pas une garantie durable entre plusieurs instances ou après redémarrage.
+
+## Budgets de réconciliation
+
+| Action | Fenêtre serveur indicative | Timeout client |
+|---|---:|---:|
+| Lumière / interrupteur | 10 × 300 ms | 12 s |
+| Robot | 12 × 1 s | 22 s |
+| Télévision au démarrage | 20 × 1 s | 32 s |
+| Action maison générique | 8 × 500 ms | 15 s |
+| Scène multi-étapes | bornée par ses étapes | 35 s |
+| Spotify | réconciliation client | 60 s |
+
+Un timeout de transport avant preuve d'acceptation reste un échec de transport. Un timeout de lecture après envoi devient `uncertain`, jamais un échec physique certain. Les clients ne réessayent pas automatiquement la mutation.
 
 ## Matrice de robustesse
 
@@ -35,8 +60,8 @@ Une réponse HTTP 2xx confirme la réception de la requête, pas nécessairement
 2. **Scène partielle affichée comme complète** — corrigé dans Desktop et Android.
 3. **Commande Spotify acceptée mais lecture inchangée** — corrigé : réconciliation client et avertissement après épuisement.
 4. **Nettoyage ciblé présenté comme démarré** — corrigé : il est maintenant présenté comme accepté tant que l'état du robot ne le confirme pas.
-5. **Absence d'idempotence serveur sur les commandes maison/musique** — risque restant ; le verrou UI réduit les doubles clics mais ne couvre pas retry réseau, multi-client ou redémarrage.
-6. **Budgets de timeout empilés** — risque restant entre clients, Jarvis, HA et appareils lents ; documenter puis aligner les budgets avant d'ajouter des retries.
+5. **Idempotence serveur sur les commandes maison/musique** — corrigée pour une instance et une fenêtre de cinq minutes ; la durabilité multi-instance reste hors périmètre.
+6. **Budgets de timeout empilés** — alignés par famille d'action ; les connecteurs tiers peuvent toujours dépasser ces fenêtres sans preuve exploitable.
 7. **Perte d'une opération en cours lors d'un redémarrage** — risque restant pour les opérations longues sans identifiant persistant.
 8. **Preuve hétérogène sur mail, agenda et tâches** — risque restant : certaines mutations prouvent l'objet créé, d'autres seulement l'acceptation du provider.
 9. **Audio/Bluetooth synchrone et long** — risque restant : les timeouts existent, mais pas de suivi durable pour les opérations les plus longues.
@@ -49,11 +74,14 @@ Une réponse HTTP 2xx confirme la réception de la requête, pas nécessairement
 3. Propagation des scènes partielles jusqu'aux interfaces Desktop et Android.
 4. Réconciliation Spotify observable : un état qui ne converge pas n'est plus silencieusement présenté comme réussi.
 5. Libellé honnête du nettoyage ciblé Xiaomi : acceptation distincte du démarrage confirmé.
+6. Agrégation v2 des scènes : confirmation, acceptation, succès partiel, échec total et incertitude sont distincts.
+7. Déduplication serveur bornée, y compris pour les doubles requêtes simultanées et les réponses incertaines.
+8. Budgets clients/serveur différenciés pour lumière, robot, télévision, Spotify et scènes.
 
 ## Limites et suite minimale
 
 - Ne pas appliquer la même vérification à toutes les commandes : un bouton, une télécommande ou un ajout en file n'ont pas toujours un état cible fiable.
-- Ajouter ensuite une clé d'idempotence bornée aux mutations maison et musique, conservée côté serveur assez longtemps pour absorber les retries réseau.
+- Persister l'idempotence dans un stockage partagé uniquement si Jarvis devient multi-instance ou si une garantie au-delà d'un redémarrage devient nécessaire.
 - Pour les opérations dépassant quelques secondes, introduire un identifiant d'opération et une lecture d'état seulement lorsqu'un vrai besoin apparaît (audio/Bluetooth long, orchestration multi-appareils).
 - Aucun test de cette passe ne pilote un périphérique réel ; toutes les preuves sont simulées aux frontières HTTP/clients.
 

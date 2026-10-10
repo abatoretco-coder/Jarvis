@@ -2304,11 +2304,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         principal: getRequestPrincipal(req),
       });
       const responseText =
-        result.status === 'success'
+        result.outcome === 'confirmed'
           ? `${voiceScene.name}, c'est fait.`
-          : result.status === 'partial'
-            ? `${voiceScene.name} n'a été exécutée qu'en partie.`
-            : `Je n'ai pas pu lancer ${voiceScene.name}.`;
+          : result.outcome === 'accepted'
+            ? `${voiceScene.name} a été acceptée, sans confirmation des équipements.`
+          : result.outcome === 'uncertain'
+              ? `${voiceScene.name} a été lancée, mais son résultat reste incertain.`
+              : result.outcome === 'partial'
+                ? `${voiceScene.name} n'a été exécutée qu'en partie.`
+                : `Je n'ai pas pu lancer ${voiceScene.name}.`;
       await conversationService.persistMessages(effectiveThreadId, text, responseText);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
@@ -2318,7 +2322,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           kind: 'home',
           source: 'scene',
           routeKey: 'home.scene',
-          semanticDecision: result.status,
+          semanticDecision: result.outcome,
         },
       });
     }
@@ -2333,12 +2337,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         command: voiceQuickAction,
       });
       const responseText = result.ok
-        ? `${voiceQuickAction.name}, c'est fait.`
+        ? result.operationStatus === 'succeeded'
+          ? `${voiceQuickAction.name}, c'est fait.`
+          : result.operationStatus === 'accepted'
+            ? `${voiceQuickAction.name} a été acceptée, sans confirmation de l'équipement.`
+            : `${voiceQuickAction.name} a été lancée, mais son résultat reste incertain.`
         : result.code === 'guest_action_forbidden'
           ? "Ce compte n'est pas autorisé à lancer cette action."
           : result.code === 'home_device_state_timeout'
             ? "La télé ne s'est pas déclarée prête après la commande d'allumage."
-          : "Je n'ai pas pu exécuter cette action. Vérifie l'équipement et sa connexion.";
+            : "Je n'ai pas pu exécuter cette action. Vérifie l'équipement et sa connexion.";
       await conversationService.persistMessages(effectiveThreadId, text, responseText);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       try {
@@ -2373,7 +2381,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           kind: 'home',
           source: 'quick_action',
           routeKey: 'home.quick_action',
-          semanticDecision: result.ok ? 'executed' : 'execution_failed',
+          semanticDecision: result.ok ? result.operationStatus : 'execution_failed',
         },
       });
     }
@@ -2388,7 +2396,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         command: deterministicHomeAction,
       });
       const responseText = result.ok
-        ? `Volume de la télé réglé à ${deterministicHomeAction.value} %.`
+        ? result.operationStatus === 'succeeded'
+          ? `Volume de la télé réglé à ${deterministicHomeAction.value} %.`
+          : result.operationStatus === 'accepted'
+            ? `Réglage du volume accepté, sans confirmation de la télé.`
+            : `Réglage du volume envoyé, mais son résultat reste incertain.`
         : result.code === 'guest_action_forbidden'
           ? "Ce compte n'est pas autorisé à piloter la télévision."
           : "Je n'ai pas pu régler le volume de la télévision. Vérifie sa connexion.";
@@ -2430,7 +2442,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           kind: 'home',
           source: 'deterministic_home_action',
           routeKey: 'home.television.set_volume',
-          semanticDecision: result.ok ? 'executed' : 'execution_failed',
+          semanticDecision: result.ok ? result.operationStatus : 'execution_failed',
         },
       });
     }

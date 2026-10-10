@@ -1,13 +1,18 @@
-import type { HomeAssistantClient } from '../haClient';
+import { type HomeAssistantClient,HomeAssistantRequestError } from '../haClient';
 import { type HassState, isHassState } from '../hass';
+import { HOME_ACTION_TIMING } from './HomeActionTiming';
 
-const DEFAULT_POLL_ATTEMPTS = 15;
-const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_POLL_ATTEMPTS = HOME_ACTION_TIMING.television.pollAttempts;
+const DEFAULT_POLL_INTERVAL_MS = HOME_ACTION_TIMING.television.pollIntervalMs;
 const NOT_READY_STATES = new Set(['off', 'unavailable', 'unknown']);
 
 export type TelevisionReadinessResult =
   | { ok: true; state: HassState }
-  | { ok: false; code: 'television_control_failed' | 'television_state_timeout' };
+  | {
+      ok: false;
+      code: 'television_control_failed' | 'television_state_timeout';
+      operationStatus: 'failed' | 'uncertain';
+    };
 
 function isReady(state: unknown): state is HassState {
   return isHassState(state) && !NOT_READY_STATES.has(state.state);
@@ -48,8 +53,19 @@ export async function ensureTelevisionReady(input: {
         target: { entity_id: input.entityId },
       });
     }
-  } catch {
-    return { ok: false, code: 'television_control_failed' };
+  } catch (error) {
+    if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) {
+      return {
+        ok: false,
+        code: 'television_state_timeout',
+        operationStatus: 'uncertain',
+      };
+    }
+    return {
+      ok: false,
+      code: 'television_control_failed',
+      operationStatus: 'failed',
+    };
   }
 
   const attempts = Math.max(1, input.pollAttempts ?? DEFAULT_POLL_ATTEMPTS);
@@ -68,5 +84,9 @@ export async function ensureTelevisionReady(input: {
     }
   }
 
-  return { ok: false, code: 'television_state_timeout' };
+  return {
+    ok: false,
+    code: 'television_state_timeout',
+    operationStatus: 'uncertain',
+  };
 }

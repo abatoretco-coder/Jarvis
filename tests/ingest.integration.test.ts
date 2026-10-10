@@ -270,8 +270,8 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      responseText: "Lumière salon, c'est fait.",
-      replyMeta: { source: 'quick_action', semanticDecision: 'executed' },
+      responseText: "Lumière salon a été acceptée, sans confirmation de l'équipement.",
+      replyMeta: { source: 'quick_action', semanticDecision: 'accepted' },
     });
     expect(callService).toHaveBeenCalledWith({
       domain: 'light',
@@ -323,12 +323,12 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      responseText: 'Volume de la télé réglé à 2 %.',
+        responseText: 'Réglage du volume accepté, sans confirmation de la télé.',
       replyMeta: {
         kind: 'home',
         source: 'deterministic_home_action',
         routeKey: 'home.television.set_volume',
-        semanticDecision: 'executed',
+          semanticDecision: 'accepted',
       },
     });
     expect(callService).toHaveBeenCalledWith({

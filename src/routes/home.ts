@@ -933,7 +933,11 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       targetType: 'home.scene',
       targetId: scene.sceneId,
       outcome: result.status === 'success' ? 'success' : 'failed',
-      metadata: { status: result.status, failedSteps: result.steps.filter((step) => step.status === 'failed').length },
+      metadata: {
+        status: result.status,
+        sceneOutcome: result.outcome,
+        failedSteps: result.steps.filter((step) => step.status === 'failed').length,
+      },
     });
     const failureStatus =
       result.errorCode === 'guest_action_forbidden'

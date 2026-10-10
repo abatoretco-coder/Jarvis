@@ -28,6 +28,7 @@ import { registerIdentityRoutes } from './routes/identity';
 import { registerIngestRoute } from './routes/ingest';
 import { registerIntegrationRoutes } from './routes/integrations';
 import { registerMusicRoutes } from './routes/music';
+import { registerMutationIdempotencyHooks } from './routes/mutationIdempotency';
 import { registerNasStatusRoute } from './routes/nasStatus';
 import { registerNewsSummaryRoute } from './routes/newsSummary';
 import { registerPcAgentRoutes } from './routes/pcAgent';
@@ -163,6 +164,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerSecurityHooks(app, env);
   registerApiKeyHook(app, env, identityService, adminRepository);
   registerPrincipalRateLimitHook(app, env);
+  registerMutationIdempotencyHooks(app);
 
   // Hooks must be registered before routes so every route receives the same
   // edge, authentication and rate-limit policy.
