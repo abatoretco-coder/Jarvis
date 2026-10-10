@@ -4,6 +4,6 @@ dist/
 .env.pc
 .env.nas
 artifacts/
-runtime/
+/runtime/
 ops/pc/env/*.env
 ops/edge/*.env
