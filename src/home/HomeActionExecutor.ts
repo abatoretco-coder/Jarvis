@@ -1,8 +1,13 @@
-import type { HomeAssistantClient, HomeAssistantServiceCall } from '../haClient';
+import {
+  type HomeAssistantClient,
+  HomeAssistantRequestError,
+  type HomeAssistantServiceCall,
+} from '../haClient';
 import { isHassState } from '../hass';
 import { isStreamDeckHomeActionAllowed, isStreamDeckPrincipal } from '../identity/oidcClientPolicy';
 import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
+import { homeActionTiming } from './HomeActionTiming';
 import { type HomeActionName, type HomeCatalog, type HomeScene, TV_REMOTE_KEYS } from './HomeCatalog';
 import { ensureTelevisionReady } from './TelevisionReadiness';
 
@@ -14,7 +19,12 @@ export type ExecutableHomeAction = {
 };
 
 export type HomeActionExecution =
-  | { ok: true; domain: string; operationStatus: 'succeeded' | 'accepted'; observedState?: string }
+  | {
+      ok: true;
+      domain: string;
+      operationStatus: 'succeeded' | 'accepted' | 'uncertain';
+      observedState?: string;
+    }
   | {
       ok: false;
       status: 400 | 403 | 404 | 409 | 502 | 503;
@@ -177,6 +187,7 @@ export async function executeCatalogHomeAction(input: {
   wait?: (milliseconds: number) => Promise<void>;
   televisionPollAttempts?: number;
   statePollAttempts?: number;
+  statePollIntervalMs?: number;
 }): Promise<HomeActionExecution> {
   const resolved = resolveCatalogHomeAction(input.catalog, input.command);
   if (!resolved.ok) return resolved;
@@ -261,6 +272,9 @@ export async function executeCatalogHomeAction(input: {
           : { pollAttempts: input.televisionPollAttempts }),
       });
       if (!readiness.ok) {
+        if (readiness.operationStatus === 'uncertain') {
+          return { ok: true, domain, operationStatus: 'uncertain' };
+        }
         return {
           ok: false,
           status: readiness.code === 'television_state_timeout' ? 503 : 502,
@@ -280,7 +294,10 @@ export async function executeCatalogHomeAction(input: {
     } else {
       await input.ha.callService(resolved.call);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) {
+      return { ok: true, domain, operationStatus: 'uncertain' };
+    }
     return { ok: false, status: 502, code: 'home_control_unavailable', domain };
   }
 
@@ -304,9 +321,10 @@ export async function executeCatalogHomeAction(input: {
   }
 
   const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const timing = homeActionTiming(domain, input.command.action);
   let stateReadable = false;
-  for (let attempt = 0; attempt < (input.statePollAttempts ?? 10); attempt += 1) {
-    if (attempt > 0) await wait(300);
+  for (let attempt = 0; attempt < (input.statePollAttempts ?? timing.pollAttempts); attempt += 1) {
+    if (attempt > 0) await wait(input.statePollIntervalMs ?? timing.pollIntervalMs);
     try {
       const state = await input.ha.getState(entityId);
       if (!isHassState(state)) continue;
@@ -321,20 +339,36 @@ export async function executeCatalogHomeAction(input: {
     }
   }
   if (!stateReadable) return { ok: true, domain, operationStatus: 'accepted' };
-  return { ok: false, status: 503, code: 'home_device_state_timeout', domain };
+  return { ok: true, domain, operationStatus: 'uncertain' };
 }
 
+export type HomeSceneOutcome = 'confirmed' | 'accepted' | 'partial' | 'failed' | 'uncertain';
+
 export type HomeSceneExecution = {
+  contractVersion: 2;
+  outcome: HomeSceneOutcome;
   status: 'success' | 'partial' | 'failed';
   errorCode?: string;
   steps: Array<{
     deviceId: string;
     action: HomeActionName;
     status: 'success' | 'failed';
-    operationStatus?: 'succeeded' | 'accepted';
+    outcome: 'confirmed' | 'accepted' | 'failed' | 'uncertain';
+    operationStatus?: 'succeeded' | 'accepted' | 'uncertain';
     error?: string;
   }>;
 };
+
+export function aggregateSceneOutcome(
+  steps: HomeSceneExecution['steps']
+): HomeSceneOutcome {
+  const outcomes = new Set(steps.map((step) => step.outcome));
+  if (outcomes.size === 1 && outcomes.has('confirmed')) return 'confirmed';
+  if (outcomes.size === 1 && outcomes.has('accepted')) return 'accepted';
+  if (outcomes.size === 1 && outcomes.has('failed')) return 'failed';
+  if (outcomes.has('accepted') || outcomes.has('uncertain')) return 'uncertain';
+  return 'partial';
+}
 
 export async function executeCatalogHomeScene(input: {
   catalog: HomeCatalog;
@@ -347,12 +381,15 @@ export async function executeCatalogHomeScene(input: {
     const resolved = resolveCatalogHomeAction(input.catalog, step);
     if (!resolved.ok) {
       return {
+        contractVersion: 2,
+        outcome: 'failed',
         status: 'failed',
         errorCode: resolved.code,
         steps: input.scene.steps.map((candidate) => ({
           deviceId: candidate.deviceId,
           action: candidate.action,
           status: 'failed',
+          outcome: 'failed',
           error: candidate.deviceId === step.deviceId ? resolved.code : 'scene_preflight_failed',
         })),
       };
@@ -364,9 +401,11 @@ export async function executeCatalogHomeScene(input: {
       !['light', 'media_player'].includes(domain)
     ) {
       return {
+        contractVersion: 2,
+        outcome: 'failed',
         status: 'failed',
         errorCode: 'guest_action_forbidden',
-        steps: [{ deviceId: step.deviceId, action: step.action, status: 'failed', error: 'guest_action_forbidden' }],
+        steps: [{ deviceId: step.deviceId, action: step.action, status: 'failed', outcome: 'failed', error: 'guest_action_forbidden' }],
       };
     }
   }
@@ -374,15 +413,28 @@ export async function executeCatalogHomeScene(input: {
     input.scene.steps.map(async (step) => {
       const result = await executeCatalogHomeAction({ ...input, command: step });
       return result.ok
-        ? { deviceId: step.deviceId, action: step.action, status: 'success' as const, operationStatus: result.operationStatus }
-        : { deviceId: step.deviceId, action: step.action, status: 'failed' as const, error: result.code };
+        ? {
+            deviceId: step.deviceId,
+            action: step.action,
+            status: 'success' as const,
+            outcome:
+              result.operationStatus === 'succeeded'
+                ? 'confirmed' as const
+                : result.operationStatus === 'accepted'
+                  ? 'accepted' as const
+                  : 'uncertain' as const,
+            operationStatus: result.operationStatus,
+          }
+        : { deviceId: step.deviceId, action: step.action, status: 'failed' as const, outcome: 'failed' as const, error: result.code };
     })
   );
-  const successCount = executions.filter((step) => step.status === 'success').length;
+  const outcome = aggregateSceneOutcome(executions);
+  const status = outcome === 'failed' ? 'failed' : outcome === 'partial' || outcome === 'uncertain' ? 'partial' : 'success';
   return {
-    status:
-      successCount === executions.length ? 'success' : successCount === 0 ? 'failed' : 'partial',
+    contractVersion: 2,
+    outcome,
+    status,
     steps: executions,
-    ...(successCount === 0 && executions[0]?.error ? { errorCode: executions[0].error } : {}),
+    ...(outcome === 'failed' && executions[0]?.error ? { errorCode: executions[0].error } : {}),
   };
 }

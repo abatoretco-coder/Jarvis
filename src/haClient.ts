@@ -19,6 +19,18 @@ export type HomeAssistantConversationProcessInput = {
 
 export type HomeAssistantAutomationConfig = Record<string, unknown>;
 
+export class HomeAssistantRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: 'transport' | 'rejected',
+    public readonly operationMayHaveBeenAccepted: boolean,
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'HomeAssistantRequestError';
+  }
+}
+
 export class HomeAssistantClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -81,25 +93,46 @@ export class HomeAssistantClient {
     };
 
     try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.token}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        throw new HomeAssistantRequestError(
+          `Home Assistant service transport failed: ${message}`,
+          'transport',
+          true,
+          { cause: error }
+        );
+      }
 
       const data = await this.readResponseBody(resp);
       if (!resp.ok) {
         const details = typeof data === 'string' ? data : JSON.stringify(data);
-        throw new Error(`Home Assistant callService failed (${input.domain}.${input.service}): ${resp.status}: ${details}`);
+        throw new HomeAssistantRequestError(
+          `Home Assistant callService rejected (${input.domain}.${input.service}): ${resp.status}: ${details}`,
+          'rejected',
+          false
+        );
       }
       return { status: resp.status, data };
     } catch (err) {
+      if (err instanceof HomeAssistantRequestError) throw err;
       const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      throw new Error(`Home Assistant request failed: ${msg}`, { cause: err });
+      throw new HomeAssistantRequestError(
+        `Home Assistant service response failed: ${msg}`,
+        'transport',
+        true,
+        { cause: err }
+      );
     } finally {
       clearTimeout(timeout);
     }
