@@ -1,17 +1,44 @@
 import type { FastifyInstance } from 'fastify';
 
-import { verifyConversationDatabase } from '../conversation/conversationDbBackup';
+import {
+  HEALTH_CONTRACT_VERSION,
+  HealthDiagnostics,
+  type HealthDiagnosticsOptions,
+} from '../health/healthDiagnostics';
 import type { AppDeps } from '../server';
 
-export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void {
+export function registerHealthRoute(
+  app: FastifyInstance,
+  deps?: AppDeps,
+  options: HealthDiagnosticsOptions = {}
+): void {
+  const healthDiagnostics = deps ? new HealthDiagnostics(deps, options) : undefined;
+
+  app.get('/live', async () => ({
+    status: 'healthy',
+    contractVersion: HEALTH_CONTRACT_VERSION,
+    timestamp: new Date().toISOString(),
+  }));
+
   app.get('/ready', async (_request, reply) => {
     if (!deps) return { status: 'ok' };
-    try {
-      const verification = verifyConversationDatabase(deps.env.CONVERSATION_DB_PATH);
-      return { status: 'ready', schemaVersion: verification.schemaVersion };
-    } catch {
-      return reply.code(503).send({ status: 'not_ready', dependency: 'database' });
+    const database = await healthDiagnostics!.getReadiness();
+    if (database.status === 'healthy') {
+      return {
+        status: 'ready',
+        schemaVersion: database.schemaVersion,
+        contractVersion: HEALTH_CONTRACT_VERSION,
+        readiness: { status: 'healthy' },
+        dependencies: { conversationDatabase: database },
+      };
     }
+    return reply.code(503).send({
+      status: 'not_ready',
+      dependency: 'database',
+      contractVersion: HEALTH_CONTRACT_VERSION,
+      readiness: { status: 'unavailable' },
+      dependencies: { conversationDatabase: database },
+    });
   });
 
   app.get('/health', async () => {
@@ -23,12 +50,10 @@ export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void 
     // If no deps, return basic health only
     if (!deps) return basic;
 
-    // Detailed health check
+    const snapshot = await healthDiagnostics!.getSnapshot();
+
+    // Legacy fields remain stable for Desktop, Android and deployment scripts.
     const spotifyWebApiConfigured = deps.spotifyWebApi.isConfigured();
-    
-    const homeAssistantStatus = deps.ha
-      ? await probeHomeAssistantStatus(deps.ha)
-      : 'not_configured';
 
     const dependencies: Record<string, unknown> = {
       llm: {
@@ -45,7 +70,7 @@ export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void 
         status: 'ok',
         mode: 'semantic_router',
       },
-      homeassistant: { status: homeAssistantStatus },
+      homeassistant: { status: snapshot.legacyHomeAssistantStatus },
       spotifyWebApi: spotifyWebApiConfigured
         ? { status: 'configured', hasToken: true }
         : { status: 'not_configured' },
@@ -54,28 +79,9 @@ export function registerHealthRoute(app: FastifyInstance, deps?: AppDeps): void 
     return {
       status: 'ok',
       timestamp,
+      contractVersion: HEALTH_CONTRACT_VERSION,
       dependencies,
+      diagnostics: snapshot.diagnostics,
     };
   });
-}
-
-/**
- * The health endpoint must always remain responsive.  The HA client itself
- * aborts its fetch, but a stalled socket/DNS lookup can occasionally fail to
- * settle promptly in Node.  This outer deadline protects the HTTP route.
- */
-async function probeHomeAssistantStatus(ha: NonNullable<AppDeps['ha']>): Promise<'ok' | 'unauthorized' | 'unreachable'> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      ha.probeHealth(),
-      new Promise<'unreachable'>((resolve) => {
-        timeout = setTimeout(() => resolve('unreachable'), 2_000);
-      }),
-    ]);
-  } catch {
-    return 'unreachable';
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
 }
