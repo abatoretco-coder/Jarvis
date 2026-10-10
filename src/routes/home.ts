@@ -363,7 +363,12 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       outcome: 'success',
       metadata: { domain: result.domain },
     });
-    return reply.code(200).send({ status: 'ok', deviceId: input.deviceId });
+    return reply.code(200).send({
+      status: 'ok',
+      deviceId: input.deviceId,
+      operationStatus: result.operationStatus,
+      ...(result.observedState ? { observedState: result.observedState } : {}),
+    });
   }
 
   app.get('/v1/home', async (request, reply) => {
@@ -482,7 +487,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         serviceData: body.data,
         returnResponse: true,
       });
-      return reply.send({ status: 'ok' });
+      return reply.send({ status: 'ok', operationStatus: 'accepted' });
     } catch (error) {
       app.log.warn({ errorCode: error instanceof Error ? error.message : 'robot_connector_failed' }, 'robot room clean failed');
       return reply.code(502).send({ error: 'robot_connector_failed' });

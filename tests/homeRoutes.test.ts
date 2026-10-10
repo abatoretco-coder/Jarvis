@@ -440,7 +440,11 @@ describe('home routes', () => {
         target: { entity_id: 'light.salon' },
       })
     );
-    expect(light.json()).toEqual({ status: 'ok', deviceId: 'living-light' });
+    expect(light.json()).toEqual({
+      status: 'ok',
+      deviceId: 'living-light',
+      operationStatus: 'accepted',
+    });
     expect(recordActorAudit).toHaveBeenCalledWith(
       expect.objectContaining({
         actorKind: 'user',
