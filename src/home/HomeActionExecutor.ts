@@ -14,7 +14,7 @@ export type ExecutableHomeAction = {
 };
 
 export type HomeActionExecution =
-  | { ok: true; domain: string }
+  | { ok: true; domain: string; operationStatus: 'succeeded' | 'accepted'; observedState?: string }
   | {
       ok: false;
       status: 400 | 403 | 404 | 409 | 502 | 503;
@@ -176,6 +176,7 @@ export async function executeCatalogHomeAction(input: {
   command: ExecutableHomeAction;
   wait?: (milliseconds: number) => Promise<void>;
   televisionPollAttempts?: number;
+  statePollAttempts?: number;
 }): Promise<HomeActionExecution> {
   const resolved = resolveCatalogHomeAction(input.catalog, input.command);
   if (!resolved.ok) return resolved;
@@ -270,13 +271,57 @@ export async function executeCatalogHomeAction(input: {
           domain,
         };
       }
+      return {
+        ok: true,
+        domain,
+        operationStatus: 'succeeded',
+        ...(isHassState(readiness.state) ? { observedState: readiness.state.state } : {}),
+      };
     } else {
       await input.ha.callService(resolved.call);
     }
   } catch {
     return { ok: false, status: 502, code: 'home_control_unavailable', domain };
   }
-  return { ok: true, domain };
+
+  const entityId = resolved.call.target?.entity_id;
+  const expectedStates =
+    typeof entityId !== 'string'
+      ? undefined
+      : ['light', 'switch'].includes(resolved.call.domain) && input.command.action === 'turn_on'
+        ? ['on']
+        : ['light', 'switch'].includes(resolved.call.domain) && input.command.action === 'turn_off'
+          ? ['off']
+          : domain === 'vacuum' && input.command.action === 'start'
+            ? ['cleaning']
+            : domain === 'vacuum' && input.command.action === 'stop'
+              ? ['idle', 'paused', 'docked']
+              : domain === 'vacuum' && input.command.action === 'return_to_base'
+                ? ['returning', 'docked']
+                : undefined;
+  if (!expectedStates || typeof entityId !== 'string') {
+    return { ok: true, domain, operationStatus: 'accepted' };
+  }
+
+  const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  let stateReadable = false;
+  for (let attempt = 0; attempt < (input.statePollAttempts ?? 10); attempt += 1) {
+    if (attempt > 0) await wait(300);
+    try {
+      const state = await input.ha.getState(entityId);
+      if (!isHassState(state)) continue;
+      stateReadable = true;
+      if (expectedStates.includes(state.state)) {
+        return { ok: true, domain, operationStatus: 'succeeded', observedState: state.state };
+      }
+    } catch {
+      // The command was accepted by Home Assistant. A read failure must not be
+      // misreported as a confirmed failure; callers can surface it as accepted.
+      return { ok: true, domain, operationStatus: 'accepted' };
+    }
+  }
+  if (!stateReadable) return { ok: true, domain, operationStatus: 'accepted' };
+  return { ok: false, status: 503, code: 'home_device_state_timeout', domain };
 }
 
 export type HomeSceneExecution = {
@@ -286,6 +331,7 @@ export type HomeSceneExecution = {
     deviceId: string;
     action: HomeActionName;
     status: 'success' | 'failed';
+    operationStatus?: 'succeeded' | 'accepted';
     error?: string;
   }>;
 };
@@ -328,7 +374,7 @@ export async function executeCatalogHomeScene(input: {
     input.scene.steps.map(async (step) => {
       const result = await executeCatalogHomeAction({ ...input, command: step });
       return result.ok
-        ? { deviceId: step.deviceId, action: step.action, status: 'success' as const }
+        ? { deviceId: step.deviceId, action: step.action, status: 'success' as const, operationStatus: result.operationStatus }
         : { deviceId: step.deviceId, action: step.action, status: 'failed' as const, error: result.code };
     })
   );

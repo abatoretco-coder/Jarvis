@@ -400,7 +400,11 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
       }
       if (!directResult.ok) return reply.code(409).send({ error: directResult.error, message: 'Commande Spotify indisponible.' });
       spotify.scheduleSituationRefresh();
-      return reply.send({ status: 'success', message: 'Commande Spotify exécutée.' });
+      return reply.send({
+        status: 'success',
+        operationStatus: 'accepted',
+        message: 'Commande Spotify acceptée. Vérification de la lecture en cours.',
+      });
     }
     const requestAction = action === 'play' || action === 'pause' || action === 'next' || action === 'previous' || action === 'transfer'
         ? action
@@ -434,6 +438,11 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
       app.log.error({ errorCode: error instanceof Error ? error.message : 'music_audit_failed' }, 'music UI audit persistence failed');
     }
     if (result.status === 'error') return reply.code(409).send({ error: result.error_code ?? 'music_action_failed', message: result.tts });
-    return reply.send({ status: result.status, message: result.tts, data: result.data ?? null });
+    return reply.send({
+      status: result.status,
+      operationStatus: 'accepted',
+      message: result.tts,
+      data: result.data ?? null,
+    });
   });
 }

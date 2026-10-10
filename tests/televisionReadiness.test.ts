@@ -106,7 +106,12 @@ describe('television readiness', () => {
       wait: async () => undefined,
     });
 
-    expect(result).toEqual({ ok: true, domain: 'media_player' });
+    expect(result).toEqual({
+      ok: true,
+      domain: 'media_player',
+      operationStatus: 'succeeded',
+      observedState: 'on',
+    });
     expect(getState).toHaveBeenCalledTimes(2);
     expect(callService).toHaveBeenCalledWith({
       domain: 'wake_on_lan',
