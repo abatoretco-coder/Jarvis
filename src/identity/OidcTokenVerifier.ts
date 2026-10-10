@@ -7,6 +7,7 @@ export type VerifiedOidcClaims = {
   emailVerified: boolean;
   displayName?: string;
   providerSessionId: string;
+  clientId?: string;
   expiresAtMs: number;
 };
 
@@ -56,6 +57,9 @@ export class OidcTokenVerifier implements AccessTokenVerifier {
         throw new Error('oidc_required_claim_invalid');
       }
       const displayName = typeof payload.name === 'string' ? payload.name : undefined;
+      const clientId = typeof payload.azp === 'string' && payload.azp.length <= 128
+        ? payload.azp
+        : undefined;
       return {
         issuer: this.config.issuer,
         subject: payload.sub,
@@ -63,6 +67,7 @@ export class OidcTokenVerifier implements AccessTokenVerifier {
         emailVerified: true,
         displayName,
         providerSessionId: `${this.config.issuer}\u001f${payload.sid}`,
+        clientId,
         expiresAtMs: payload.exp * 1_000,
       };
     } catch {

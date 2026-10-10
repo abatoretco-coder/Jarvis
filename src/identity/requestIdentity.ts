@@ -5,7 +5,7 @@ import type { FastifyRequest } from 'fastify';
 import type { PermissionKey } from './IdentityRepository';
 import type { UserPrincipal } from './IdentityService';
 
-export type ServicePrincipal = { kind: 'service'; serviceId?: string; permissions?: PermissionKey[] };
+export type ServicePrincipal = { kind: 'service'; serviceId: string; permissions: PermissionKey[] };
 export type RequestPrincipal = UserPrincipal | ServicePrincipal;
 
 const principals = new WeakMap<FastifyRequest, RequestPrincipal>();
@@ -28,7 +28,7 @@ export function getRequestPrincipal(request: FastifyRequest): RequestPrincipal |
 
 /**
  * Returns the authenticated human owner for repository-level row filtering.
- * `null` is the isolated legacy/service partition; it never aliases a user.
+ * `null` is the isolated unauthenticated compatibility partition; it never aliases a user.
  */
 export function getCurrentOwnerUserId(): string | null {
   const principal = requestIdentityContext.getStore()?.principal;
@@ -60,13 +60,13 @@ export function getCurrentDataOwnerScope(): DataOwnerScope {
 
 /**
  * Authorizes a capability at the point where it is executed. An absent
- * principal means authentication is disabled for this deployment. Legacy
- * unscoped service credentials retain their existing all-capabilities access.
+ * principal means authentication is explicitly disabled for a local test or
+ * development deployment. Every service credential is scoped.
  */
 export function hasRequestPermission(request: FastifyRequest, permission: PermissionKey): boolean {
   const principal = principals.get(request);
   if (!principal) return true;
-  if (principal.kind === 'service') return !principal.permissions || principal.permissions.includes(permission);
+  if (principal.kind === 'service') return principal.permissions?.includes(permission) === true;
   return principal.status === 'active' && principal.permissions.includes(permission);
 }
 

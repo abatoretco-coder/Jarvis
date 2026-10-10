@@ -3,6 +3,15 @@ import { describe, expect, test } from '@jest/globals';
 import { loadEnv } from '../src/env';
 
 describe('Phase 1 cloud runtime policy', () => {
+  test('disables legacy global API keys by default', () => {
+    expect(loadEnv({ REQUIRE_API_KEY: 'false' }).ALLOW_LEGACY_API_KEYS).toBe(false);
+    expect(() => loadEnv({
+      REQUIRE_API_KEY: 'true',
+      ALLOW_LEGACY_API_KEYS: 'true',
+      API_KEY: 'retired-global-key',
+    })).toThrow('legacy global API keys are retired');
+  });
+
   test('uses OpenAI by default without fabricating credentials', () => {
     const env = loadEnv({ REQUIRE_API_KEY: 'false' });
 
@@ -146,7 +155,7 @@ describe('Phase 1 cloud runtime policy', () => {
     expect(() =>
       loadEnv({
         REQUIRE_API_KEY: 'true',
-        API_KEY: 'local-key',
+        SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'local-test', token: 'local-test-service-token-0123456789', permissions: ['chat'] }]),
         OIDC_ENABLED: 'true',
         OIDC_ISSUER_URL: 'http://identity:8080/realms/jarvis',
         OIDC_AUDIENCE: 'jarvis-api',
@@ -156,12 +165,41 @@ describe('Phase 1 cloud runtime policy', () => {
     expect(
       loadEnv({
         REQUIRE_API_KEY: 'true',
-        API_KEY: 'local-key',
+        SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'local-test', token: 'local-test-service-token-0123456789', permissions: ['chat'] }]),
         OIDC_ENABLED: 'true',
         OIDC_ISSUER_URL: 'http://identity:8080/realms/jarvis',
         OIDC_AUDIENCE: 'jarvis-api',
         OIDC_ALLOW_INSECURE_HTTP: 'true',
       }).OIDC_ALLOW_INSECURE_HTTP
     ).toBe(true);
+  });
+
+  test('allows only the isolated edge identity service for internal HTTP JWKS', () => {
+    const base = {
+      REQUIRE_API_KEY: 'true',
+      ALLOW_LEGACY_API_KEYS: 'false',
+      OIDC_ENABLED: 'true',
+      OIDC_ISSUER_URL: 'https://jarvis.example.test/realms/jarvis',
+      OIDC_AUDIENCE: 'jarvis-api',
+      PUBLIC_EDGE_ENABLED: 'true',
+      PUBLIC_BASE_URL: 'https://jarvis.example.test',
+      TRUSTED_PROXY_CIDRS: '172.30.91.10/32',
+      EDGE_PROXY_SECRET: 'edge-secret-with-at-least-32-characters',
+      OIDC_JWKS_ALLOW_INTERNAL_HTTP: 'true',
+    };
+
+    expect(
+      loadEnv({
+        ...base,
+        OIDC_JWKS_URL: 'http://identity-edge-origin:8080/realms/jarvis/protocol/openid-connect/certs',
+      }).OIDC_JWKS_ALLOW_INTERNAL_HTTP
+    ).toBe(true);
+
+    expect(() =>
+      loadEnv({
+        ...base,
+        OIDC_JWKS_URL: 'http://identity:8080/realms/jarvis/protocol/openid-connect/certs',
+      })
+    ).toThrow('OIDC_JWKS_URL must use HTTPS');
   });
 });

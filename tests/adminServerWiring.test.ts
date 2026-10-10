@@ -25,7 +25,7 @@ describe('admin control-plane server wiring', () => {
       loadEnv({
         LOG_LEVEL: 'silent',
         REQUIRE_API_KEY: 'true',
-        API_KEY: 'service-key',
+        SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'admin-wiring-service', token: 'admin-wiring-service-token-01234567', permissions: ['admin'] }]),
         OIDC_ENABLED: 'true',
         OIDC_ISSUER_URL: 'https://issuer.example.test/realms/jarvis',
         OIDC_AUDIENCE: 'jarvis-api',
@@ -51,7 +51,7 @@ describe('admin control-plane server wiring', () => {
     const serviceAttempt = await app.inject({
       method: 'GET',
       url: '/v1/admin/services',
-      headers: { 'x-api-key': 'service-key' },
+      headers: { 'x-api-key': 'admin-wiring-service-token-01234567' },
     });
     expect(serviceAttempt.statusCode).toBe(403);
     expect(serviceAttempt.json()).toEqual({ error: 'human_admin_required' });
@@ -72,7 +72,7 @@ describe('admin control-plane server wiring', () => {
       loadEnv({
         LOG_LEVEL: 'silent',
         REQUIRE_API_KEY: 'true',
-        API_KEY: 'service-key',
+        SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'admin-disabled-service', token: 'admin-disabled-service-token-012345', permissions: ['admin'] }]),
         OIDC_ENABLED: 'false',
         CONVERSATION_DB_PATH: join(directory, 'conversation.sqlite'),
       })
@@ -81,7 +81,7 @@ describe('admin control-plane server wiring', () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/admin/services',
-      headers: { 'x-api-key': 'service-key' },
+      headers: { 'x-api-key': 'admin-disabled-service-token-012345' },
     });
     expect(response.statusCode).toBe(404);
     await app.close();

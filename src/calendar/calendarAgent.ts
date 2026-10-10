@@ -18,7 +18,7 @@ import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
   calendarApiRequest,
   type CalendarTokenEnv,
-  fetchUpcomingEventsMultiCalendar,
+  fetchUpcomingEventsMultiCalendarDetailed,
   formatEventDate,
   getGoogleCalendarConfigState,
   type GoogleCalendarEvent,
@@ -665,21 +665,29 @@ async function executeCalendarAction(
         ? [plan.calendarId]
         : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
 
-      const events = await fetchUpcomingEventsMultiCalendar(
+      const result = await fetchUpcomingEventsMultiCalendarDetailed(
         tokenEnv,
         calendarIds,
         plan.timeMin,
         plan.timeMax,
         20,
       );
-      const active = events.filter((ev) => ev.status !== 'cancelled');
+      if (result.failedCalendarIds.length === calendarIds.length) {
+        throw new Error('calendar_all_sources_unavailable');
+      }
+      const partialWarning = result.failedCalendarIds.length > 0
+        ? `Résultats partiels : agendas indisponibles (${result.failedCalendarIds.join(', ')}).`
+        : '';
+      const active = result.events.filter((ev) => ev.status !== 'cancelled');
 
       if (active.length === 0) {
-        return 'Aucun événement prévu dans cette période.';
+        return [partialWarning, 'Aucun événement prévu dans les agendas disponibles pour cette période.']
+          .filter(Boolean)
+          .join('\n');
       }
 
       const lines = active.slice(0, 10).map(formatEventLine);
-      return lines.join('\n');
+      return [partialWarning, ...lines].filter(Boolean).join('\n');
     }
 
     case 'search_events': {
@@ -708,9 +716,17 @@ async function executeCalendarAction(
       );
 
       const all: GoogleCalendarEvent[] = [];
-      for (const r of perCalendar) {
+      const failedCalendarIds: string[] = [];
+      for (const [index, r] of perCalendar.entries()) {
         if (r.status === 'fulfilled') all.push(...(r.value.items ?? []));
+        else failedCalendarIds.push(calendarIds[index] ?? 'unknown');
       }
+      if (failedCalendarIds.length === calendarIds.length) {
+        throw new Error('calendar_all_sources_unavailable');
+      }
+      const partialWarning = failedCalendarIds.length > 0
+        ? `Résultats partiels : agendas indisponibles (${failedCalendarIds.join(', ')}).`
+        : '';
       const active = all.filter((ev) => ev.status !== 'cancelled');
       active.sort((a, b) => {
         const aS = a.start?.dateTime ?? a.start?.date ?? '';
@@ -719,11 +735,17 @@ async function executeCalendarAction(
       });
 
       if (active.length === 0) {
-        return `Aucun événement trouvé pour "${plan.q}".`;
+        return [partialWarning, `Aucun événement trouvé pour "${plan.q}" dans les agendas disponibles.`]
+          .filter(Boolean)
+          .join('\n');
       }
 
       const lines = active.slice(0, maxResults).map(formatEventLine);
-      return `${active.length} résultat${active.length > 1 ? 's' : ''} pour "${plan.q}" :\n${lines.join('\n')}`;
+      return [
+        partialWarning,
+        `${active.length} résultat${active.length > 1 ? 's' : ''} pour "${plan.q}" :`,
+        ...lines,
+      ].filter(Boolean).join('\n');
     }
 
     case 'create_event': {

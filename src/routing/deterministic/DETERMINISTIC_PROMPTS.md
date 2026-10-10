@@ -162,7 +162,7 @@ export function getSpotifyResponse(action: string, params?: Record<string, any>)
       }
       return SPOTIFY_NOW_PLAYING_RESPONSES[0];
     default:
-      return 'Action effectuée.';
+      return 'Confirmation Spotify indisponible.';
   }
 }
 ```
@@ -188,7 +188,7 @@ Lors de l'exécution directe (E2) :
 // src/routing/routeDispatcher.ts (Phase 2+)
 const response = route.deterministicResponses?.() ?? [];
 const randomReply = response[Math.floor(Math.random() * response.length)];
-return randomReply || 'Action effectuée.';
+return randomReply || 'Jarvis n’a reçu aucune confirmation exploitable pour cette action.';
 ```
 
 ---

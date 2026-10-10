@@ -290,8 +290,8 @@ export type CalendarMultiFetchResult = {
  *  - timeMax: upper bound (exclusive) on event **start** time (RFC3339)
  *  - singleEvents=true + orderBy=startTime: expand recurring events, ordered by start
  *
- * Failed per-calendar fetches are silently skipped so one broken calendar
- * does not prevent the rest from loading.
+ * Per-calendar failures are returned to the caller so partial data can never
+ * be presented as a complete calendar result.
  */
 export async function fetchUpcomingEventsMultiCalendarDetailed(
   env: CalendarTokenEnv,
@@ -336,14 +336,4 @@ export async function fetchUpcomingEventsMultiCalendarDetailed(
   });
 
   return { events: all, failedCalendarIds };
-}
-
-export async function fetchUpcomingEventsMultiCalendar(
-  env: CalendarTokenEnv,
-  calendarIds: string[],
-  timeMin: string,
-  timeMax: string,
-  maxPerCalendar = 50,
-): Promise<CalendarEventWithMeta[]> {
-  return (await fetchUpcomingEventsMultiCalendarDetailed(env, calendarIds, timeMin, timeMax, maxPerCalendar)).events;
 }

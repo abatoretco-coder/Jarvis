@@ -210,11 +210,117 @@
   "automation": {
     "spaces": [
       {"roomId": "room_bedroom", "entities": []},
-      {"roomId": "room_bathroom", "entities": []},
-      {"roomId": "room_kitchen", "entities": []},
-      {"roomId": "room_living", "entities": []},
+      {"roomId": "room_bathroom", "entities": [
+        {
+          "deviceId": "bathroom-water-heater",
+          "name": "Chauffe-eau Ariston Velis Dry",
+          "presetId": "water-heater",
+          "placement": {"x": 0.45, "y": 3.72, "z": 1.2, "rotationDeg": 90, "scale": 1}
+        }
+      ]},
+        {"roomId": "room_kitchen", "entities": [
+          {
+            "deviceId": "nono-robot",
+            "entityId": "vacuum.xiaomi_de_1150317461_c102gl",
+            "name": "Nono le Robot",
+            "presetId": "vacuum",
+            "placement": {"x": 4.4, "y": 3.5, "z": 0, "rotationDeg": 0, "scale": 1},
+            "robot": {
+              "batteryEntityId": "sensor.xiaomi_de_1150317461_c102gl_battery_level_p_3_1",
+              "chargingStateEntityId": "sensor.xiaomi_de_1150317461_c102gl_charging_state_p_3_2",
+              "locateEntityId": "button.xiaomi_de_1150317461_c102gl_position_a_7_1",
+              "suctionModeEntityId": "select.xiaomi_de_1150317461_c102gl_mode_p_2_3",
+              "mopModeEntityId": "select.xiaomi_de_1150317461_c102gl_mop_mode_p_4_5",
+              "emptyDustBinEntityId": "button.xiaomi_de_1150317461_c102gl_start_dust_arrest_a_2_4",
+              "washMopEntityId": "button.xiaomi_de_1150317461_c102gl_start_mop_wash_a_2_6",
+              "startMopDryingEntityId": "button.xiaomi_de_1150317461_c102gl_start_dry_a_2_8",
+              "stopMopDryingEntityId": "button.xiaomi_de_1150317461_c102gl_stop_dry_a_2_9",
+              "cleaningTimeEntityId": "sensor.xiaomi_de_1150317461_c102gl_cleaning_time_p_4_2",
+              "cleaningAreaEntityId": "sensor.xiaomi_de_1150317461_c102gl_cleaning_area_p_4_3",
+              "dryingTimeRemainingEntityId": "sensor.xiaomi_de_1150317461_c102gl_dry_left_time_p_2_5",
+              "totalCleaningTimeEntityId": "sensor.xiaomi_de_1150317461_c102gl_total_clean_time_p_12_2",
+              "totalCleaningCountEntityId": "sensor.xiaomi_de_1150317461_c102gl_total_clean_times_p_12_3",
+              "totalCleaningAreaEntityId": "sensor.xiaomi_de_1150317461_c102gl_total_clean_area_p_12_4",
+              "mainBrushLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_brush_life_level_p_9_2",
+              "sideBrushLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_brush_life_level_p_10_2",
+              "filterLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_filter_life_level_p_11_1",
+              "mopLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_mop_life_level_p_18_1"
+            }
+          }
+        ]},
+      {"roomId": "room_living", "entities": [
+        {
+          "deviceId": "living-room-thermometer",
+          "name": "Thermomètre Tapo T315",
+          "presetId": "sensor",
+          "placement": {"x": 7.8, "y": 1.7, "z": 1.2, "rotationDeg": 0, "scale": 0.8}
+        },
+        {
+          "deviceId": "living-room-radiator",
+          "name": "Radiateur du séjour",
+          "presetId": "heating",
+          "placement": {"x": 9.45, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
+        },
+        {
+          "deviceId": "living-room-tv",
+          "entityId": "media_player.lg_webos_tv_oled55c66lb",
+          "name": "TV du séjour",
+          "presetId": "television",
+          "television": {
+            "wakeOnLanMac": "60:95:F8:5B:E7:CA",
+            "wakeOnLanBroadcastAddress": "192.168.1.255",
+            "spotifySource": "Spotify - Musique et podcasts"
+          },
+          "placement": {"x": 8.25, "y": 0.35, "z": 0.85, "rotationDeg": 180, "scale": 1}
+          }
+      ]},
       {"roomId": "room_wc", "entities": []},
-      {"roomId": "room_office", "entities": []}
+      {"roomId": "room_office", "entities": [
+        {
+          "deviceId": "office-radiator",
+          "name": "Radiateur du bureau",
+          "presetId": "heating",
+          "placement": {"x": 13.35, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
+        }
+      ]}
+    ],
+    "quickActions": [
+      {
+        "quickActionId": "tv-power-on",
+        "name": "Allumer la TV",
+        "icon": "media",
+        "deviceId": "living-room-tv",
+        "action": "turn_on",
+        "voicePhrases": ["allume la tele", "allumer la tele"],
+        "sortOrder": 0
+      },
+      {
+        "quickActionId": "robot-start",
+        "name": "Lancer le robot",
+        "icon": "vacuum",
+        "deviceId": "nono-robot",
+        "action": "start",
+        "voicePhrases": ["lance le robot", "demarre le robot", "lance l aspirateur"],
+        "sortOrder": 1
+      },
+      {
+        "quickActionId": "robot-stop",
+        "name": "Arrêter le robot",
+        "icon": "vacuum",
+        "deviceId": "nono-robot",
+        "action": "stop",
+        "voicePhrases": ["arrete le robot", "stoppe le robot", "arrete l aspirateur"],
+        "sortOrder": 2
+      },
+      {
+        "quickActionId": "robot-dock",
+        "name": "Retour à la base",
+        "icon": "vacuum",
+        "deviceId": "nono-robot",
+        "action": "return_to_base",
+        "voicePhrases": ["renvoie le robot a sa base", "retourne le robot a sa base"],
+        "sortOrder": 3
+      }
     ]
   },
   "assets": {

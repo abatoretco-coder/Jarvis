@@ -20,7 +20,7 @@ describe('server security wiring', () => {
     directories.push(directory);
     const env = loadEnv({
       REQUIRE_API_KEY: 'true',
-      API_KEY: 'local-test-api-key',
+      SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'server-test-service', token: 'server-test-service-token-0123456789', permissions: ['home'] }]),
       CONVERSATION_DB_PATH: join(directory, 'conversation.sqlite'),
     });
     initializeRuntime(env);

@@ -4,6 +4,7 @@ import type { AdminControlPlaneRepository } from '../admin/AdminControlPlaneRepo
 import type { Env } from '../env';
 import type { PermissionKey } from '../identity/IdentityRepository';
 import type { IdentityService } from '../identity/IdentityService';
+import { isStreamDeckPrincipal, isStreamDeckRouteAllowed } from '../identity/oidcClientPolicy';
 import { runWithRequestIdentityContext, setRequestPrincipal } from '../identity/requestIdentity';
 import {
   getAuthorizedServicePrincipal,
@@ -63,8 +64,26 @@ function requiredPermissions(url: string): PermissionKey[] {
   if (url.startsWith('/v1/dashboard')) return ['mail', 'calendar', 'todo'];
   if (url.startsWith('/v1/ha/')) return ['home'];
   if (url.startsWith('/v1/home')) return ['home'];
+  if (url.startsWith('/v1/pc-agent')) return ['music'];
   if (url.startsWith('/v1/context-cache') || url.startsWith('/v1/oauth/')) return ['admin'];
   return ['chat'];
+}
+
+function isDedicatedServiceRouteAllowed(serviceId: string | undefined, method: string, url: string): boolean {
+  const path = url.split('?', 1)[0] ?? url;
+  const normalizedMethod = method.toUpperCase();
+
+  if (serviceId === 'pc-agent') {
+    return normalizedMethod === 'POST'
+      && (path === '/v1/pc-agent/poll' || path === '/v1/pc-agent/commands/complete');
+  }
+  if (serviceId === 'home-assistant-pc') {
+    return normalizedMethod === 'POST' && path === '/v1/ingest';
+  }
+  if (serviceId === 'desktop-local') {
+    return false;
+  }
+  return true;
 }
 
 function accountError(status: string): string {
@@ -101,6 +120,9 @@ export function registerApiKeyHook(
 
     const servicePrincipal = getAuthorizedServicePrincipal(req, env);
     if (servicePrincipal) {
+      if (!isDedicatedServiceRouteAllowed(servicePrincipal.serviceId, req.method, req.url)) {
+        return reply.code(403).send({ error: 'service_route_forbidden' });
+      }
       if (req.url.startsWith('/v1/integrations')) {
         return reply.code(403).send({ error: 'human_account_required' });
       }
@@ -134,6 +156,9 @@ export function registerApiKeyHook(
         const principal = await identityService.authenticate(bearer);
         authenticatedUserId = principal.userId;
         setRequestPrincipal(req, principal);
+        if (isStreamDeckPrincipal(principal) && !isStreamDeckRouteAllowed(req.method, req.url)) {
+          return reply.code(403).send({ error: 'client_scope_forbidden' });
+        }
         if (req.url.startsWith('/v1/auth/')) {
           if (req.url.startsWith('/v1/auth/sessions')) identityService.assertActive(principal);
           return;

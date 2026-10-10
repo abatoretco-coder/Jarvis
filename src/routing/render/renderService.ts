@@ -135,7 +135,7 @@ export async function renderSingleExecutionResult(result: ActionExecutionResult,
       const action = result.actionKey.replace(/^spotify\./, '');
       return clamp(getSpotifyResponse(action), policy.maxChars);
     }
-    return clamp('Action effectuée.', policy.maxChars);
+    return clamp('Jarvis n’a reçu aucune confirmation exploitable pour cette action.', policy.maxChars);
   }
 
   if (policy.mode === 'deterministic_template') {
@@ -151,8 +151,7 @@ export async function renderSingleExecutionResult(result: ActionExecutionResult,
   const raw = normalizeText(result.rawText ?? '');
   if (raw) return clamp(raw, policy.maxChars);
 
-  // Last fallback if no source text is available
-  return clamp('Action effectuée.', policy.maxChars);
+  return clamp('Jarvis n’a reçu aucune confirmation exploitable pour cette action.', policy.maxChars);
 }
 
 export async function renderMultipleExecutionResults(results: ActionExecutionResult[], deps: RenderDeps): Promise<string> {

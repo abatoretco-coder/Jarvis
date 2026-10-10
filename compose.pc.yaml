@@ -28,6 +28,11 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test:
         - CMD
@@ -67,6 +72,11 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   jarvis-test:
     profiles: [test]
@@ -99,6 +109,11 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   identity:
     profiles: [pc-preprod-full]
@@ -117,3 +132,8 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

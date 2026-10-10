@@ -527,7 +527,8 @@ describe('Phase 5 Culture intelligence through /v1/ingest', () => {
       method: 'POST', url: '/v1/ingest',
       payload: { threadId: 'expired-reset', user_id: 'kept-profile', text: 'Je confirme.' },
     });
-    expect(expiredConfirmation.statusCode).toBe(503);
+    expect(expiredConfirmation.statusCode).toBe(409);
+    expect(expiredConfirmation.json()).toMatchObject({ error: 'no_pending_mutation' });
     const inspected = await app.inject({
       method: 'POST', url: '/v1/ingest',
       payload: { threadId: 'expired-reset', user_id: 'kept-profile', text: 'Qu’est-ce que tu sais de mes goûts ?' },

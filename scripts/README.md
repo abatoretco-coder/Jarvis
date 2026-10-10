@@ -8,5 +8,5 @@ Only scripts integrated via `package.json` are kept.
 - oauth-helper.ts: Used by `npm run oauth:*` helpers.
 - generate-api-keys.ts: Used by `npm run tokens:generate`.
 - preview-replies.ts: Used by `npm run preview:replies`.
-- archive-prod-snapshot.ps1: Used by `npm run archive:prod` to archive prod version, request/response, delay and thread history.
+- pc-runtime.ps1: Used by `npm run backup:pc` for authenticated, encrypted PC runtime backups.
 - evaluate-semantic-router.ts: Offline evaluation of Semantic Router against versioned routing fixtures. Used by `npm run eval:routing`.

@@ -350,7 +350,7 @@ export function getSpotifyResponse(action: string, params?: Record<string, any>)
     case 'volume_set':
       return SPOTIFY_VOLUME_TEMPLATE(params?.level || 50);
     default:
-      return 'Action effectuée.';
+      return 'Jarvis n’a reçu aucune confirmation exploitable pour cette action.';
   }
 }
 ```

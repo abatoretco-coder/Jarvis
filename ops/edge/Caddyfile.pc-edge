@@ -1,0 +1,43 @@
+{
+	admin off
+}
+
+{$CADDY_SITE_ADDRESS} {
+	tls {$CADDY_TLS_MODE}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	redir /app /app/ 308
+	handle /jarvis-logo-main.png {
+		root * /srv/jarvis-web
+		file_server
+	}
+	handle_path /app/* {
+		root * /srv/jarvis-web
+		try_files {path} /index.html
+		header {
+			Content-Security-Policy "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://i.scdn.co https://mosaic.scdn.co https://image-cdn-ak.spotifycdn.com; font-src 'self' data:; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:"
+			Referrer-Policy "no-referrer"
+			X-Content-Type-Options "nosniff"
+		}
+		file_server
+	}
+
+	# Native OIDC clients only need the realm and its static login resources.
+	# The Keycloak administration surface is deliberately not routed publicly.
+	@identity path /realms/jarvis /realms/jarvis/* /resources/*
+	handle @identity {
+		reverse_proxy identity-edge-origin:8080
+	}
+
+	handle {
+		reverse_proxy jarvis-edge-origin:8090 {
+			# Always overwrite a client-supplied value with the origin credential.
+			header_up X-Jarvis-Edge-Secret {$EDGE_PROXY_SECRET}
+		}
+	}
+}

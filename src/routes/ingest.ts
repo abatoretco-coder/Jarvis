@@ -68,11 +68,18 @@ import {
   trustedCultureUserIdSchema,
 } from '../culture/CultureProfileIdentity';
 import { CultureProfileRepository } from '../culture/CultureProfileRepository';
+import { executeCatalogHomeAction, executeCatalogHomeScene } from '../home/HomeActionExecutor';
 import {
   permissionForCapabilityAgent,
   permissionForRouteKey,
 } from '../identity/conversationAuthorization';
-import { getCurrentIntegrationConnectionId, getCurrentOwnerUserId, hasRequestPermission, setCurrentIntegrationConnectionId } from '../identity/requestIdentity';
+import {
+  getCurrentIntegrationConnectionId,
+  getCurrentOwnerUserId,
+  getRequestPrincipal,
+  hasRequestPermission,
+  setCurrentIntegrationConnectionId,
+} from '../identity/requestIdentity';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -119,7 +126,6 @@ import type { AppDeps } from '../server';
 import { ingestSpotifyRequestSchema, spotifyActionSchema } from '../spotify/contracts';
 import { planSpotifyActionFromTextWithOpenAi } from '../spotify/musicAgentPlanner';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
-import { SpotifyWebApiClient } from '../spotifyWebApi';
 import { formatParisTime } from '../time/parisTime';
 import {
   callTodoAgent,
@@ -455,6 +461,39 @@ async function synthesizeWeatherReplyWithOpenAi(params: {
     reasoningEffort: 'low',
   });
   params.log?.info({ model: params.model, content_len: content.length }, 'weather_openai_done');
+  return toSingleParagraphPlainText(content);
+}
+
+async function callGeneralOpenAi(params: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  maxOutputTokens: number;
+  timeoutMs: number;
+  userText: string;
+  recentMessages: Array<{ role: 'user' | 'assistant'; content: string }>;
+}): Promise<string> {
+  const content = await completeOpenAiResponse({
+    apiKey: params.apiKey,
+    baseUrl: params.baseUrl,
+    model: params.model,
+    capability: 'agent',
+    messages: [
+      {
+        role: 'system',
+        content:
+          "Tu es Jarvis, l'assistant personnel du foyer. Reponds en francais, de facon directe, concise et factuelle. N'invente jamais une information ou une action. Si une donnee ou un service indispensable manque, indique-le clairement.",
+      },
+      ...params.recentMessages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      { role: 'user', content: params.userText },
+    ],
+    maxOutputTokens: params.maxOutputTokens,
+    timeoutMs: params.timeoutMs,
+    reasoningEffort: 'low',
+  });
   return toSingleParagraphPlainText(content);
 }
 
@@ -1360,17 +1399,22 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ? deps.integrations?.resolveRefreshToken(ownerUserId, 'google-calendar', connectionId)
       : undefined;
     return {
-    GOOGLE_CLIENT_ID: deps.env.GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET: deps.env.GOOGLE_CLIENT_SECRET,
-    GOOGLE_REFRESH_TOKEN: ownerUserId ? personalRefreshToken ?? undefined : deps.env.GOOGLE_REFRESH_TOKEN,
-    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-    GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
-    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID: deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
-    GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL:
-      deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
-    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+      GOOGLE_CLIENT_ID: deps.env.GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET: deps.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_REFRESH_TOKEN: ownerUserId
+        ? (personalRefreshToken ?? undefined)
+        : deps.env.GOOGLE_REFRESH_TOKEN,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId
+        ? undefined
+        : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+      GOOGLE_CALENDAR_CALENDAR_IDS: deps.env.GOOGLE_CALENDAR_CALENDAR_IDS,
+      GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID:
+        deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_ID,
+      GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL:
+        deps.env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL,
+      OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+      OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+      OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
     };
   };
 
@@ -1720,65 +1764,68 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const buildMailEnv = () => {
     const ownerUserId = getCurrentOwnerUserId();
     const connectionId = getCurrentIntegrationConnectionId();
-    const token = ownerUserId ? deps.integrations?.resolveRefreshToken(ownerUserId, 'gmail', connectionId) : undefined;
+    const token = ownerUserId
+      ? deps.integrations?.resolveRefreshToken(ownerUserId, 'gmail', connectionId)
+      : undefined;
     return {
-    mailAccounts: ownerUserId
-      ? token && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET ? [{
-          label: 'gmail', provider: 'gmail' as const, clientId: deps.env.GOOGLE_CLIENT_ID,
-          clientSecret: deps.env.GOOGLE_CLIENT_SECRET, refreshToken: token,
-          credentialKey: `gmail:${ownerUserId}:${connectionId ?? 'personal'}`,
-          onRefreshToken: async (next: string) => deps.integrations?.rotateRefreshToken(ownerUserId, 'gmail', next, connectionId),
-        }] : []
-      : buildMailAccounts(deps.env),
-    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+      mailAccounts: ownerUserId
+        ? token && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
+          ? [
+              {
+                label: 'gmail',
+                provider: 'gmail' as const,
+                clientId: deps.env.GOOGLE_CLIENT_ID,
+                clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
+                refreshToken: token,
+                credentialKey: `gmail:${ownerUserId}:${connectionId ?? 'personal'}`,
+                onRefreshToken: async (next: string) =>
+                  deps.integrations?.rotateRefreshToken(ownerUserId, 'gmail', next, connectionId),
+              },
+            ]
+          : []
+        : buildMailAccounts(deps.env),
+      OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId
+        ? undefined
+        : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+      OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+      OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+      OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+      OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
     };
   };
 
   const buildTodoEnv = () => {
     const ownerUserId = getCurrentOwnerUserId();
     const connectionId = getCurrentIntegrationConnectionId();
-    const token = ownerUserId ? deps.integrations?.resolveRefreshToken(ownerUserId, 'microsoft-todo', connectionId) : undefined;
+    const token = ownerUserId
+      ? deps.integrations?.resolveRefreshToken(ownerUserId, 'microsoft-todo', connectionId)
+      : undefined;
     return {
-    MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
-    MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
-    MICROSOFT_REFRESH_TOKEN: ownerUserId ? token ?? undefined : deps.env.MICROSOFT_REFRESH_TOKEN,
-    MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
-    OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId ? undefined : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-    credentialKey: ownerUserId ? `todo:${ownerUserId}:${connectionId ?? 'personal'}` : undefined,
-    onRefreshToken: ownerUserId
-      ? async (next: string) => deps.integrations?.rotateRefreshToken(ownerUserId, 'microsoft-todo', next, connectionId)
-      : undefined,
-    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
+      MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
+      MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
+      MICROSOFT_REFRESH_TOKEN: ownerUserId
+        ? (token ?? undefined)
+        : deps.env.MICROSOFT_REFRESH_TOKEN,
+      MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
+      OAUTH_REFRESH_TOKEN_STORE_PATH: ownerUserId
+        ? undefined
+        : deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+      credentialKey: ownerUserId ? `todo:${ownerUserId}:${connectionId ?? 'personal'}` : undefined,
+      onRefreshToken: ownerUserId
+        ? async (next: string) =>
+            deps.integrations?.rotateRefreshToken(ownerUserId, 'microsoft-todo', next, connectionId)
+        : undefined,
+      OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
+      OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
+      OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
+      OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
     };
   };
 
-  const personalSpotifyClients = new Map<string, { token: string; client: SpotifyWebApiClient }>();
   const spotifyWebApi = () => {
     const ownerUserId = getCurrentOwnerUserId();
-    if (!ownerUserId) return deps.spotifyWebApi;
     const connectionId = getCurrentIntegrationConnectionId();
-    const token = deps.integrations?.resolveRefreshToken(ownerUserId, 'spotify', connectionId);
-    if (!token) {
-      return new SpotifyWebApiClient({ ...deps.env, SPOTIFY_WEBAPI_REFRESH_TOKEN: undefined }, app.log,
-        { persistTokenFile: false });
-    }
-    const cacheKey = `${ownerUserId}:${connectionId ?? 'personal'}`;
-    const existing = personalSpotifyClients.get(cacheKey);
-    if (existing?.token === token) return existing.client;
-    const client = new SpotifyWebApiClient({ ...deps.env, SPOTIFY_WEBAPI_REFRESH_TOKEN: token }, app.log, {
-      refreshToken: token,
-      persistTokenFile: false,
-      onRefreshToken: async (next) => deps.integrations?.rotateRefreshToken(ownerUserId, 'spotify', next, connectionId),
-    });
-    personalSpotifyClients.set(cacheKey, { token, client });
-    return client;
+    return deps.spotifyClients?.forUser(ownerUserId ?? undefined, connectionId) ?? deps.spotifyWebApi;
   };
 
   const executePendingMutation = async (mutation: PendingMutation): Promise<string> => {
@@ -2055,10 +2102,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       resultSetFollowup;
     if (
       (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN) &&
+      !deps.env.OPENAI_API_KEY &&
       !rawCultureRequest &&
       !pendingCultureConfirmation
     ) {
-      return reply.code(503).send({ error: 'ha_not_configured' });
+      return reply.code(503).send({ error: 'conversation_not_configured' });
     }
 
     try {
@@ -2239,6 +2287,154 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       );
     }
 
+    if (!activePendingMutation && text && isLikelyMutationConfirmationAttempt(text)) {
+      return reply.code(409).send({
+        error: 'no_pending_mutation',
+        message: "Il n'y a plus d'action en attente à confirmer.",
+      });
+    }
+
+    const voiceScene = deps.homeCatalog?.findSceneByVoicePhrase(text);
+    if (voiceScene) {
+      if (denyUnless('home')) return reply;
+      const result = await executeCatalogHomeScene({
+        catalog: deps.homeCatalog!,
+        scene: voiceScene,
+        ha: deps.ha,
+        principal: getRequestPrincipal(req),
+      });
+      const responseText =
+        result.status === 'success'
+          ? `${voiceScene.name}, c'est fait.`
+          : result.status === 'partial'
+            ? `${voiceScene.name} n'a été exécutée qu'en partie.`
+            : `Je n'ai pas pu lancer ${voiceScene.name}.`;
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'home',
+          source: 'scene',
+          routeKey: 'home.scene',
+          semanticDecision: result.status,
+        },
+      });
+    }
+
+    const voiceQuickAction = deps.homeCatalog?.findQuickActionByVoicePhrase(text);
+    if (voiceQuickAction) {
+      if (denyUnless('home')) return reply;
+      const result = await executeCatalogHomeAction({
+        catalog: deps.homeCatalog!,
+        ha: deps.ha,
+        principal: getRequestPrincipal(req),
+        command: voiceQuickAction,
+      });
+      const responseText = result.ok
+        ? `${voiceQuickAction.name}, c'est fait.`
+        : result.code === 'guest_action_forbidden'
+          ? "Ce compte n'est pas autorisé à lancer cette action."
+          : result.code === 'home_device_state_timeout'
+            ? "La télé ne s'est pas déclarée prête après la commande d'allumage."
+          : "Je n'ai pas pu exécuter cette action. Vérifie l'équipement et sa connexion.";
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      try {
+        const principal = getRequestPrincipal(req);
+        deps.adminAudit?.recordActorAudit({
+          actorKind: principal?.kind ?? 'system',
+          actorId:
+            principal?.kind === 'user'
+              ? principal.userId
+              : principal?.kind === 'service'
+                ? principal.serviceId
+                : 'legacy-local',
+          action: 'home.quick_action.voice_run',
+          targetType: 'home.quick_action',
+          targetId: voiceQuickAction.quickActionId,
+          outcome: result.ok ? 'success' : result.status === 403 ? 'denied' : 'failed',
+          correlationId: req.id,
+          metadata: result.ok
+            ? { domain: result.domain }
+            : { errorCode: result.code, ...(result.domain ? { domain: result.domain } : {}) },
+        });
+      } catch (error) {
+        app.log.error(
+          { errorCode: error instanceof Error ? error.message : 'home_audit_failed' },
+          'quick action voice audit persistence failed'
+        );
+      }
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'home',
+          source: 'quick_action',
+          routeKey: 'home.quick_action',
+          semanticDecision: result.ok ? 'executed' : 'execution_failed',
+        },
+      });
+    }
+
+    const deterministicHomeAction = deps.homeCatalog?.inferDeterministicVoiceAction?.(text);
+    if (deterministicHomeAction) {
+      if (denyUnless('home')) return reply;
+      const result = await executeCatalogHomeAction({
+        catalog: deps.homeCatalog!,
+        ha: deps.ha,
+        principal: getRequestPrincipal(req),
+        command: deterministicHomeAction,
+      });
+      const responseText = result.ok
+        ? `Volume de la télé réglé à ${deterministicHomeAction.value} %.`
+        : result.code === 'guest_action_forbidden'
+          ? "Ce compte n'est pas autorisé à piloter la télévision."
+          : "Je n'ai pas pu régler le volume de la télévision. Vérifie sa connexion.";
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      try {
+        const principal = getRequestPrincipal(req);
+        deps.adminAudit?.recordActorAudit({
+          actorKind: principal?.kind ?? 'system',
+          actorId:
+            principal?.kind === 'user'
+              ? principal.userId
+              : principal?.kind === 'service'
+                ? principal.serviceId
+                : 'legacy-local',
+          action: 'home.television.volume.voice_set',
+          targetType: 'home.device',
+          targetId: deterministicHomeAction.deviceId,
+          outcome: result.ok ? 'success' : result.status === 403 ? 'denied' : 'failed',
+          correlationId: req.id,
+          metadata: result.ok
+            ? { domain: result.domain, value: deterministicHomeAction.value }
+            : {
+                errorCode: result.code,
+                value: deterministicHomeAction.value,
+                ...(result.domain ? { domain: result.domain } : {}),
+              },
+        });
+      } catch (error) {
+        app.log.error(
+          { errorCode: error instanceof Error ? error.message : 'home_audit_failed' },
+          'deterministic home voice audit persistence failed'
+        );
+      }
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'home',
+          source: 'deterministic_home_action',
+          routeKey: 'home.television.set_volume',
+          semanticDecision: result.ok ? 'executed' : 'execution_failed',
+        },
+      });
+    }
+
     // Guard against truncated voice captures (e.g. "Démar...") that can trigger
     // wrong routing/action. Ask for a clean reformulation instead.
     if (isVoiceHubChannel && isLikelyTruncatedVoiceUtterance(text)) {
@@ -2259,9 +2455,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const preparedContextMatch = inferPreparedContextMatch(assistantInputText);
-    const personalContextDomain = preparedContextMatch
-      && ['spotify', 'mail', 'todo', 'calendar'].includes(preparedContextMatch.domain);
-    if (preparedContextMatch && deps.contextCache && !(getCurrentOwnerUserId() && personalContextDomain)) {
+    const personalContextDomain =
+      preparedContextMatch &&
+      ['spotify', 'mail', 'todo', 'calendar'].includes(preparedContextMatch.domain);
+    if (
+      preparedContextMatch &&
+      deps.contextCache &&
+      !(getCurrentOwnerUserId() && personalContextDomain)
+    ) {
       if (denyUnless(permissionForRouteKey(`${preparedContextMatch.domain}.read`))) return reply;
       try {
         let contextResult = await deps.contextCache.get(preparedContextMatch.domain);
@@ -2463,7 +2664,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const toDeterministicHaFailureMessage = (): string =>
-      'Je n’ai pas pu joindre l’agent Home Assistant pour cette requête. Réessaie dans quelques secondes ou formule une commande musique explicite (ex: « mets de la musique sur Spotify »).';
+      'Je n’ai pas pu joindre Home Assistant pour cette requête. Réessaie dans quelques secondes.';
 
     const inferredCulture = inferCultureRequest(assistantInputText);
     const cultureMemoryCommand = inferCultureMemoryCommand(assistantInputText);
@@ -3211,6 +3412,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     let responseDomain: VoiceResponseDomain = 'general';
     let searchSources: string[] = [];
     let gracefulFallback = false;
+    let generalResponseSource: 'openai_general' | 'openai_general_error' | 'ha_general' | undefined;
 
     const directConversationReply = simpleConversationalReply(assistantInputText);
     if (directConversationReply) {
@@ -3812,11 +4014,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                                 );
                               },
                               callMailAgent: async () => {
-                                return callMailAgent(
-                                  assistantInputText,
-                                  buildMailEnv(),
-                                  app.log
-                                );
+                                return callMailAgent(assistantInputText, buildMailEnv(), app.log);
                               },
                               callCalendarAgent: async () => {
                                 if (isCalendarMutationRouteKey(routeKey)) {
@@ -4433,11 +4631,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               continue;
             }
             tasks.push(
-              callMailAgent(
-                assistantInputText,
-                buildMailEnv(),
-                app.log
-              )
+              callMailAgent(assistantInputText, buildMailEnv(), app.log)
                 .then((txt): SpecializedResult | null => {
                   app.log.info(
                     { threadId, requestId, agent: haTarget.agentId },
@@ -4563,6 +4757,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         const taskResults = await Promise.all(tasks);
         const goodResults = taskResults.filter((r): r is SpecializedResult => r !== null);
+        const failedTaskCount = tasks.length - goodResults.length;
         const aggregatedSearchSources = Array.from(
           new Set(goodResults.flatMap((r) => (r.kind === 'ha_text' ? (r.sources ?? []) : [])))
         );
@@ -4576,13 +4771,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
           // Single Spotify-only result → preserve full Spotify response shape (with planner metadata)
           if (spotifyRes && goodResults.length === 1) {
+            const spotifyText =
+              failedTaskCount > 0
+                ? `Résultat partiel : ${failedTaskCount} service spécialisé n'a pas répondu. ${spotifyRes.tts}`
+                : spotifyRes.tts;
             const spotifyVoiceText = voiceEnabled
               ? formatVoiceResponse({
-                  text: spotifyRes.tts,
+                  text: spotifyText,
                   domain: 'spotify',
                   mode: voiceMode,
                 })
-              : spotifyRes.tts;
+              : spotifyText;
             void conversationService
               .persistMessages(effectiveThreadId, text, spotifyVoiceText)
               .then(async () => {
@@ -4645,8 +4844,16 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             app.log.info({ threadId, requestId, parts: parts.length }, 'multi_target_synthesized');
             responseDomain = 'general';
           }
+          if (failedTaskCount > 0) {
+            assistantText = `Résultat partiel : ${failedTaskCount} service spécialisé n'a pas répondu. ${assistantText}`;
+          }
+        } else if (tasks.length > 0) {
+          assistantText =
+            tasks.length === 1
+              ? "Le service spécialisé demandé n'a pas répondu. Aucune réponse générale de remplacement n'a été générée."
+              : "Les services spécialisés demandés n'ont pas répondu. Aucune réponse générale de remplacement n'a été générée.";
+          responseDomain = 'executor';
         }
-        // All tasks failed/OUT_OF_SCOPE → assistantText stays undefined → HA general fallback
       } else if (routerEnabled) {
         gracefulFallback = true;
       }
@@ -4655,27 +4862,54 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // ── General conversation fallback ────────────────────────────────────────
     if (assistantText === undefined) {
-      if (denyUnless('home')) return reply;
-      try {
-        assistantText = await conversationService.callHomeAssistantConversation(
-          applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
-          effectiveThreadId,
-          undefined,
-          generalAgentId
-        );
-        if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
+      if (deps.env.HA_BASE_URL && deps.env.HA_TOKEN) {
+        if (denyUnless('home')) return reply;
+        try {
+          assistantText = await conversationService.callHomeAssistantConversation(
+            applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+            effectiveThreadId,
+            undefined,
+            generalAgentId
+          );
+          if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
+            assistantText = toDeterministicHaFailureMessage();
+            gracefulFallback = true;
+          }
+          generalResponseSource = 'ha_general';
+          responseDomain = 'general';
+        } catch (err) {
+          app.log.warn(
+            { threadId, requestId, correlation_id: correlationId || undefined, err },
+            'ingest_home_assistant_call_failed'
+          );
           assistantText = toDeterministicHaFailureMessage();
+          generalResponseSource = 'ha_general';
           gracefulFallback = true;
+          responseDomain = 'general';
         }
-        responseDomain = 'general';
-      } catch (err) {
-        app.log.warn(
-          { threadId, requestId, correlation_id: correlationId || undefined, err },
-          'ingest_home_assistant_call_failed'
-        );
-        assistantText = toDeterministicHaFailureMessage();
-        responseDomain = 'general';
-        gracefulFallback = true;
+      } else {
+        if (denyUnless('chat')) return reply;
+        try {
+          assistantText = await callGeneralOpenAi({
+            apiKey: deps.env.OPENAI_API_KEY!,
+            baseUrl: deps.env.OPENAI_BASE_URL,
+            model: deps.env.OPENAI_MODEL_AGENT,
+            maxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
+            timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+            userText: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+            recentMessages: recentMessages_,
+          });
+          generalResponseSource = 'openai_general';
+          responseDomain = 'general';
+        } catch (err) {
+          app.log.warn(
+            { threadId, requestId, correlation_id: correlationId || undefined, err },
+            'ingest_openai_general_call_failed'
+          );
+          assistantText = 'Je ne peux pas joindre le service OpenAI pour le moment.';
+          generalResponseSource = 'openai_general_error';
+          responseDomain = 'general';
+        }
       }
     }
 
@@ -4729,9 +4963,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         kind: responseDomain,
         source: semanticActivatedRouteKey
           ? 'semantic_router'
-          : gracefulFallback
-            ? 'ha_general'
-            : 'router_or_specialized',
+          : generalResponseSource
+            ? generalResponseSource
+            : gracefulFallback
+              ? 'ha_general'
+              : 'router_or_specialized',
         ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
         semanticDecision:
           semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)

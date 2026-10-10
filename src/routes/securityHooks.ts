@@ -59,7 +59,11 @@ function rateBucket(url: string, env: Env): RateBucket {
     path.startsWith('/v1/admin/') ||
     path.startsWith('/v1/nas-status') ||
     path.startsWith('/v1/integrations') ||
-    path === '/v1/home/actions'
+    path === '/v1/home/actions' ||
+    (path.startsWith('/v1/home/devices/') && path.endsWith('/robot/clean')) ||
+    path.startsWith('/v1/home/quick-actions') ||
+    path.startsWith('/v1/home/scenes') ||
+    path.startsWith('/v1/home/routines')
   ) {
     return { name: 'sensitive', max: env.RATE_LIMIT_SENSITIVE_MAX };
   }

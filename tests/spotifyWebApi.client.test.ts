@@ -55,6 +55,35 @@ afterEach(() => {
 });
 
 describe('spotify web api client integration mocks', () => {
+  test('invalidates playback immediately when a post-command refresh is scheduled', async () => {
+    jest.useFakeTimers();
+    let playbackReads = 0;
+    (global as { fetch: typeof fetch }).fetch = (async (input: string | URL | Request) => {
+      const url = parseMockUrl(input);
+      if (url.hostname === 'accounts.spotify.local') {
+        return jsonResponse({ access_token: 'access-1', token_type: 'Bearer', expires_in: 3600 });
+      }
+      if (url.pathname === '/v1/me/player/currently-playing') {
+        playbackReads += 1;
+        return jsonResponse({ is_playing: true, item: { id: `track-${playbackReads}` } });
+      }
+      if (url.pathname === '/v1/me/player/devices') return jsonResponse({ devices: [] });
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    const client = new SpotifyWebApiClient(makeEnv());
+    await client.getNowPlaying();
+    await client.getNowPlaying();
+    expect(playbackReads).toBe(1);
+
+    client.scheduleSituationRefresh(60_000);
+    const refreshed = await client.getNowPlaying();
+    expect(playbackReads).toBe(2);
+    expect(refreshed.ok && refreshed.data.item).toMatchObject({ id: 'track-2' });
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
   test('searchTopTrackUri falls back from strict query to relaxed query and returns best uri', async () => {
     const env = makeEnv();
     const capturedQueries: string[] = [];
@@ -146,6 +175,33 @@ describe('spotify web api client integration mocks', () => {
     }
   });
 
+  test('reads playlist counts from the 2026 items field', async () => {
+    const env = makeEnv();
+    (global as { fetch: typeof fetch }).fetch = (async (input: string | URL) => {
+      const url = parseMockUrl(input as string | URL | Request);
+      if (url.hostname === 'accounts.spotify.local' && url.pathname === '/api/token') {
+        return jsonResponse({ access_token: 'access-items', token_type: 'Bearer', expires_in: 3600 });
+      }
+      if (url.hostname === 'api.spotify.local' && url.pathname === '/v1/me/playlists') {
+        return jsonResponse({
+          items: [{
+            id: 'pl-items',
+            name: 'Maison',
+            uri: 'spotify:playlist:maison',
+            items: { total: 42 },
+          }],
+          next: null,
+        });
+      }
+      return jsonResponse({ error: 'unexpected_call', url: url.toString() }, 500);
+    }) as unknown as typeof fetch;
+
+    const client = new SpotifyWebApiClient(env);
+    const result = await client.listUserPlaylistsPublic(5);
+
+    expect(result).toMatchObject({ ok: true, playlists: [{ name: 'Maison', trackCount: 42 }] });
+  });
+
   test('transferPlayback resolves alias phone using fuzzy device name matching', async () => {
     const env = makeEnv({ SPOTIFY_WEBAPI_DEVICE_ALIAS_PHONE_NAME: 'Galaxy S22' });
     const client = new SpotifyWebApiClient(env);
@@ -185,6 +241,61 @@ describe('spotify web api client integration mocks', () => {
     expect(transferBodies).toHaveLength(1);
     expect(transferBodies[0].device_ids?.[0]).toBe('dev-phone');
     expect(transferBodies[0].play).toBe(false);
+  });
+
+  test('play resolves the salon alias to the LG television', async () => {
+    const env = makeEnv({ SPOTIFY_WEBAPI_DEVICE_ALIAS_SALON_NAME: 'LG TV' });
+    const client = new SpotifyWebApiClient(env);
+    const playCalls: string[] = [];
+    let isDeviceActive = false;
+
+    (client as unknown as { request: (method: string, path: string, opts?: { query?: Record<string, string | undefined>; json?: unknown }) => Promise<unknown> }).request = async (method, path, opts) => {
+      if (path === '/v1/me/player/devices') {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            devices: [
+              { id: 'dev-lg-tv', name: '[LG] webOS TV OLED55C66LB', type: 'TV', is_active: isDeviceActive },
+              { id: 'dev-pc', name: 'jarvis-vm400', type: 'Computer', is_active: false },
+            ],
+          },
+        };
+      }
+      if (path === '/v1/me/player' && method.toUpperCase() === 'PUT') {
+        isDeviceActive = true;
+        return { ok: true, status: 204 };
+      }
+      if (path === '/v1/me/player/play' && method.toUpperCase() === 'PUT') {
+        playCalls.push(opts?.query?.device_id ?? '');
+        return { ok: true, status: 204 };
+      }
+      return { ok: false, error: 'unexpected_call', details: { method, path } };
+    };
+
+    const result = await client.play('alias:salon');
+
+    expect(result.ok).toBe(true);
+    expect(playCalls).toEqual(['dev-lg-tv']);
+  });
+
+  test('fails explicitly instead of controlling the currently active device when the configured target is missing', async () => {
+    const client = new SpotifyWebApiClient(makeEnv({ SPOTIFY_WEBAPI_DEVICE_NAME: 'Jarvis Speaker' }));
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (_method, path) => {
+      if (path === '/v1/me/player/devices') {
+        return {
+          ok: true,
+          status: 200,
+          data: { devices: [{ id: 'phone', name: 'My Phone', type: 'Smartphone', is_active: true }] },
+        };
+      }
+      return { ok: false, error: 'unexpected_call' };
+    };
+
+    await expect(client.transferPlayback()).resolves.toMatchObject({
+      ok: false,
+      error: 'spotify_device_not_available',
+    });
   });
 
   test('play resolves preferred device name fuzzily and targets discovered device id', async () => {
@@ -229,5 +340,52 @@ describe('spotify web api client integration mocks', () => {
       throw new Error(`play failed: ${JSON.stringify(result)} | calls=${JSON.stringify(requestCalls)}`);
     }
     expect(playCalls).toContain('dev-computer');
+  });
+
+  test('uses the 2026 generic library endpoints with URI query parameters', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: Array<{ method: string; path: string; query?: Record<string, string | undefined> }> = [];
+    (client as unknown as { request: (method: string, path: string, opts?: { query?: Record<string, string | undefined> }) => Promise<unknown> }).request = async (method, path, opts) => {
+      calls.push({ method, path, query: opts?.query });
+      if (method === 'GET') return { ok: true, status: 200, data: [true] };
+      return { ok: true, status: 204 };
+    };
+
+    await expect(client.saveLibraryUri('spotify:track:abc123')).resolves.toMatchObject({ ok: true });
+    await expect(client.removeLibraryUri('spotify:track:abc123')).resolves.toMatchObject({ ok: true });
+    await expect(client.libraryContainsUri('spotify:track:abc123')).resolves.toEqual({ ok: true, saved: true });
+
+    expect(calls).toEqual([
+      { method: 'PUT', path: '/v1/me/library', query: { uris: 'spotify:track:abc123' } },
+      { method: 'DELETE', path: '/v1/me/library', query: { uris: 'spotify:track:abc123' } },
+      { method: 'GET', path: '/v1/me/library/contains', query: { uris: 'spotify:track:abc123' } },
+    ]);
+  });
+
+  test('caps catalog search to the current development-mode maximum', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    let query: Record<string, string | undefined> | undefined;
+    (client as unknown as { request: (method: string, path: string, opts?: { query?: Record<string, string | undefined> }) => Promise<unknown> }).request = async (_method, _path, opts) => {
+      query = opts?.query;
+      return { ok: true, status: 200, data: { tracks: { items: [] } } };
+    };
+
+    await expect(client.searchCatalog('track', 'Daft Punk', 50)).resolves.toEqual({ ok: true, items: [] });
+    expect(query).toEqual({ q: 'Daft Punk', type: 'track', limit: '10' });
+  });
+
+  test('uses the 2026 playlist items endpoint and unwraps item payloads', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    let calledPath = '';
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (_method, path) => {
+      calledPath = path;
+      return { ok: true, status: 200, data: { total: 1, items: [{ item: { id: 'track-1', uri: 'spotify:track:track1' } }] } };
+    };
+    await expect(client.getPlaylistItemsPublic('abc123')).resolves.toEqual({
+      ok: true,
+      total: 1,
+      items: [{ id: 'track-1', uri: 'spotify:track:track1' }],
+    });
+    expect(calledPath).toBe('/v1/playlists/abc123/items');
   });
 });

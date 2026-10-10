@@ -54,7 +54,7 @@ const envSchema = z
     HSTS_MAX_AGE_SECONDS: numberFromEnv.pipe(z.number().min(300).max(63072000)).default(31536000),
 
     REQUIRE_API_KEY: booleanFromEnv.default(true),
-    ALLOW_LEGACY_API_KEYS: booleanFromEnv.default(true),
+    ALLOW_LEGACY_API_KEYS: booleanFromEnv.default(false),
     API_KEY: optionalNonEmptyString,
     API_KEYS: optionalNonEmptyString,
     SERVICE_API_KEYS_JSON: optionalNonEmptyString,
@@ -79,6 +79,9 @@ const envSchema = z
     OIDC_MAX_TOKEN_BYTES: numberFromEnv.pipe(z.number().min(1024).max(32768)).default(8192),
     OIDC_BOOTSTRAP_OWNER_SUBJECT: optionalNonEmptyString,
     OIDC_ALLOW_INSECURE_HTTP: booleanFromEnv.default(false),
+    // The public issuer remains HTTPS. This narrowly permits JWKS retrieval on
+    // the isolated Docker edge network, never from a client-controlled host.
+    OIDC_JWKS_ALLOW_INTERNAL_HTTP: booleanFromEnv.default(false),
 
     // Home Assistant connection (conversation/services)
     HA_BASE_URL: z.string().url().optional(),
@@ -405,14 +408,15 @@ const envSchema = z
     HA_TOKEN: value.HA_TOKEN ?? value.HA_LONG_LIVED_TOKEN,
   }))
   .superRefine((val, ctx) => {
-    const hasSingle = Boolean(val.API_KEY?.trim());
-    const hasMulti = Boolean(
-      val.API_KEYS?.split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0).length
-    );
+    if (val.ALLOW_LEGACY_API_KEYS || val.API_KEY || val.API_KEYS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ALLOW_LEGACY_API_KEYS'],
+        message: 'legacy global API keys are retired; use SERVICE_API_KEYS_JSON',
+      });
+    }
 
-    if (val.REQUIRE_API_KEY && !(val.ALLOW_LEGACY_API_KEYS && (hasSingle || hasMulti))) {
+    if (val.REQUIRE_API_KEY) {
       let hasScoped = false;
       if (val.SERVICE_API_KEYS_JSON) {
         try {
@@ -425,8 +429,8 @@ const envSchema = z
       if (!hasScoped && !val.OIDC_ENABLED) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['API_KEY'],
-          message: 'OIDC or an enabled API-key credential is required when REQUIRE_API_KEY=true',
+          path: ['SERVICE_API_KEYS_JSON'],
+          message: 'OIDC or a scoped service credential is required when REQUIRE_API_KEY=true',
         });
       }
     }
@@ -610,10 +614,17 @@ const envSchema = z
         url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
       const explicitlyAllowedLocalHttp =
         url.protocol === 'http:' && val.OIDC_ALLOW_INSECURE_HTTP && !val.PUBLIC_EDGE_ENABLED;
+      const explicitlyAllowedInternalJwks =
+        name === 'OIDC_JWKS_URL' &&
+        url.protocol === 'http:' &&
+        url.hostname === 'identity-edge-origin' &&
+        url.port === '8080' &&
+        val.OIDC_JWKS_ALLOW_INTERNAL_HTTP;
       if (
         url.protocol !== 'https:' &&
         !(url.protocol === 'http:' && loopback) &&
-        !explicitlyAllowedLocalHttp
+        !explicitlyAllowedLocalHttp &&
+        !explicitlyAllowedInternalJwks
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

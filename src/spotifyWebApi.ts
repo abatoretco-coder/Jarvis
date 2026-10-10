@@ -175,7 +175,7 @@ function deviceNameMatchScore(candidateName: string, requestedName: string): num
 
 function parseSpotifyUri(uri: string): { type: string; id: string } | undefined {
   const normalized = String(uri ?? '').trim();
-  const match = normalized.match(/^spotify:(track|album|artist|playlist|show|episode):([a-zA-Z0-9]+)$/i);
+  const match = normalized.match(/^spotify:(track|album|artist|playlist|show|episode|audiobook|user):([a-zA-Z0-9]+)$/i);
   if (!match) return undefined;
   return {
     type: String(match[1]).toLowerCase(),
@@ -194,6 +194,9 @@ type SpotifyPlaylist = {
   id: string;
   name: string;
   uri: string;
+  imageUrl?: string;
+  trackCount?: number;
+  ownerName?: string;
 };
 
 const MISSING_TARGET_DEVICE_SENTINEL = '__missing_target_device__';
@@ -224,6 +227,7 @@ export class SpotifyWebApiClient {
   private cachedNowPlaying?: { result: Awaited<ReturnType<SpotifyWebApiClient['getNowPlaying']>>; fetchedAtMs: number };
   private cachedUserPlaylists?: { playlists: SpotifyPlaylist[]; fetchedAtMs: number };
   private readonly shortCacheTtlMs = 65_000;
+  private readonly nowPlayingCacheTtlMs = 2_500;
   private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
   private readonly persistTokenFile: boolean;
@@ -602,6 +606,9 @@ export class SpotifyWebApiClient {
   }
 
   private async request(method: string, path: string, opts?: { query?: Record<string, string | undefined>; json?: unknown }): Promise<SpotifyWebApiResult> {
+    if (Object.values(opts?.query ?? {}).includes(MISSING_TARGET_DEVICE_SENTINEL)) {
+      return { ok: false, status: 404, error: 'spotify_device_not_available' };
+    }
     const tokenRes = await this.getAccessToken();
     if (!tokenRes.ok) return { ok: false, error: tokenRes.error, status: tokenRes.status, details: tokenRes.details };
 
@@ -949,20 +956,6 @@ export class SpotifyWebApiClient {
 
     if (selected) return selected;
 
-    // No explicit target: prefer currently active Spotify device first.
-    const devicesRes = await this.listDevices();
-    if (devicesRes.ok) {
-      const active = devicesRes.devices.find((d) => d.isActive);
-      if (active) {
-        this.log('info', 'device_selected_from_active_primary', {
-          resolvedDeviceId: active.id,
-          resolvedDeviceName: active.name,
-          preferredDeviceName: preferredName,
-        });
-        return active.id;
-      }
-    }
-
     if (cachedPreferred) {
       this.log('info', 'device_selected_from_cached_name_match', {
         preferredDeviceName: preferredName,
@@ -977,8 +970,8 @@ export class SpotifyWebApiClient {
       return discovered.id;
     }
 
-    this.log('warn', 'device_fallback_to_current_context', { preferredDeviceName: preferredName });
-    return '';
+    this.log('warn', 'target_device_not_available', { preferredDeviceName: preferredName });
+    return MISSING_TARGET_DEVICE_SENTINEL;
   }
 
   private getDiscoveredPreferredDeviceId(preferredName: string): string | undefined {
@@ -1472,7 +1465,23 @@ export class SpotifyWebApiClient {
         const name = String(rec?.name ?? '').trim();
         const uri = String(rec?.uri ?? '').trim();
         if (!id || !name || !/^spotify:playlist:/i.test(uri)) continue;
-        playlists.push({ id, name, uri });
+        const images = Array.isArray(rec?.images) ? rec.images : [];
+        const firstImage = asRecord(images[0]);
+        // Development Mode apps migrated in 2026 receive `items`; older and
+        // extended-quota responses may still expose `tracks`.
+        const playlistItems = asRecord(rec?.items) ?? asRecord(rec?.tracks);
+        const owner = asRecord(rec?.owner);
+        const imageUrl = typeof firstImage?.url === 'string' ? firstImage.url.trim() : '';
+        const trackCount = typeof playlistItems?.total === 'number' ? playlistItems.total : undefined;
+        const ownerName = typeof owner?.display_name === 'string' ? owner.display_name.trim() : '';
+        playlists.push({
+          id,
+          name,
+          uri,
+          ...(imageUrl ? { imageUrl } : {}),
+          ...(trackCount !== undefined ? { trackCount } : {}),
+          ...(ownerName ? { ownerName } : {}),
+        });
       }
 
       const next = typeof data?.next === 'string' ? data.next.trim() : '';
@@ -1521,6 +1530,13 @@ export class SpotifyWebApiClient {
   private refreshUserPlaylistCache(): void {
     if (!this.isConfigured()) return;
     void this.listCurrentUserPlaylists(50, { forceRefresh: true, allowStaleOnError: true });
+  }
+
+  async listUserPlaylistsPublic(limit = 50): Promise<
+    | { ok: true; playlists: SpotifyPlaylist[] }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    return this.listCurrentUserPlaylists(limit, { allowStaleOnError: true });
   }
 
   async searchUserPlaylistContextUri(query: string): Promise<
@@ -1647,8 +1663,14 @@ export class SpotifyWebApiClient {
   }
 
   scheduleSituationRefresh(delayMs = 600): void {
-    const t = setTimeout(() => { void this.fetchAndCacheSituation(); }, delayMs);
-    t.unref?.();
+    // A player mutation is asynchronous on Spotify Connect. Drop the old value
+    // immediately, then sample the situation more than once so a slow TV/app
+    // activation cannot leave the previous track cached for a full TTL.
+    this.invalidateSituationCache();
+    for (const offsetMs of [delayMs, delayMs + 1_200, delayMs + 4_000]) {
+      const timer = setTimeout(() => { void this.fetchAndCacheSituation(); }, offsetMs);
+      timer.unref?.();
+    }
   }
 
   private async fetchAndCacheSituation(): Promise<void> {
@@ -1658,8 +1680,12 @@ export class SpotifyWebApiClient {
         this.listDevices(),
         this.fetchNowPlayingRaw(),
       ]);
-      this.cachedDeviceList = { result: devicesResult, fetchedAtMs };
-      this.cachedNowPlaying = { result: nowPlayingResult, fetchedAtMs };
+      if (!this.cachedDeviceList || fetchedAtMs >= this.cachedDeviceList.fetchedAtMs) {
+        this.cachedDeviceList = { result: devicesResult, fetchedAtMs };
+      }
+      if (!this.cachedNowPlaying || fetchedAtMs >= this.cachedNowPlaying.fetchedAtMs) {
+        this.cachedNowPlaying = { result: nowPlayingResult, fetchedAtMs };
+      }
     } catch {
       // Ignore errors in background prefetch
     }
@@ -1676,12 +1702,12 @@ export class SpotifyWebApiClient {
     return { ok: true, data: data ?? {} };
   }
 
-  async listDevicesPublic(): Promise<
+  async listDevicesPublic(options?: { forceRefresh?: boolean }): Promise<
     | { ok: true; devices: Array<{ id: string; name: string; type?: string; isActive: boolean }> }
     | { ok: false; error: string; status?: number; details?: unknown }
   > {
     const now = Date.now();
-    if (this.cachedDeviceList && now - this.cachedDeviceList.fetchedAtMs < this.shortCacheTtlMs) {
+    if (!options?.forceRefresh && this.cachedDeviceList && now - this.cachedDeviceList.fetchedAtMs < this.shortCacheTtlMs) {
       return this.cachedDeviceList.result;
     }
     const result = await this.listDevices();
@@ -1694,7 +1720,7 @@ export class SpotifyWebApiClient {
     | { ok: false; error: string; status?: number; details?: unknown }
   > {
     const now = Date.now();
-    if (this.cachedNowPlaying && now - this.cachedNowPlaying.fetchedAtMs < this.shortCacheTtlMs) {
+    if (this.cachedNowPlaying && now - this.cachedNowPlaying.fetchedAtMs < this.nowPlayingCacheTtlMs) {
       return this.cachedNowPlaying.result;
     }
     const result = await this.fetchNowPlayingRaw();
@@ -1733,11 +1759,7 @@ export class SpotifyWebApiClient {
       id = current.trackId;
     }
 
-    return this.request('PUT', '/v1/me/tracks', {
-      query: {
-        ids: id,
-      },
-    });
+    return this.saveLibraryUri(`spotify:track:${id}`);
   }
 
   async unlikeTrack(trackId?: string): Promise<SpotifyWebApiResult> {
@@ -1748,11 +1770,75 @@ export class SpotifyWebApiClient {
       id = current.trackId;
     }
 
-    return this.request('DELETE', '/v1/me/tracks', {
-      query: {
-        ids: id,
-      },
+    return this.removeLibraryUri(`spotify:track:${id}`);
+  }
+
+  async saveLibraryUri(uri: string): Promise<SpotifyWebApiResult> {
+    const normalized = String(uri ?? '').trim();
+    if (!parseSpotifyUri(normalized)) return { ok: false, error: 'spotify_library_invalid_uri' };
+    return this.request('PUT', '/v1/me/library', { query: { uris: normalized } });
+  }
+
+  async removeLibraryUri(uri: string): Promise<SpotifyWebApiResult> {
+    const normalized = String(uri ?? '').trim();
+    if (!parseSpotifyUri(normalized)) return { ok: false, error: 'spotify_library_invalid_uri' };
+    return this.request('DELETE', '/v1/me/library', { query: { uris: normalized } });
+  }
+
+  async libraryContainsUri(uri: string): Promise<
+    | { ok: true; saved: boolean }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    const normalized = String(uri ?? '').trim();
+    if (!parseSpotifyUri(normalized)) return { ok: false, error: 'spotify_library_invalid_uri' };
+    const result = await this.request('GET', '/v1/me/library/contains', { query: { uris: normalized } });
+    if (!result.ok) return result;
+    const values = Array.isArray(result.data) ? result.data : [];
+    return { ok: true, saved: values[0] === true };
+  }
+
+  async getQueuePublic(): Promise<
+    | { ok: true; data: Record<string, unknown> }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    const result = await this.request('GET', '/v1/me/player/queue');
+    if (!result.ok) return result;
+    return { ok: true, data: asRecord(result.data) ?? {} };
+  }
+
+  async getRecentlyPlayedPublic(limit = 20): Promise<
+    | { ok: true; items: Array<Record<string, unknown>> }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    const result = await this.request('GET', '/v1/me/player/recently-played', {
+      query: { limit: String(Math.max(1, Math.min(50, Math.round(limit || 20)))) },
     });
+    if (!result.ok) return result;
+    const data = asRecord(result.data);
+    const items = Array.isArray(data?.items)
+      ? data.items.map(asRecord).filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    return { ok: true, items };
+  }
+
+  async getPlaylistItemsPublic(playlistId: string, limit = 50): Promise<
+    | { ok: true; items: Array<Record<string, unknown>>; total?: number }
+    | { ok: false; error: string; status?: number; details?: unknown }
+  > {
+    const id = String(playlistId ?? '').trim();
+    if (!/^[A-Za-z0-9]+$/u.test(id)) return { ok: false, error: 'spotify_playlist_id_invalid', status: 400 };
+    const result = await this.request('GET', `/v1/playlists/${encodeURIComponent(id)}/items`, {
+      query: { limit: String(Math.max(1, Math.min(50, Math.round(limit || 50)))), offset: '0' },
+    });
+    if (!result.ok) return result;
+    const data = asRecord(result.data);
+    const items = Array.isArray(data?.items)
+      ? data.items
+          .map(asRecord)
+          .map((entry) => asRecord(entry?.item) ?? asRecord(entry?.track))
+          .filter((item): item is Record<string, unknown> => Boolean(item))
+      : [];
+    return { ok: true, items, ...(typeof data?.total === 'number' ? { total: data.total } : {}) };
   }
 
   async addUrisToPlaylist(playlistId: string, uris: string[]): Promise<SpotifyWebApiResult> {
@@ -1765,7 +1851,7 @@ export class SpotifyWebApiClient {
 
     if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris' };
 
-    return this.request('POST', `/v1/playlists/${encodeURIComponent(cleanPlaylistId)}/tracks`, {
+    return this.request('POST', `/v1/playlists/${encodeURIComponent(cleanPlaylistId)}/items`, {
       json: { uris: cleanUris },
     });
   }
@@ -1784,7 +1870,7 @@ export class SpotifyWebApiClient {
       query: {
         q,
         type: cleanType,
-        limit: String(Math.max(1, Math.min(20, Math.round(limit || 5)))),
+        limit: String(Math.max(1, Math.min(10, Math.round(limit || 5)))),
       },
     });
 
@@ -1805,12 +1891,20 @@ export class SpotifyWebApiClient {
               .map((a) => String(a?.name ?? '').trim())
               .filter(Boolean)
               .join(', ') || undefined;
+            const album = asRecord(item.album);
+            const images = Array.isArray(album?.images) ? album.images : Array.isArray(item.images) ? item.images : [];
+            const image = asRecord(images[0]);
+            const firstArtist = Array.isArray(item.artists) ? asRecord(item.artists[0]) : undefined;
+            const externalUrls = asRecord(item.external_urls);
             return {
               id: item.id,
               name: item.name,
               uri: item.uri,
               type: cleanType,
               ...(artists_string ? { artists_string } : {}),
+              ...(typeof firstArtist?.uri === 'string' ? { artist_uri: firstArtist.uri } : {}),
+              ...(typeof image?.url === 'string' ? { image_url: image.url } : {}),
+              ...(typeof externalUrls?.spotify === 'string' ? { spotify_url: externalUrls.spotify } : {}),
             };
           })
       : [];

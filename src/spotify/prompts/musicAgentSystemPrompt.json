@@ -33,7 +33,7 @@
     {
       "id": "devices",
       "lines": [
-        "DEVICES: jarvis|pc|ordinateur|vm400=>pc; salon|enceinte|haut-parleur=>salon; tel|mobile|téléphone=>phone.",
+        "DEVICES: jarvis|pc|ordinateur|vm400=>pc; salon|séjour|télévision|TV|enceinte|haut-parleur=>salon (la TV LG est l'enceinte du salon); tel|mobile|téléphone=>phone.",
         "slots.device autorisé seulement pour transfer|search_and_play."
       ]
     },

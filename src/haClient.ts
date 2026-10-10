@@ -17,6 +17,8 @@ export type HomeAssistantConversationProcessInput = {
   agentId?: string;
 };
 
+export type HomeAssistantAutomationConfig = Record<string, unknown>;
+
 export class HomeAssistantClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -153,6 +155,83 @@ export class HomeAssistantClient {
         throw new Error(`Home Assistant getState failed: ${resp.status}: ${details}`);
       }
       return data;
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`, { cause: err });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async getHistory(entityId: string, start: Date, end: Date): Promise<unknown> {
+    const query = new URLSearchParams({
+      filter_entity_id: entityId,
+      end_time: end.toISOString(),
+      minimal_response: '',
+      no_attributes: '',
+    });
+    const url = `${this.baseUrl}/api/history/period/${encodeURIComponent(start.toISOString())}?${query.toString()}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        headers: { authorization: `Bearer ${this.token}`, accept: 'application/json' },
+        signal: controller.signal,
+      });
+      const data = await this.readResponseBody(resp);
+      if (!resp.ok) {
+        const details = typeof data === 'string' ? data : JSON.stringify(data);
+        throw new Error(`Home Assistant getHistory failed: ${resp.status}: ${details}`);
+      }
+      return data;
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new Error(`Home Assistant request failed: ${msg}`, { cause: err });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async getAutomationConfig(automationId: string): Promise<HomeAssistantAutomationConfig> {
+    return this.requestAutomationConfig('GET', automationId);
+  }
+
+  async saveAutomationConfig(
+    automationId: string,
+    config: HomeAssistantAutomationConfig
+  ): Promise<void> {
+    await this.requestAutomationConfig('POST', automationId, config);
+  }
+
+  async deleteAutomationConfig(automationId: string): Promise<void> {
+    await this.requestAutomationConfig('DELETE', automationId);
+  }
+
+  private async requestAutomationConfig(
+    method: 'GET' | 'POST' | 'DELETE',
+    automationId: string,
+    body?: HomeAssistantAutomationConfig
+  ): Promise<HomeAssistantAutomationConfig> {
+    const url = `${this.baseUrl}/api/config/automation/config/${encodeURIComponent(automationId)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          ...(body ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+        signal: controller.signal,
+      });
+      const data = await this.readResponseBody(resp);
+      if (!resp.ok) {
+        throw new Error(`Home Assistant automation request failed: ${resp.status}`);
+      }
+      return data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as HomeAssistantAutomationConfig)
+        : {};
     } catch (err) {
       const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       throw new Error(`Home Assistant request failed: ${msg}`, { cause: err });

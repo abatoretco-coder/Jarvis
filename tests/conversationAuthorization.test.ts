@@ -38,13 +38,13 @@ describe('conversation capability authorization', () => {
     expect(hasRequestPermission(request, 'home')).toBe(false);
   });
 
-  test('keeps auth-disabled and legacy unscoped deployments compatible', () => {
+  test('keeps explicit auth-disabled mode open but rejects unscoped service principals', () => {
     const unauthenticatedRequest = {} as FastifyRequest;
     expect(hasRequestPermission(unauthenticatedRequest, 'admin')).toBe(true);
 
     const legacyRequest = {} as FastifyRequest;
-    setRequestPrincipal(legacyRequest, { kind: 'service', serviceId: 'legacy' });
-    expect(hasRequestPermission(legacyRequest, 'admin')).toBe(true);
+    setRequestPrincipal(legacyRequest, { kind: 'service', serviceId: 'legacy' } as never);
+    expect(hasRequestPermission(legacyRequest, 'admin')).toBe(false);
   });
 
   test('requires an active user and the selected permission', () => {

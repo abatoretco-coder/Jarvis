@@ -112,7 +112,7 @@ Rules:
 4. If action policy says service_text_passthrough and rawText exists -> passthrough.
 5. If action policy says llm_domain_rephrase -> run domain prompt.
 6. If multiple successful action results -> llm_multi_synthesis.
-7. Final fallback -> deterministic generic fallback.
+7. If no confirmed text remains -> explicit unavailable response (never a fabricated success).
 
 ---
 

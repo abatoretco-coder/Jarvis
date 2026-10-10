@@ -48,11 +48,12 @@ describe('OIDC token verifier', () => {
   }
 
   test('verifies signature and required identity claims', async () => {
-    await expect(verifier.verify(await token())).resolves.toMatchObject({
+    await expect(verifier.verify(await token({ azp: 'jarvis-streamdeck' }))).resolves.toMatchObject({
       issuer,
       subject: 'subject-1',
       email: 'person@example.test',
       providerSessionId: `${issuer}\u001fdevice-session`,
+      clientId: 'jarvis-streamdeck',
     });
   });
 

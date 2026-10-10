@@ -108,7 +108,7 @@ export const SPOTIFY_CLEAR_QUEUE_RESPONSES = [
  */
 export function getSpotifyResponse(action: string, params?: Record<string, string | undefined>): string {
   const randomize = (arr: string[]): string => {
-    return arr.length > 0 ? arr[Math.floor(Math.random() * arr.length)] : 'Action effectuée.';
+    return arr.length > 0 ? arr[Math.floor(Math.random() * arr.length)] : 'Confirmation Spotify indisponible.';
   };
 
   switch (action) {
@@ -133,6 +133,6 @@ export function getSpotifyResponse(action: string, params?: Record<string, strin
     case 'clear_queue':
       return randomize(SPOTIFY_CLEAR_QUEUE_RESPONSES);
     default:
-      return 'Action effectuée.';
+      return 'Confirmation Spotify indisponible.';
   }
 }

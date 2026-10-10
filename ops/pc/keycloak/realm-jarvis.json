@@ -2,14 +2,30 @@
   "realm": "jarvis",
   "enabled": true,
   "displayName": "Jarvis Home",
-  "registrationAllowed": true,
+  "registrationAllowed": false,
   "registrationEmailAsUsername": true,
-  "rememberMe": true,
+  "rememberMe": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
-  "verifyEmail": false,
-  "resetPasswordAllowed": true,
+  "verifyEmail": true,
+  "resetPasswordAllowed": false,
+  "passwordPolicy": "length(14) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername(undefined)",
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "minimumQuickLoginWaitSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "maxDeltaTimeSeconds": 43200,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "offlineSessionIdleTimeout": 604800,
+  "offlineSessionMaxLifespanEnabled": true,
+  "offlineSessionMaxLifespan": 2592000,
   "eventsEnabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
   "enabledEventTypes": [
     "LOGIN",
     "LOGIN_ERROR",
@@ -37,6 +53,9 @@
       "directAccessGrantsEnabled": false,
       "redirectUris": ["http://127.0.0.1", "com.jarvis.desktop:/oauth/callback"],
       "webOrigins": ["http://tauri.localhost"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "jarvis-api-audience",
@@ -58,6 +77,63 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "redirectUris": ["com.jarvisremote.app:/oauth/callback"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "jarvis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jarvis-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "jarvis-streamdeck",
+      "name": "Jarvis Stream Deck",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "organization",
+        "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "name": "jarvis-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "jarvis-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "jarvis-web",
+      "name": "Jarvis Web",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["https://jarvis-abato.duckdns.org/app/"],
+      "webOrigins": ["https://jarvis-abato.duckdns.org"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "jarvis-api-audience",

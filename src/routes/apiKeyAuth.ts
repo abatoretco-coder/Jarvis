@@ -26,19 +26,6 @@ export function parseAuthorizationBearer(authorizationHeader: string | undefined
   return token && token.length > 0 ? token : undefined;
 }
 
-function allowedApiKeys(env: Env): string[] {
-  if (!env.ALLOW_LEGACY_API_KEYS) return [];
-  return [
-    env.API_KEY,
-    ...(env.API_KEYS
-      ? env.API_KEYS
-          .split(',')
-          .map((item) => item.trim())
-          .filter((item) => item.length > 0)
-      : []),
-  ].filter((item): item is string => Boolean(item && item.trim().length > 0));
-}
-
 function safeTokenEquals(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
@@ -68,8 +55,5 @@ export function getAuthorizedServicePrincipal(req: FastifyRequest, env: Env): Se
     }
   }
 
-  if (allowedApiKeys(env).some((allowed) => provided.some((token) => safeTokenEquals(allowed, token)))) {
-    return { kind: 'service' };
-  }
   return undefined;
 }

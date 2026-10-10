@@ -29,7 +29,7 @@
     "eval:openai:capabilities": "tsx scripts/evaluate-openai-capabilities.ts",
     "eval:openai:audio": "tsx scripts/evaluate-openai-audio.ts",
     "verify:music-routing": "tsx scripts/verify-music-routing.ts",
-    "archive:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/archive-prod-snapshot.ps1",
+    "backup:pc": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-runtime.ps1 backup -Profile pc-preprod-full",
     "verify": "npm run lint && npm run build && npm run typecheck:test && npm test && npm run check:capabilities",
     "format": "prettier . --check",
     "format:write": "prettier . --write"
@@ -61,6 +61,7 @@
   },
   "overrides": {
     "fast-uri": "3.1.8",
-    "js-yaml": "4.3.2"
+    "js-yaml": "4.3.2",
+    "handlebars": "4.7.10"
   }
 }

@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import type { Env } from '../src/env';
+import type { HomeCatalog } from '../src/home/HomeCatalog';
 import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { callMailAgent } from '../src/mail/mailAgent';
 import { resetOpenAiResilienceForTests } from '../src/openai/resilience';
@@ -17,7 +18,10 @@ import { planSpotifyActionFromTextWithOpenAi } from '../src/spotify/musicAgentPl
 import { callTodoAgent } from '../src/todo/todoAgent';
 
 jest.mock('../src/conversation/orchestratorRouter', () => {
-  const actual = jest.requireActual('../src/conversation/orchestratorRouter') as Record<string, unknown>;
+  const actual = jest.requireActual('../src/conversation/orchestratorRouter') as Record<
+    string,
+    unknown
+  >;
   return {
     ...actual,
     routeUserRequest: jest.fn(),
@@ -50,7 +54,9 @@ jest.mock('../src/mail/mailAgent', () => {
 
 const mockedRouteUserRequest = routeUserRequest as jest.MockedFunction<typeof routeUserRequest>;
 const mockedTrySemanticRouter = trySemanticRouter as jest.MockedFunction<typeof trySemanticRouter>;
-const mockedPlanSpotifyAction = planSpotifyActionFromTextWithOpenAi as jest.MockedFunction<typeof planSpotifyActionFromTextWithOpenAi>;
+const mockedPlanSpotifyAction = planSpotifyActionFromTextWithOpenAi as jest.MockedFunction<
+  typeof planSpotifyActionFromTextWithOpenAi
+>;
 const mockedCallTodoAgent = callTodoAgent as jest.MockedFunction<typeof callTodoAgent>;
 const mockedCallMailAgent = callMailAgent as jest.MockedFunction<typeof callMailAgent>;
 
@@ -114,22 +120,25 @@ function makeDeps(env: Env, haStates: unknown[] = []): AppDeps {
 }
 
 function haSpeechResponse(speech: string): Response {
-  return new Response(
-    JSON.stringify({ response: { speech: { plain: { speech } } } }),
-    { status: 200, headers: { 'content-type': 'application/json' } },
-  );
+  return new Response(JSON.stringify({ response: { speech: { plain: { speech } } } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 function nonTitleFetchCalls(fetchMock: { mock: { calls: unknown[][] } }): unknown[][] {
   return fetchMock.mock.calls.filter(([, init]) => {
-    const body = typeof (init as RequestInit | undefined)?.body === 'string'
-      ? String((init as RequestInit).body)
-      : '';
+    const body =
+      typeof (init as RequestInit | undefined)?.body === 'string'
+        ? String((init as RequestInit).body)
+        : '';
     if (!body) return true;
     try {
       const parsed = JSON.parse(body) as { input?: Array<{ content?: string }> };
       const systemPrompt = parsed.input?.[0]?.content ?? '';
-      return !systemPrompt.includes('titre francais factuel') && !systemPrompt.includes('Donne un titre');
+      return (
+        !systemPrompt.includes('titre francais factuel') && !systemPrompt.includes('Donne un titre')
+      );
     } catch {
       return true;
     }
@@ -163,26 +172,30 @@ describe('/v1/ingest integration', () => {
     });
     const deps = makeDeps(env);
     deps.contextCache = {
-      get: jest.fn(async (domain: string) => domain === 'nas'
-        ? {
-            domain: 'nas',
-            enabled: true,
-            cached: true,
-            stale: false,
-            fetchedAt: '2026-07-04T08:00:00.000Z',
-            snapshot: {
+      get: jest.fn(async (domain: string) =>
+        domain === 'nas'
+          ? {
               domain: 'nas',
-              value: {},
-              preparedAnswers: [{
+              enabled: true,
+              cached: true,
+              stale: false,
+              fetchedAt: '2026-07-04T08:00:00.000Z',
+              snapshot: {
                 domain: 'nas',
-                questionKey: 'nas.health',
-                answerText: 'nas-test repond. charge 0.20, memoire 60%.',
-                fetchedAt: '2026-07-04T08:00:00.000Z',
-                freshness: 'fresh',
-              }],
-            },
-          }
-        : null),
+                value: {},
+                preparedAnswers: [
+                  {
+                    domain: 'nas',
+                    questionKey: 'nas.health',
+                    answerText: 'nas-test repond. charge 0.20, memoire 60%.',
+                    fetchedAt: '2026-07-04T08:00:00.000Z',
+                    freshness: 'fresh',
+                  },
+                ],
+              },
+            }
+          : null
+      ),
     } as unknown as AppDeps['contextCache'];
 
     registerIngestRoute(app, deps);
@@ -214,6 +227,120 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
+  it('executes an exact custom voice phrase without sending it to an AI router', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      callService,
+    } as unknown as AppDeps['ha'];
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: (text: string) =>
+        text === 'Éclaire le salon'
+          ? {
+              quickActionId: 'salon-light',
+              name: 'Lumière salon',
+              icon: 'light',
+              deviceId: 'living-light',
+              action: 'turn_on',
+              voicePhrases: ['eclaire le salon'],
+              sortOrder: 0,
+            }
+          : undefined,
+      getMapping: () => ({
+        deviceId: 'living-light',
+        entityId: 'light.salon',
+        presetId: 'light',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      }),
+    } as unknown as HomeCatalog;
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-quick-action',
+        text: 'Éclaire le salon',
+        clientContext: { channel: 'android-voice' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: "Lumière salon, c'est fait.",
+      replyMeta: { source: 'quick_action', semanticDecision: 'executed' },
+    });
+    expect(callService).toHaveBeenCalledWith({
+      domain: 'light',
+      service: 'turn_on',
+      target: { entity_id: 'light.salon' },
+      serviceData: undefined,
+    });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'hey jarvis, met le son de la téléphone à 2',
+    'met le son de la télé à 2',
+  ])('executes an explicit TV volume command without an AI router: %s', async (text) => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      callService,
+    } as unknown as AppDeps['ha'];
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => ({
+        name: 'TV du séjour',
+        deviceId: 'living-room-tv',
+        action: 'set_volume',
+        value: 2,
+      }),
+      getMapping: () => ({
+        deviceId: 'living-room-tv',
+        entityId: 'media_player.lg_webos_tv_oled55c66lb',
+        presetId: 'television',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      }),
+    } as unknown as HomeCatalog;
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: `thread-tv-volume-${text.length}`,
+        text,
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: 'Volume de la télé réglé à 2 %.',
+      replyMeta: {
+        kind: 'home',
+        source: 'deterministic_home_action',
+        routeKey: 'home.television.set_volume',
+        semanticDecision: 'executed',
+      },
+    });
+    expect(callService).toHaveBeenCalledWith({
+      domain: 'media_player',
+      service: 'volume_set',
+      target: { entity_id: 'media_player.lg_webos_tv_oled55c66lb' },
+      serviceData: { volume_level: 0.02 },
+    });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+  });
+
   it('refreshes stale proactive context before answering from cache', async () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -229,13 +356,15 @@ describe('/v1/ingest integration', () => {
       snapshot: {
         domain: 'nas',
         value: {},
-        preparedAnswers: [{
-          domain: 'nas',
-          questionKey: 'nas.health',
-          answerText: 'Ancien statut NAS.',
-          fetchedAt: '2026-07-04T07:50:00.000Z',
-          freshness: 'stale',
-        }],
+        preparedAnswers: [
+          {
+            domain: 'nas',
+            questionKey: 'nas.health',
+            answerText: 'Ancien statut NAS.',
+            fetchedAt: '2026-07-04T07:50:00.000Z',
+            freshness: 'stale',
+          },
+        ],
       },
     };
     const freshSnapshot = {
@@ -245,12 +374,14 @@ describe('/v1/ingest integration', () => {
       fetchedAt: '2026-07-04T08:00:00.000Z',
       snapshot: {
         ...staleSnapshot.snapshot,
-        preparedAnswers: [{
-          ...staleSnapshot.snapshot.preparedAnswers[0],
-          answerText: 'Statut NAS frais.',
-          fetchedAt: '2026-07-04T08:00:00.000Z',
-          freshness: 'fresh',
-        }],
+        preparedAnswers: [
+          {
+            ...staleSnapshot.snapshot.preparedAnswers[0],
+            answerText: 'Statut NAS frais.',
+            fetchedAt: '2026-07-04T08:00:00.000Z',
+            freshness: 'fresh',
+          },
+        ],
       },
     };
     let getCallCount = 0;
@@ -299,31 +430,33 @@ describe('/v1/ingest integration', () => {
     });
     const deps = makeDeps(env);
     deps.contextCache = {
-      get: jest.fn(async (domain: string) => domain === 'daily_brief'
-        ? {
-            domain: 'daily_brief',
-            enabled: true,
-            cached: true,
-            stale: false,
-            fetchedAt: '2026-07-05T07:00:00.000Z',
-            snapshot: {
+      get: jest.fn(async (domain: string) =>
+        domain === 'daily_brief'
+          ? {
               domain: 'daily_brief',
-              value: {
-                sections: [
-                  'Agenda: calme ce matin.',
-                  'Taches: deux priorites a surveiller.',
+              enabled: true,
+              cached: true,
+              stale: false,
+              fetchedAt: '2026-07-05T07:00:00.000Z',
+              snapshot: {
+                domain: 'daily_brief',
+                value: {
+                  sections: ['Agenda: calme ce matin.', 'Taches: deux priorites a surveiller.'],
+                },
+                preparedAnswers: [
+                  {
+                    domain: 'daily_brief',
+                    questionKey: 'daily_brief.today',
+                    answerText:
+                      'Brief du jour: agenda calme ce matin, et deux priorites a surveiller cote taches.',
+                    fetchedAt: '2026-07-05T07:00:00.000Z',
+                    freshness: 'fresh',
+                  },
                 ],
               },
-              preparedAnswers: [{
-                domain: 'daily_brief',
-                questionKey: 'daily_brief.today',
-                answerText: 'Brief du jour: agenda calme ce matin, et deux priorites a surveiller cote taches.',
-                fetchedAt: '2026-07-05T07:00:00.000Z',
-                freshness: 'fresh',
-              }],
-            },
-          }
-        : null),
+            }
+          : null
+      ),
     } as unknown as AppDeps['contextCache'];
     mockedRouteUserRequest.mockResolvedValue({
       targets: [{ agentId: 'search.deep', confidence: 0.99 }],
@@ -449,6 +582,77 @@ describe('/v1/ingest integration', () => {
     expect(calls[0]?.conversation_id).toBe('thread-b');
   });
 
+  it('does not recommend Spotify when the Home Assistant fallback fails for a home command', async () => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn(async () => {
+      throw new Error('ha_unreachable');
+    }) as unknown as typeof fetch;
+
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-assistant-unreachable',
+        text: 'allume la télévision',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText:
+        'Je n’ai pas pu joindre Home Assistant pour cette requête. Réessaie dans quelques secondes.',
+    });
+    expect(response.json().responseText).not.toContain('Spotify');
+  });
+
+  it('uses OpenAI directly for Android chat when Home Assistant is not configured', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      expect(url).toBe('https://api.openai.com/v1/responses');
+      return new Response(
+        JSON.stringify({
+          status: 'completed',
+          output_text: 'La photosynthese transforme la lumiere en energie chimique.',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      HA_BASE_URL: undefined,
+      HA_TOKEN: undefined,
+      HA_AGENT_MAP: undefined,
+      OPENAI_API_KEY: 'test-openai-key',
+    });
+    const deps = makeDeps(env);
+    deps.ha = undefined;
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest?sse=1',
+      headers: { accept: 'text/event-stream' },
+      payload: {
+        threadId: 'thread-android-openai',
+        text: 'Explique-moi brievement la photosynthese.',
+        clientContext: { channel: 'android' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toContain('text/event-stream');
+    expect(response.body).toContain('event: response');
+    expect(response.body).toContain('La photosynthese transforme la lumiere');
+    expect(response.body).toContain('"source":"openai_general"');
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
+  });
+
   it('weather direct: simple local weather question is deterministic without OpenAI call', async () => {
     const weatherStates = [
       {
@@ -530,7 +734,10 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { responseText: string; replyMeta?: { kind?: string; source?: string } };
+    const payload = res.json() as {
+      responseText: string;
+      replyMeta?: { kind?: string; source?: string };
+    };
     expect(payload.responseText).toContain('21°C');
     expect(payload.replyMeta).toMatchObject({ kind: 'weather', source: 'local_weather_snapshot' });
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
@@ -642,7 +849,10 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { responseText: string; replyMeta?: { kind?: string; source?: string } };
+    const payload = res.json() as {
+      responseText: string;
+      replyMeta?: { kind?: string; source?: string };
+    };
     expect(payload.responseText).toMatch(/^Il est \d{2}:\d{2}\./u);
     expect(payload.replyMeta).toMatchObject({ kind: 'time', source: 'local_paris_time' });
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
@@ -664,15 +874,16 @@ describe('/v1/ingest integration', () => {
       },
     ];
 
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (url: string) => {
+    (global as { fetch: typeof fetch }).fetch = jest.fn(async (url: string) => {
       expect(url).toContain('/responses');
       return new Response(
         JSON.stringify({
-          status: 'completed', output_text: 'Demain prends une veste imperméable et des chaussures fermées.',
+          status: 'completed',
+          output_text: 'Demain prends une veste imperméable et des chaussures fermées.',
         }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
+        { status: 200, headers: { 'content-type': 'application/json' } }
       );
-    }) as unknown) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     mockedRouteUserRequest.mockResolvedValue({
       targets: [{ agentId: 'weather', confidence: 0.99 }],
@@ -729,7 +940,7 @@ describe('/v1/ingest integration', () => {
         examples: ['quelle température chez moi'],
       },
       top1Score: 0.95,
-      top2Score: 0.70,
+      top2Score: 0.7,
       margin: 0.25,
       top1Intent: 'weather.current_temperature',
       top2Intent: 'weather.current_conditions',
@@ -792,7 +1003,7 @@ describe('/v1/ingest integration', () => {
         examples: ['quelle température chez moi'],
       },
       top1Score: 0.95,
-      top2Score: 0.70,
+      top2Score: 0.7,
       margin: 0.25,
       top1Intent: 'weather.current_temperature',
       top2Intent: 'weather.current_conditions',
@@ -836,12 +1047,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Prévision fallback.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Prévision fallback.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -945,12 +1157,16 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    const fetchMock = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Demain a Florence, attends-toi a 27 degres et du soleil.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    ));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(
+          JSON.stringify({
+            status: 'completed',
+            output_text: 'Demain a Florence, attends-toi a 27 degres et du soleil.',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -998,12 +1214,13 @@ describe('/v1/ingest integration', () => {
       confidence: 0.96,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: searchReply }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    ));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: searchReply }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1234,22 +1451,29 @@ describe('/v1/ingest integration', () => {
       confidence: 0.95,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({
-          status: 'completed',
-          output: [{
-            type: 'message',
-            content: [{
-              type: 'output_text',
-              text: searchReply,
-              annotations: [{ type: 'url_citation', url: 'https://example.com/ztl', title: 'ZTL' }],
-            }],
-          }],
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    ));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(
+          JSON.stringify({
+            status: 'completed',
+            output: [
+              {
+                type: 'message',
+                content: [
+                  {
+                    type: 'output_text',
+                    text: searchReply,
+                    annotations: [
+                      { type: 'url_citation', url: 'https://example.com/ztl', title: 'ZTL' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1317,7 +1541,9 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'weather', confidence: 0.99 }],
       reason: 'llm_weather_route',
     });
-    const fetchMock = jest.fn(async (..._args: unknown[]) => new Response('search_down', { status: 500 }));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) => new Response('search_down', { status: 500 })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1360,12 +1586,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Paris: 20 degres demain.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(
+          JSON.stringify({ status: 'completed', output_text: 'Paris: 20 degres demain.' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -1418,12 +1645,13 @@ describe('/v1/ingest integration', () => {
       confidence: 0.95,
     });
     mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
-    const fetchMock = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: searchReply }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    ));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: searchReply }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1486,8 +1714,11 @@ describe('/v1/ingest integration', () => {
     const fetchMock = jest.fn(async (url: string) => {
       if (url.includes('/responses')) {
         return new Response(
-          JSON.stringify({ status: 'completed', output_text: 'F-22: superiorite aerienne. F-35: multirole et fusion capteurs.' }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
+          JSON.stringify({
+            status: 'completed',
+            output_text: 'F-22: superiorite aerienne. F-35: multirole et fusion capteurs.',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
       return haSpeechResponse('Réponse HA');
@@ -1526,8 +1757,14 @@ describe('/v1/ingest integration', () => {
     });
     expect(history.statusCode).toBe(200);
     const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
-    expect(historyPayload.messages.some((m) => m.role === 'user' && m.text.includes('Compare F-22 et F-35'))).toBe(true);
-    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('F-22'))).toBe(true);
+    expect(
+      historyPayload.messages.some(
+        (m) => m.role === 'user' && m.text.includes('Compare F-22 et F-35')
+      )
+    ).toBe(true);
+    expect(
+      historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('F-22'))
+    ).toBe(true);
 
     mockedTrySemanticRouter.mockResolvedValueOnce({
       accepted: false,
@@ -1616,7 +1853,10 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { responseText: string; planner?: { source?: string; route?: string } };
+    const payload = res.json() as {
+      responseText: string;
+      planner?: { source?: string; route?: string };
+    };
     expect(payload.responseText).toContain('Rien ne joue actuellement');
     expect(payload.planner?.source).toBe('openai_music_agent');
     expect(payload.planner?.route).toBe('spotify');
@@ -1647,12 +1887,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    const fetchMock = jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    ));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1680,7 +1921,7 @@ describe('/v1/ingest integration', () => {
     expect(mockedPlanSpotifyAction).not.toHaveBeenCalled();
   });
 
-  it('semantic E1 search.deep error falls back to LLM router', async () => {
+  it('semantic E1 search.deep error is reported without a general assistant fallback', async () => {
     const weatherStates = [
       {
         entity_id: 'weather.maison',
@@ -1716,7 +1957,9 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'weather', confidence: 0.99 }],
       reason: 'llm_weather_route',
     });
-    const fetchMock = jest.fn(async (..._args: unknown[]) => new Response('search_down', { status: 500 }));
+    const fetchMock = jest.fn(
+      async (..._args: unknown[]) => new Response('search_down', { status: 500 })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -1741,7 +1984,8 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('Je n’ai pas pu joindre l’agent Home Assistant');
+    expect(payload.responseText).toContain("service spécialisé demandé n'a pas répondu");
+    expect(payload.responseText).not.toContain('partiel-nuageux');
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
   });
 
@@ -1800,9 +2044,12 @@ describe('/v1/ingest integration', () => {
     });
     expect(history.statusCode).toBe(200);
     const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
-    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('3 taches'))).toBe(true);
+    expect(
+      historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('3 taches'))
+    ).toBe(true);
 
-    (global as { fetch: typeof fetch }).fetch = (async () => haSpeechResponse('Réponse HA')) as unknown as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      haSpeechResponse('Réponse HA')) as unknown as typeof fetch;
     mockedTrySemanticRouter.mockResolvedValueOnce({
       accepted: false,
       decision: 'fallback_llm',
@@ -1953,12 +2200,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -1985,7 +2233,7 @@ describe('/v1/ingest integration', () => {
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
   });
 
-  it('semantic E1 todo/mail agent error falls back to LLM router', async () => {
+  it('semantic E1 todo/mail agent error stays explicit instead of generating a general answer', async () => {
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,
       decision: 'accepted_e1',
@@ -2009,12 +2257,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur mail.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(
+          JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur mail.' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2153,9 +2402,14 @@ describe('/v1/ingest integration', () => {
     });
     expect(history.statusCode).toBe(200);
     const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
-    expect(historyPayload.messages.some((m) => m.role === 'assistant' && m.text.includes('modifie des donnees'))).toBe(true);
+    expect(
+      historyPayload.messages.some(
+        (m) => m.role === 'assistant' && m.text.includes('modifie des donnees')
+      )
+    ).toBe(true);
 
-    (global as { fetch: typeof fetch }).fetch = (async () => haSpeechResponse('Réponse HA')) as unknown as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = (async () =>
+      haSpeechResponse('Réponse HA')) as unknown as typeof fetch;
     mockedTrySemanticRouter.mockResolvedValueOnce({
       accepted: false,
       decision: 'fallback_llm',
@@ -2356,12 +2610,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2412,12 +2667,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur todo.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(
+          JSON.stringify({ status: 'completed', output_text: 'Fallback LLM après erreur todo.' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2772,12 +3028,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2886,12 +3143,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -2946,12 +3204,13 @@ describe('/v1/ingest integration', () => {
       targets: [{ agentId: 'search.news', confidence: 0.95 }],
       reason: 'external_weather_forecast',
     });
-    (global as { fetch: typeof fetch }).fetch = (jest.fn(async (..._args: unknown[]) => (
-      new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      )
-    )) as unknown) as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async (..._args: unknown[]) =>
+        new Response(JSON.stringify({ status: 'completed', output_text: 'Fallback LLM ok.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
 
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
@@ -3067,7 +3326,8 @@ describe('/v1/ingest integration', () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
       OPENAI_API_KEY: 'test-openai-key',
-      HA_AGENT_MAP: 'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
+      HA_AGENT_MAP:
+        'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
       SEMANTIC_ROUTER_ENABLED: true,
       SEMANTIC_ROUTER_SHADOW_MODE: false,
       SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
@@ -3125,7 +3385,8 @@ describe('/v1/ingest integration', () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
       OPENAI_API_KEY: 'test-openai-key',
-      HA_AGENT_MAP: 'broker:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
+      HA_AGENT_MAP:
+        'broker:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
       SEMANTIC_ROUTER_ENABLED: true,
       SEMANTIC_ROUTER_SHADOW_MODE: false,
       SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
@@ -3203,6 +3464,11 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockedRouteUserRequest).toHaveBeenCalledTimes(1);
+    const payload = res.json() as {
+      responseText: string;
+      replyMeta?: { kind?: string; fallbackReason?: string };
+    };
+    expect(payload.responseText).toContain('Fallback general.');
     const haCalls = calls.filter((call) => call.agent_id !== undefined);
     expect(haCalls).toHaveLength(1);
     expect(haCalls[0]?.agent_id).toBe('conversation.openai_conversation');
@@ -3309,7 +3575,11 @@ describe('/v1/ingest integration', () => {
       addUrisToPlaylist: async () => ({ ok: true }),
       playUris: async () => ({ ok: true }),
       playContextUri: async () => ({ ok: true }),
-      searchUserPlaylistContextUri: async () => ({ ok: true, uri: 'spotify:playlist:focus', name: 'Focus Flow' }),
+      searchUserPlaylistContextUri: async () => ({
+        ok: true,
+        uri: 'spotify:playlist:focus',
+        name: 'Focus Flow',
+      }),
       getFirstTrackUriFromContext: async () => ({ ok: true, uri: 'spotify:track:ctx1' }),
       clearQueue: async () => ({ ok: true, cleared: 3, was_empty: false }),
     } as unknown as AppDeps['spotifyWebApi'];
@@ -3340,13 +3610,25 @@ describe('/v1/ingest integration', () => {
       { action: 'next', text: 'titre suivan pliz' },
       { action: 'previous', text: 'retour chansson davan' },
       { action: 'volume_set', text: 'met le volumm a 30 porcenn', slots: { volume_percent: 30 } },
-      { action: 'search', text: 'cherche d aft punk hardr bttr', slots: { query: 'daft punk harder better' } },
-      { action: 'search_and_play', text: 'met qlq choz chill lofi', slots: { context_uri: 'spotify:playlist:focus', display_name: 'Focus Flow' } },
+      {
+        action: 'search',
+        text: 'cherche d aft punk hardr bttr',
+        slots: { query: 'daft punk harder better' },
+      },
+      {
+        action: 'search_and_play',
+        text: 'met qlq choz chill lofi',
+        slots: { context_uri: 'spotify:playlist:focus', display_name: 'Focus Flow' },
+      },
       { action: 'queue_add', text: 'ajou sa ds la file', slots: { uri: 'spotify:track:ctx1' } },
       { action: 'clear_queue', text: 'vide la q ueue' },
       { action: 'transfer', text: 'met sur le fone', slots: { device: 'alias:phone' } },
       { action: 'like_track', text: 'j aime se morso', slots: { state: true } },
-      { action: 'add_to_playlist', text: 'ajou ds playlist fokus', slots: { playlist_id: 'pl-1', uris: ['spotify:track:ctx1'] } },
+      {
+        action: 'add_to_playlist',
+        text: 'ajou ds playlist fokus',
+        slots: { playlist_id: 'pl-1', uris: ['spotify:track:ctx1'] },
+      },
       { action: 'list_devices', text: 'quels apareils spoti dispo' },
       { action: 'now_playing', text: 'keski jou la mtn' },
     ];
@@ -3373,8 +3655,15 @@ describe('/v1/ingest integration', () => {
   });
 
   it('denies a selected Spotify capability when the service principal only has chat', async () => {
-    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { OPENAI_API_KEY: undefined, HA_AGENT_MAP: undefined });
-    const getNowPlaying = jest.fn(async () => ({ ok: false, status: 204, error: 'no_active_playback' }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const getNowPlaying = jest.fn(async () => ({
+      ok: false,
+      status: 204,
+      error: 'no_active_playback',
+    }));
     const deps = makeDeps(env);
     deps.spotifyWebApi = {
       isConfigured: () => true,
@@ -3382,13 +3671,23 @@ describe('/v1/ingest integration', () => {
       scheduleSituationRefresh: jest.fn(),
     } as unknown as AppDeps['spotifyWebApi'];
     app.addHook('preHandler', async (request) => {
-      setRequestPrincipal(request, { kind: 'service', serviceId: 'chat-only', permissions: ['chat'] });
+      setRequestPrincipal(request, {
+        kind: 'service',
+        serviceId: 'chat-only',
+        permissions: ['chat'],
+      });
     });
     registerIngestRoute(app, deps);
 
     const response = await app.inject({
-      method: 'POST', url: '/v1/ingest',
-      payload: { threadId: 'denied-music', domain: 'spotify', action: 'pause', clientContext: { channel: 'desktop' } },
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'denied-music',
+        domain: 'spotify',
+        action: 'pause',
+        clientContext: { channel: 'desktop' },
+      },
     });
 
     expect(response.statusCode).toBe(403);
@@ -3397,8 +3696,15 @@ describe('/v1/ingest integration', () => {
   });
 
   it('allows a selected Spotify capability for a music-scoped service principal', async () => {
-    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { OPENAI_API_KEY: undefined, HA_AGENT_MAP: undefined });
-    const getNowPlaying = jest.fn(async () => ({ ok: false, status: 204, error: 'no_active_playback' }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: undefined,
+      HA_AGENT_MAP: undefined,
+    });
+    const getNowPlaying = jest.fn(async () => ({
+      ok: false,
+      status: 204,
+      error: 'no_active_playback',
+    }));
     const deps = makeDeps(env);
     deps.spotifyWebApi = {
       isConfigured: () => true,
@@ -3406,13 +3712,23 @@ describe('/v1/ingest integration', () => {
       scheduleSituationRefresh: jest.fn(),
     } as unknown as AppDeps['spotifyWebApi'];
     app.addHook('preHandler', async (request) => {
-      setRequestPrincipal(request, { kind: 'service', serviceId: 'music-only', permissions: ['music'] });
+      setRequestPrincipal(request, {
+        kind: 'service',
+        serviceId: 'music-only',
+        permissions: ['music'],
+      });
     });
     registerIngestRoute(app, deps);
 
     const response = await app.inject({
-      method: 'POST', url: '/v1/ingest',
-      payload: { threadId: 'allowed-music', domain: 'spotify', action: 'pause', clientContext: { channel: 'desktop' } },
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'allowed-music',
+        domain: 'spotify',
+        action: 'pause',
+        clientContext: { channel: 'desktop' },
+      },
     });
 
     expect(response.statusCode).toBe(200);
@@ -3524,9 +3840,7 @@ describe('/v1/ingest integration', () => {
       }),
       listDevicesPublic: async () => ({
         ok: true,
-        devices: [
-          { id: 'dev-pc', name: 'Jarvis-VM400', type: 'Computer', isActive: false },
-        ],
+        devices: [{ id: 'dev-pc', name: 'Jarvis-VM400', type: 'Computer', isActive: false }],
       }),
       play: playMock,
     } as unknown as AppDeps['spotifyWebApi'];
@@ -3677,8 +3991,11 @@ describe('/v1/ingest integration', () => {
         return haSpeechResponse('Minuteur lance.');
       }
       return new Response(
-        JSON.stringify({ status: 'completed', output_text: 'Une ZTL est une zone a trafic limite.' }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
+        JSON.stringify({
+          status: 'completed',
+          output_text: 'Une ZTL est une zone a trafic limite.',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
       );
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -3686,13 +4003,15 @@ describe('/v1/ingest integration', () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
       OPENAI_API_KEY: 'test-openai-key',
-      HA_AGENT_MAP: 'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
+      HA_AGENT_MAP:
+        'executors:conversation.jarvis_broker:Commandes domotiques|search.news:search.news:Recherche internet',
       SEMANTIC_ROUTER_ENABLED: true,
       SEMANTIC_ROUTER_SHADOW_MODE: false,
       SEMANTIC_ROUTER_ACTIVATION_ENABLED: true,
       SEMANTIC_ROUTER_ACTIVATED_E2_ROUTES: 'search.web.definition,weather.current_temperature',
       SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
-      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.list_tasks.today,mail.list_inbox.unread,executor.timer',
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES:
+        'todo.list_tasks.today,mail.list_inbox.unread,executor.timer',
     });
 
     registerIngestRoute(app, makeDeps(env, weatherStates));
@@ -3846,14 +4165,16 @@ describe('/v1/ingest integration', () => {
   });
 
   it('search external weather: routes to search.news without HA fallback', async () => {
-    const searchReply = 'Demain a Paris, prevois 22 degres avec un risque de pluie en fin de journee.';
+    const searchReply =
+      'Demain a Paris, prevois 22 degres avec un risque de pluie en fin de journee.';
     const fetchMock = jest.fn(async (url: string) => {
       expect(url).toContain('/responses');
       return new Response(
         JSON.stringify({
-          status: 'completed', output_text: searchReply,
+          status: 'completed',
+          output_text: searchReply,
         }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
+        { status: 200, headers: { 'content-type': 'application/json' } }
       );
     });
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -3889,10 +4210,13 @@ describe('/v1/ingest integration', () => {
   });
 
   it('transcribes audio through the configured cloud endpoint', async () => {
-    const fetchMock = jest.fn(async () => new Response(
-      JSON.stringify({ text: 'Bonjour depuis le cloud' }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    ));
+    const fetchMock = jest.fn(
+      async () =>
+        new Response(JSON.stringify({ text: 'Bonjour depuis le cloud' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    );
     (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
     const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
       OPENAI_API_KEY: 'cloud-stt-key',
@@ -3951,10 +4275,13 @@ describe('/v1/ingest integration', () => {
   });
 
   it('maps an empty cloud transcription to a non-retriable silence response', async () => {
-    (global as { fetch: typeof fetch }).fetch = jest.fn(async () => new Response(
-      JSON.stringify({ text: '   ' }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    )) as unknown as typeof fetch;
+    (global as { fetch: typeof fetch }).fetch = jest.fn(
+      async () =>
+        new Response(JSON.stringify({ text: '   ' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    ) as unknown as typeof fetch;
     const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
       OPENAI_API_KEY: 'cloud-stt-key',
       OPENAI_STT_MODEL: 'transcription-model',

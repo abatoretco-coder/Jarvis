@@ -134,10 +134,10 @@ const LOCAL_LINKS = [
   },
   {
     label: 'home-assistant',
-    title: 'Home Assistant',
+    title: 'Domicile',
     description: 'Pilotage et etats de la maison.',
-    kind: 'url',
-    value: 'http://192.168.1.38:8123',
+    kind: 'tab',
+    value: 'home',
   },
   {
     label: 'threads',
@@ -1071,6 +1071,16 @@ type ReverseGeocodePayload = {
   };
 };
 
+type ForwardGeocodePayload = {
+  results?: Array<{
+    name?: string;
+    latitude?: number;
+    longitude?: number;
+    admin1?: string;
+    country?: string;
+  }>;
+};
+
 function parseCoordinate(raw: unknown, min: number, max: number): number | undefined {
   if (typeof raw !== 'string' && typeof raw !== 'number') return undefined;
   const parsed = Number(raw);
@@ -1091,6 +1101,45 @@ function parseDashboardGeoLocation(query: Record<string, unknown>): DashboardGeo
 function weatherCacheKeyForLocation(location: DashboardGeoLocation | null): string {
   if (!location) return 'none';
   return `geo:${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
+}
+
+function parseDashboardWeatherCity(query: Record<string, unknown>): string | null {
+  if (typeof query.city !== 'string') return null;
+  const city = query.city.trim();
+  return city.length >= 2 && city.length <= 120 ? city : null;
+}
+
+async function geocodeWeatherCity(city: string): Promise<{
+  location: DashboardGeoLocation;
+  label: string;
+}> {
+  const params = new URLSearchParams({ name: city, count: '1', language: 'fr', format: 'json' });
+  const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?${params.toString()}`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => '');
+    throw new Error(`weather_geocoding_failed:${response.status}:${rawBody.slice(0, 200)}`);
+  }
+  const payload = await response.json() as ForwardGeocodePayload;
+  const match = payload.results?.[0];
+  if (
+    !match ||
+    typeof match.latitude !== 'number' ||
+    typeof match.longitude !== 'number' ||
+    !Number.isFinite(match.latitude) ||
+    !Number.isFinite(match.longitude)
+  ) {
+    throw new Error('weather_location_not_found');
+  }
+  const label = [match.name, match.admin1 ?? match.country]
+    .filter((part, index, array): part is string => Boolean(part) && array.indexOf(part) === index)
+    .join(', ');
+  return {
+    location: { latitude: match.latitude, longitude: match.longitude },
+    label: label || city,
+  };
 }
 
 function summarizeDetectedLocation(payload: ReverseGeocodePayload | null): string | null {
@@ -1136,7 +1185,10 @@ async function reverseGeocodeDetectedLocation(location: DashboardGeoLocation): P
   return summarizeDetectedLocation(payload);
 }
 
-async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation): Promise<Record<string, unknown>> {
+async function buildWeatherPayloadFromCoordinates(
+  location: DashboardGeoLocation,
+  knownLocationLabel?: string
+): Promise<Record<string, unknown>> {
   const [response, detectedLocation] = await Promise.all([
     fetch(
       `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}`
@@ -1149,7 +1201,7 @@ async function buildWeatherPayloadFromCoordinates(location: DashboardGeoLocation
         signal: AbortSignal.timeout(8_000),
       },
     ),
-    reverseGeocodeDetectedLocation(location),
+    knownLocationLabel ? Promise.resolve(knownLocationLabel) : reverseGeocodeDetectedLocation(location),
   ]);
   if (!response.ok) {
     const rawBody = await response.text().catch(() => '');
@@ -1456,6 +1508,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
   app.get('/v1/dashboard', async (req, reply) => {
     const query = (req.query ?? {}) as Record<string, unknown>;
     const deviceLocation = parseDashboardGeoLocation(query);
+    const weatherCity = parseDashboardWeatherCity(query) ?? 'Paris';
     const principal = getRequestPrincipal(req);
     const ownerCacheKey = principal?.kind === 'user'
       ? `user:${principal.userId}`
@@ -1465,7 +1518,12 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     const requestedConnectionId = typeof query.connectionId === 'string'
       ? query.connectionId.trim().slice(0, 128)
       : '';
-    const cacheKey = `${ownerCacheKey}:${requestedConnectionId}:${weatherCacheKeyForLocation(deviceLocation)}`;
+    const weatherKey = deviceLocation
+      ? weatherCacheKeyForLocation(deviceLocation)
+      : weatherCity
+        ? `city:${weatherCity.toLocaleLowerCase('fr-FR')}`
+        : 'none';
+    const cacheKey = `${ownerCacheKey}:${requestedConnectionId}:${weatherKey}`;
     const cached = dashboardCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < dashboardCacheTtlMs) {
       return reply.code(200).send({
@@ -1514,15 +1572,29 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       mailPromise, todoPromise, agendaPromise,
     ]);
     let weather: Record<string, unknown> | null = null;
-    if (deviceLocation) {
-      weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
+    let weatherError: string | null = null;
+    try {
+      if (deviceLocation) {
+        weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
+      } else if (weatherCity) {
+        const resolvedCity = await geocodeWeatherCity(weatherCity);
+        weather = await buildWeatherPayloadFromCoordinates(resolvedCity.location, resolvedCity.label);
+      }
+    } catch (error) {
+      weatherError = 'weather_unavailable';
+      app.log.warn({ error }, 'dashboard_weather_failed');
     }
     const agenda = googleAgenda;
 
     const payload = {
-      status: 'ok',
+      status: weatherError ? 'partial' : 'ok',
       generatedAt: new Date().toISOString(),
       weather,
+      weatherStatus: weather
+        ? 'ok'
+        : weatherError
+          ? 'error'
+          : 'not_requested',
       organization: {
         mail: mailSection,
         tasks: tasksSection,
@@ -1531,7 +1603,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       },
     };
     const fetchedAt = Date.now();
-    dashboardCache.set(cacheKey, { payload, fetchedAt });
+    if (!weatherError) dashboardCache.set(cacheKey, { payload, fetchedAt });
     return reply.code(200).send({
       ...payload,
       cache: { hit: false, fetchedAt: new Date(fetchedAt).toISOString() },

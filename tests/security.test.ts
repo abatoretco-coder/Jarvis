@@ -5,10 +5,12 @@ import { loadEnv } from '../src/env';
 import { registerApiKeyHook } from '../src/routes/apiKeyHook';
 import { registerPrincipalRateLimitHook, registerSecurityHooks } from '../src/routes/securityHooks';
 
+const TEST_SERVICE_TOKEN = 'test-service-token-0123456789abcdef';
+
 function makeEnv(overrides: Record<string, string | undefined> = {}) {
   return loadEnv({
     REQUIRE_API_KEY: 'true',
-    API_KEY: 'test-api-key',
+    SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'test-service', token: TEST_SERVICE_TOKEN, permissions: ['chat', 'history', 'mail', 'calendar', 'todo', 'music', 'home', 'cameras', 'admin', 'nas.operations'] }]),
     GOOGLE_CLIENT_ID: 'google-client',
     GOOGLE_CLIENT_SECRET: 'google-secret',
     ...overrides,
@@ -34,7 +36,7 @@ describe('security hooks', () => {
     const authorized = await app.inject({
       method: 'POST',
       url: '/v1/integrations/google-calendar/authorize',
-      headers: { 'x-api-key': 'test-api-key' },
+      headers: { 'x-api-key': TEST_SERVICE_TOKEN },
     });
     expect(authorized.statusCode).toBe(403);
     expect(authorized.json()).toEqual({ error: 'human_account_required' });
@@ -63,7 +65,7 @@ describe('security hooks', () => {
       url: '/v1/ingest',
       remoteAddress: '127.0.0.1',
       headers: {
-        'x-api-key': 'test-api-key',
+        'x-api-key': TEST_SERVICE_TOKEN,
         'x-forwarded-for': '203.0.113.10',
       },
       payload: {},
@@ -278,12 +280,57 @@ describe('security hooks', () => {
     const legacyDenied = await app.inject({
       method: 'GET',
       url: '/v1/ping',
-      headers: { 'x-api-key': 'test-api-key' },
+      headers: { 'x-api-key': TEST_SERVICE_TOKEN },
     });
     expect(allowed.statusCode).toBe(200);
     expect(denied.statusCode).toBe(403);
     expect(mailDenied.statusCode).toBe(403);
     expect(legacyDenied.statusCode).toBe(401);
+    await app.close();
+  });
+
+  test('confines dedicated service credentials to their exact machine routes', async () => {
+    const homeAssistantToken = 'home-assistant-service-token-32-characters';
+    const pcAgentToken = 'pc-agent-service-token-with-32-characters';
+    const retiredDesktopToken = 'retired-desktop-token-with-32-characters';
+    const env = makeEnv({
+      SERVICE_API_KEYS_JSON: JSON.stringify([
+        { id: 'home-assistant-pc', token: homeAssistantToken, permissions: ['home', 'music'] },
+        { id: 'pc-agent', token: pcAgentToken, permissions: ['music'] },
+        { id: 'desktop-local', token: retiredDesktopToken, permissions: ['chat'] },
+      ]),
+    });
+    const app = Fastify();
+    registerApiKeyHook(app, env);
+    app.post('/v1/ingest', async () => ({ ok: true }));
+    app.get('/v1/home', async () => ({ ok: true }));
+    app.post('/v1/pc-agent/poll', async () => ({ ok: true }));
+    app.post('/v1/music/actions', async () => ({ ok: true }));
+    app.get('/v1/ping', async () => ({ ok: true }));
+
+    const haIngest = await app.inject({
+      method: 'POST', url: '/v1/ingest', headers: { 'x-api-key': homeAssistantToken }, payload: {},
+    });
+    const haHomeDenied = await app.inject({
+      method: 'GET', url: '/v1/home', headers: { 'x-api-key': homeAssistantToken },
+    });
+    const pcPoll = await app.inject({
+      method: 'POST', url: '/v1/pc-agent/poll', headers: { 'x-api-key': pcAgentToken }, payload: {},
+    });
+    const pcMusicDenied = await app.inject({
+      method: 'POST', url: '/v1/music/actions', headers: { 'x-api-key': pcAgentToken }, payload: {},
+    });
+    const desktopDenied = await app.inject({
+      method: 'GET', url: '/v1/ping', headers: { 'x-api-key': retiredDesktopToken },
+    });
+
+    expect(haIngest.statusCode).toBe(200);
+    expect(haHomeDenied.statusCode).toBe(403);
+    expect(haHomeDenied.json()).toEqual({ error: 'service_route_forbidden' });
+    expect(pcPoll.statusCode).toBe(200);
+    expect(pcMusicDenied.statusCode).toBe(403);
+    expect(pcMusicDenied.json()).toEqual({ error: 'service_route_forbidden' });
+    expect(desktopDenied.statusCode).toBe(403);
     await app.close();
   });
 

@@ -912,10 +912,10 @@ export function findRouteByKey(key: string): SemanticRouteDefinition | undefined
  */
 export function getRouteDeterministicResponse(route: SemanticRouteDefinition): string {
   if (!route.deterministicResponses) {
-    return 'Action effectuée.';
+    return 'Confirmation d’action indisponible.';
   }
   const responses = route.deterministicResponses();
-  return responses.length > 0 ? responses[Math.floor(Math.random() * responses.length)] : 'Action effectuée.';
+  return responses.length > 0 ? responses[Math.floor(Math.random() * responses.length)] : 'Confirmation d’action indisponible.';
 }
 
 /**

@@ -18,8 +18,8 @@ export function isCurrentDeviceReference(input: string): boolean {
 export function hasGenericMusicResumeIntent(text: string): boolean {
   const source = normalizeForMatch(text);
   if (!source) return false;
-  const deviceTarget = '(pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|enceinte|living room|livingroom|appareil( en)? (cours|actuel|courant|actif)|peripherique( en)? (cours|actuel|courant|actif)|device (current|active))';
-  const deviceSuffix = `( sur( le| la| mon| ma| l)? ${deviceTarget})?`;
+  const deviceTarget = '(pc|ordi|ordinateur|computer|jarvis|vm400|tel|telephone|mobile|phone|salon|sejour|enceinte|living room|livingroom|appareil( en)? (cours|actuel|courant|actif)|peripherique( en)? (cours|actuel|courant|actif)|device (current|active))';
+  const deviceSuffix = `( (sur|dans|au)( le| la| mon| ma| l)? ${deviceTarget})?`;
 
   const exact = new Set([
     'reprends',

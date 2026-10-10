@@ -87,6 +87,12 @@ describe('renderService', () => {
     expect(text.toLowerCase()).toContain('précision');
   });
 
+  it('never claims success when the executor provides no confirmation', async () => {
+    const text = await renderSingleExecutionResult(makeResult(), { timeoutMs: 1000 });
+    expect(text).toContain('aucune confirmation exploitable');
+    expect(text).not.toContain('Action effectuée');
+  });
+
   it('renders multiple execution results with deterministic fallback when LLM deps are missing', async () => {
     const text = await renderMultipleExecutionResults([
       makeResult({ domain: 'search', actionKey: 'search.web.quick_lookup', rawText: 'Resultat search.' }),

@@ -41,7 +41,7 @@ function setup(ha?: AppDeps['ha']) {
   const admin = new AdminControlPlaneRepository(db);
   const env = loadEnv({
     REQUIRE_API_KEY: 'true',
-    API_KEY: 'legacy-service-key',
+    SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'admin-test-service', token: 'admin-test-service-token-0123456789', permissions: ['admin'] }]),
     OIDC_ENABLED: 'true',
     OIDC_ISSUER_URL: 'https://issuer.example.test/realms/jarvis',
     OIDC_AUDIENCE: 'jarvis-api',
@@ -71,12 +71,12 @@ async function ensureOwner(app: ReturnType<typeof Fastify>) {
 }
 
 describe('admin control plane', () => {
-  test('requires a human administrator even when a legacy service key is valid', async () => {
+  test('requires a human administrator even when a scoped service key is valid', async () => {
     const { app, db } = setup();
     const response = await app.inject({
       method: 'GET',
       url: '/v1/admin/services',
-      headers: { 'x-api-key': 'legacy-service-key' },
+      headers: { 'x-api-key': 'admin-test-service-token-0123456789' },
     });
     expect(response.statusCode).toBe(403);
     expect(response.json()).toEqual({ error: 'human_admin_required' });

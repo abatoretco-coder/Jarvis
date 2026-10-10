@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 WORKDIR /app
 # Use Node headers bundled in the official image when native modules compile.
 # This avoids a separate header download during image builds.

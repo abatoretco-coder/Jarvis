@@ -6,3 +6,4 @@ dist/
 artifacts/
 runtime/
 ops/pc/env/*.env
+ops/edge/*.env

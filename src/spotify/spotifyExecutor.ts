@@ -84,6 +84,7 @@ function normalizeForMatch(input: string): string {
   return String(input ?? '')
     .normalize('NFKD')
     .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
@@ -142,7 +143,9 @@ function toSelectionFailureResponse(error: unknown): JarvisSpotifyResponse {
 }
 
 function normalizeDeviceSlot(slots: Record<string, unknown>): string | undefined {
-  const device = slotString(slots, 'device') ?? slotString(slots, 'device_id');
+  const deviceId = slotString(slots, 'device_id');
+  if (deviceId) return deviceId;
+  const device = slotString(slots, 'device');
   if (!device) return undefined;
   if (isCurrentDeviceReference(device)) return undefined;
   if (device.startsWith('alias:')) return device;
@@ -164,7 +167,7 @@ function inferDeviceAliasFromRequest(input: {
     const normalized = normalizeForMatch(entityDevice);
     if (/(^|\s)(pc|ordi|ordinateur|computer|jarvis|vm400)(\s|$)/.test(normalized)) return 'alias:pc';
     if (/(^|\s)(tel|telephone|mobile|phone)(\s|$)/.test(normalized)) return 'alias:phone';
-    if (/(^|\s)(salon|living room|livingroom|enceinte)(\s|$)/.test(normalized)) return 'alias:salon';
+    if (/(^|\s)(salon|sejour|living room|livingroom|enceinte)(\s|$)/.test(normalized)) return 'alias:salon';
   }
 
   const text = normalizeForMatch(input.text ?? '');
@@ -175,7 +178,7 @@ function inferDeviceAliasFromRequest(input: {
   if (/(^|\s)(sur|vers|to|on)\s+(le\s+|la\s+|mon\s+|ma\s+)?(tel|telephone|mobile|phone)(\s|$)/.test(text)) {
     return 'alias:phone';
   }
-  if (/(^|\s)(sur|vers|to|on)\s+(le\s+|la\s+|mon\s+|ma\s+)?(salon|enceinte|living room|livingroom)(\s|$)/.test(text)) {
+  if (/(^|\s)(sur|vers|dans|au|to|on)\s+(le\s+|la\s+|mon\s+|ma\s+)?(salon|sejour|enceinte|living room|livingroom)(\s|$)/.test(text)) {
     return 'alias:salon';
   }
   return undefined;
@@ -972,7 +975,14 @@ async function _executeSpotifyCapability(input: {
           data: { context_uri: userPlaylist.uri, type: 'playlist', registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
         };
       }
-      // User playlist not found — fall through to public catalogue search.
+      if (env.SPOTIFY_WEBAPI_USER_PLAYLISTS_ONLY) {
+        return toErrorResponse(
+          userPlaylist.error,
+          `Je n'ai trouvé aucune playlist personnelle correspondant à "${query}".`,
+          { status: userPlaylist.status },
+        );
+      }
+      // Public catalogue search is allowed only when explicitly enabled.
     }
 
     const searched = await spotifyWebApi.searchCatalog(type, query, 5);

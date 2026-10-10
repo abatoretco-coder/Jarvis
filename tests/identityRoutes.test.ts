@@ -33,7 +33,7 @@ function setup(bootstrapSubject?: string) {
   const identity = new IdentityService(repository, verifier, bootstrapSubject);
   const env = loadEnv({
     REQUIRE_API_KEY: 'true',
-    API_KEY: 'service-key',
+    SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'identity-test-service', token: 'identity-test-service-token-0123456', permissions: ['chat'] }]),
     OIDC_ENABLED: 'true',
     OIDC_ISSUER_URL: 'https://issuer.example.test/realms/jarvis',
     OIDC_AUDIENCE: 'jarvis-api',
@@ -82,6 +82,24 @@ describe('identity routes and authorization hook', () => {
     const admin = await app.inject({ method: 'GET', url: '/v1/admin/users', headers: { authorization: 'Bearer resident-token' } });
     expect(admin.statusCode).toBe(403);
     expect(admin.json()).toEqual({ error: 'forbidden' });
+    await app.close();
+    db.close();
+  });
+
+  test('blocks a Stream Deck token from routes outside its server-side allowlist', async () => {
+    const { app, db, verifier } = setup('owner-subject');
+    verifier.claims = {
+      ...claims('owner-subject', 'owner@example.test', 'streamdeck-session'),
+      clientId: 'jarvis-streamdeck',
+    };
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/business',
+      headers: { authorization: 'Bearer streamdeck-token' },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'client_scope_forbidden' });
     await app.close();
     db.close();
   });

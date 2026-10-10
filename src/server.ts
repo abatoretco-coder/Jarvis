@@ -5,6 +5,7 @@ import { ProactiveContextCache } from './context/ProactiveContextCache';
 import { createConversationDb } from './conversation/repositories/SqliteRepositories';
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
+import type { HomeCatalog } from './home/HomeCatalog';
 import { IdentityRepository } from './identity/IdentityRepository';
 import { IdentityService } from './identity/IdentityService';
 import { OidcTokenVerifier } from './identity/OidcTokenVerifier';
@@ -12,6 +13,7 @@ import { IntegrationRepository } from './integrations/IntegrationRepository';
 import { IntegrationService } from './integrations/IntegrationService';
 import { NasStatusClient } from './nas/NasStatusClient';
 import { configureOpenAiResilience, shutdownOpenAiResilience } from './openai/resilience';
+import { PcAgentCommandBroker } from './pc/PcAgentCommandBroker';
 import { registerAdminRoutes } from './routes/admin';
 import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
@@ -25,20 +27,26 @@ import { registerHomeRoutes } from './routes/home';
 import { registerIdentityRoutes } from './routes/identity';
 import { registerIngestRoute } from './routes/ingest';
 import { registerIntegrationRoutes } from './routes/integrations';
+import { registerMusicRoutes } from './routes/music';
 import { registerNasStatusRoute } from './routes/nasStatus';
 import { registerNewsSummaryRoute } from './routes/newsSummary';
+import { registerPcAgentRoutes } from './routes/pcAgent';
 import { registerPrincipalRateLimitHook, registerSecurityHooks } from './routes/securityHooks';
 import { parseTrustedProxyCidrs } from './security/edgePolicy';
+import { SpotifyClientResolver } from './spotify/SpotifyClientResolver';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 
 export type AppDeps = {
   env: Env;
   ha?: HomeAssistantClient;
   spotifyWebApi: SpotifyWebApiClient;
+  spotifyClients?: SpotifyClientResolver;
   nasStatus?: NasStatusClient;
   contextCache?: ProactiveContextCache;
   integrations?: IntegrationService;
   adminAudit?: AdminControlPlaneRepository;
+  homeCatalog?: HomeCatalog;
+  pcAgentBroker?: PcAgentCommandBroker;
 };
 
 export function buildApp(env: Env): FastifyInstance {
@@ -98,7 +106,7 @@ export function buildApp(env: Env): FastifyInstance {
     shutdownOpenAiResilience();
   });
 
-  const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache };
+  const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
   const identityDb = env.OIDC_ENABLED ? createConversationDb(env.CONVERSATION_DB_PATH) : undefined;
   const issuer = env.OIDC_ISSUER_URL?.replace(/\/$/u, '');
   const identityService =
@@ -124,6 +132,7 @@ export function buildApp(env: Env): FastifyInstance {
     ? new IntegrationService(new IntegrationRepository(identityDb), env)
     : undefined;
   deps.integrations = integrations;
+  deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
   if (identityDb) app.addHook('onClose', async () => identityDb.close());
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
@@ -173,6 +182,8 @@ export function buildApp(env: Env): FastifyInstance {
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);
   registerNewsSummaryRoute(app, deps);
+  registerPcAgentRoutes(app, deps);
+  registerMusicRoutes(app, deps);
   registerNasStatusRoute(app, deps);
   registerIngestRoute(app, deps);
 

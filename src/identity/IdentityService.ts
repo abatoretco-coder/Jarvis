@@ -8,6 +8,7 @@ import type { AccessTokenVerifier } from './OidcTokenVerifier';
 export type UserPrincipal = AuthorizedUser & {
   kind: 'user';
   sessionId: string;
+  clientId?: string;
 };
 
 export class IdentityService {
@@ -42,7 +43,7 @@ export class IdentityService {
       this.repository.ensureOwnerHousehold(authorized.userId, now);
       this.repository.claimLegacyConversationData(authorized.userId, now);
     }
-    return { ...authorized, kind: 'user', sessionId: session.sessionId };
+    return { ...authorized, kind: 'user', sessionId: session.sessionId, clientId: claims.clientId };
   }
 
   assertActive(principal: UserPrincipal): void {

@@ -65,6 +65,8 @@ describe('music agent planner', () => {
     expect(isCurrentDeviceReference('appareil actuel')).toBe(true);
     expect(hasGenericMusicResumeIntent('remets la musique sur le périphérique en cours')).toBe(true);
     expect(hasGenericMusicResumeIntent("relance la musique sur l'appareil actuel")).toBe(true);
+    expect(hasGenericMusicResumeIntent('mets de la musique dans le salon')).toBe(true);
+    expect(hasGenericMusicResumeIntent('lance la musique au séjour')).toBe(true);
   });
 
   test('returns spotify request when OpenAI emits a valid spotify plan', async () => {
