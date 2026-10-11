@@ -78,6 +78,8 @@ function setup(
                 deviceId: 'living-sensor', entityId: 'sensor.living_temperature', name: 'Tapo T315', presetId: 'sensor',
                 environment: { humidityEntityId: 'sensor.living_humidity', batteryEntityId: 'sensor.living_battery' },
               },
+              { deviceId: 'living-hub', entityId: 'binary_sensor.hub_overheated', name: 'Hub', presetId: 'hub' },
+              { deviceId: 'living-plug', entityId: 'switch.living_plug', name: 'Prise', presetId: 'plug' },
               {
                 deviceId: 'living-water-heater', entityId: 'water_heater.velis', name: 'Velis Dry', presetId: 'water-heater',
                 waterHeater: {
@@ -107,6 +109,8 @@ function setup(
     { entity_id: 'sensor.living_temperature', state: '21.4', attributes: { friendly_name: 'Tapo température', device_class: 'temperature' } },
     { entity_id: 'sensor.living_humidity', state: '54', attributes: { device_class: 'humidity' } },
     { entity_id: 'sensor.living_battery', state: '87', attributes: { device_class: 'battery' } },
+    { entity_id: 'binary_sensor.hub_overheated', state: 'off', attributes: { device_class: 'problem' } },
+    { entity_id: 'switch.living_plug', state: 'off', attributes: { friendly_name: 'Prise' } },
     { entity_id: 'water_heater.velis', state: 'on', attributes: { friendly_name: 'Velis Dry', temperature: 55, current_temperature: 49, min_temp: 40, max_temp: 80, target_temp_step: 1, current_operation: 'manual', operation_list: ['manual', 'program'], away_mode: false } },
     { entity_id: 'switch.velis_eco', state: 'on', attributes: {} },
     { entity_id: 'switch.velis_boost', state: 'off', attributes: {} },
@@ -851,6 +855,24 @@ describe('home routes', () => {
 
     const injected = await app.inject({ method: 'POST', url: '/v1/home/actions', payload: { deviceId: 'living-water-heater', action: 'set_boost_mode', option: 'toggle_everything' } });
     expect(injected.statusCode).toBe(400);
+    await app.close();
+  });
+
+  test('exposes a read-only Tapo hub and executes plug actions through the existing home boundary', async () => {
+    const { app, callService } = setup('resident', ['home']);
+    const snapshot = await app.inject({ method: 'GET', url: '/v1/home' });
+    expect(snapshot.json().devices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ deviceId: 'living-hub', presetId: 'hub', state: 'off', available: true, capabilities: [] }),
+      expect.objectContaining({ deviceId: 'living-plug', presetId: 'plug', state: 'off', available: true, capabilities: ['turn_on', 'turn_off', 'toggle'] }),
+    ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-plug', action: 'turn_on' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(callService).toHaveBeenLastCalledWith({ domain: 'switch', service: 'turn_on', target: { entity_id: 'switch.living_plug' } });
     await app.close();
   });
 

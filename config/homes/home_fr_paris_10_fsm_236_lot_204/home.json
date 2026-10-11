@@ -265,9 +265,39 @@
       {"roomId": "room_living", "entities": [
         {
           "deviceId": "living-room-thermometer",
+          "entityId": "sensor.thermometre_salon_temperature",
           "name": "Thermomètre",
           "presetId": "sensor",
-          "placement": {"x": 7.8, "y": 1.7, "z": 1.2, "rotationDeg": 0, "scale": 0.8}
+          "placement": {"x": 7.8, "y": 1.7, "z": 1.2, "rotationDeg": 0, "scale": 0.8},
+          "environment": {
+            "humidityEntityId": "sensor.thermometre_salon_humidity",
+            "batteryEntityId": "sensor.thermometre_salon_battery"
+          }
+        },
+        {
+          "deviceId": "living-room-tapo-hub",
+          "entityId": "binary_sensor.hub_overheated",
+          "name": "Hub",
+          "presetId": "hub",
+          "placement": {"x": 7.15, "y": 1.35, "z": 1.1, "rotationDeg": 0, "scale": 0.8}
+        },
+        {
+          "deviceId": "tapo-plug-1",
+          "name": "Prise 1",
+          "presetId": "plug",
+          "placement": {"x": 6.7, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
+        },
+        {
+          "deviceId": "tapo-plug-2",
+          "name": "Prise 2",
+          "presetId": "plug",
+          "placement": {"x": 8.2, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
+        },
+        {
+          "deviceId": "tapo-plug-3",
+          "name": "Prise 3",
+          "presetId": "plug",
+          "placement": {"x": 9.7, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
         },
         {
           "deviceId": "living-room-radiator",

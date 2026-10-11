@@ -16,6 +16,7 @@ export const HOME_PRESETS: readonly HomePreset[] = [
   { presetId: 'vacuum', label: 'Robot', domain: 'vacuum', icon: 'bot', capabilities: ['start', 'stop', 'return_to_base', 'locate', 'set_suction_mode', 'set_mop_mode', 'empty_dust_bin', 'wash_mop', 'start_mop_drying', 'stop_mop_drying'], riskLevel: 'low' },
   { presetId: 'shutter', label: 'Volet', domain: 'cover', icon: 'blinds', capabilities: ['open', 'close', 'stop'], riskLevel: 'moderate' },
   { presetId: 'doorbell', label: 'Sonnette', domain: 'binary_sensor', icon: 'bell', capabilities: [], riskLevel: 'low' },
+  { presetId: 'hub', label: 'Hub', domain: 'binary_sensor', icon: 'router', capabilities: [], riskLevel: 'low' },
   { presetId: 'camera', label: 'Caméra', domain: 'camera', icon: 'camera', capabilities: ['view'], riskLevel: 'high' },
   { presetId: 'sensor', label: 'Capteur', domain: 'sensor', icon: 'gauge', capabilities: [], riskLevel: 'low' },
 ] as const;
