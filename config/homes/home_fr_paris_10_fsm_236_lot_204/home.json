@@ -236,7 +236,7 @@
           {
             "deviceId": "nono-robot",
             "entityId": "vacuum.xiaomi_de_1150317461_c102gl",
-            "name": "Nono le Robot",
+          "name": "Nono",
             "presetId": "vacuum",
             "placement": {"x": 4.4, "y": 3.5, "z": 0, "rotationDeg": 0, "scale": 1},
             "robot": {
