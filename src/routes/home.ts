@@ -8,7 +8,15 @@ import { isHassState } from '../hass';
 import { HOME_PRESETS } from '../home/devicePresets';
 import { executeCatalogHomeAction, executeCatalogHomeScene } from '../home/HomeActionExecutor';
 import { HomeAssistantAutomationService } from '../home/HomeAssistantAutomationService';
+import {
+  HomeAssistantRegistrySyncService,
+  HomeAssistantSyncError,
+} from '../home/HomeAssistantRegistrySyncService';
 import { HomeCatalog } from '../home/HomeCatalog';
+import {
+  HomeHeatingPlanService,
+  HomeHeatingPlanUpdateError,
+} from '../home/HomeHeatingPlanService';
 import { getRequestPrincipal, hasRequestPermission } from '../identity/requestIdentity';
 import type { AppDeps } from '../server';
 
@@ -169,6 +177,19 @@ const managedAutomationSchema = z
   })
   .strict();
 const automationStateSchema = z.object({ enabled: z.boolean() }).strict();
+const heatingPlanUpdateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    comfortTemperature: z.number().finite().min(16).max(24).multipleOf(0.5).optional(),
+    ecoTemperature: z.number().finite().min(12).max(21).multipleOf(0.5).optional(),
+  })
+  .strict()
+  .refine((value) => Object.values(value).some((item) => item !== undefined))
+  .refine(
+    (value) => value.comfortTemperature === undefined || value.ecoTemperature === undefined
+      || value.ecoTemperature < value.comfortTemperature,
+    { message: 'eco_temperature_must_be_lower_than_comfort' }
+  );
 const robotParamsSchema = z.object({ deviceId: deviceIdSchema });
 const robotQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(30).default(14) });
 const robotCleanSchema = z.object({
@@ -266,7 +287,9 @@ function recordHomeAudit(
       | 'home.quick_action'
       | 'home.scene'
       | 'home.routine'
-      | 'home.automation';
+      | 'home.automation'
+      | 'home.heating'
+      | 'home.configuration';
     targetId: string;
     outcome: AuditOutcome;
     metadata?: Record<string, string | number | boolean | null>;
@@ -317,6 +340,133 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
   deps.homeCatalog = catalog ?? undefined;
   const automationService =
     catalog && deps.ha ? new HomeAssistantAutomationService(deps.ha, catalog) : null;
+  const heatingPlanService = deps.ha ? new HomeHeatingPlanService(deps.ha) : null;
+  const registrySyncService = catalog && deps.ha
+    ? new HomeAssistantRegistrySyncService(deps.ha, catalog)
+    : null;
+
+  app.get('/v1/home/configuration/home-assistant-sync', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!registrySyncService) {
+      return reply.code(503).send({ error: 'home_assistant_not_configured' });
+    }
+    try {
+      reply.header('cache-control', 'no-store');
+      return reply.code(200).send(await registrySyncService.preview());
+    } catch {
+      return reply.code(502).send({ error: 'home_assistant_registry_unavailable' });
+    }
+  });
+
+  app.post('/v1/home/configuration/home-assistant-sync', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
+      recordHomeAudit(app, deps, request, {
+        action: 'home.configuration.sync',
+        targetType: 'home.configuration',
+        targetId: deps.env.ACTIVE_HOME_ID,
+        outcome: 'denied',
+        metadata: { errorCode: 'forbidden' },
+      });
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!registrySyncService) {
+      return reply.code(503).send({ error: 'home_assistant_not_configured' });
+    }
+    try {
+      const result = await registrySyncService.apply();
+      recordHomeAudit(app, deps, request, {
+        action: 'home.configuration.sync',
+        targetType: 'home.configuration',
+        targetId: deps.env.ACTIVE_HOME_ID,
+        outcome: 'success',
+        metadata: { applied: result.applied, skipped: result.skipped.length },
+      });
+      return reply.code(200).send(result);
+    } catch (error) {
+      const syncError = error instanceof HomeAssistantSyncError ? error : null;
+      const operationStatus = syncError?.outcome ?? 'failed';
+      recordHomeAudit(app, deps, request, {
+        action: 'home.configuration.sync',
+        targetType: 'home.configuration',
+        targetId: deps.env.ACTIVE_HOME_ID,
+        outcome: 'failed',
+        metadata: {
+          errorCode: syncError?.message ?? 'home_assistant_registry_unavailable',
+          operationStatus,
+          applied: syncError?.applied ?? 0,
+        },
+      });
+      return reply.code(operationStatus === 'uncertain' ? 503 : 502).send({
+        error: syncError?.message ?? 'home_assistant_registry_unavailable',
+        operationStatus,
+        applied: syncError?.applied ?? 0,
+      });
+    }
+  });
+
+  app.get('/v1/home/heating-plan', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home') || !canViewAutomations(request)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!heatingPlanService) {
+      return reply.code(503).send({ error: 'home_assistant_not_configured' });
+    }
+    try {
+      reply.header('cache-control', 'no-store');
+      return reply.code(200).send({ ...(await heatingPlanService.get()), canManage: canEditHome(request) });
+    } catch {
+      return reply.code(502).send({ error: 'home_assistant_unavailable' });
+    }
+  });
+
+  app.patch('/v1/home/heating-plan', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
+      recordHomeAudit(app, deps, request, {
+        action: 'home.heating.update',
+        targetType: 'home.heating',
+        targetId: 'schedule',
+        outcome: 'denied',
+        metadata: { errorCode: 'forbidden' },
+      });
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!heatingPlanService) {
+      return reply.code(503).send({ error: 'home_assistant_not_configured' });
+    }
+    const parsed = heatingPlanUpdateSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'home_heating_plan_invalid' });
+    try {
+      const plan = await heatingPlanService.update(parsed.data);
+      recordHomeAudit(app, deps, request, {
+        action: 'home.heating.update',
+        targetType: 'home.heating',
+        targetId: 'schedule',
+        outcome: 'success',
+      });
+      return reply.code(200).send({ ...plan, canManage: true });
+    } catch (error) {
+      const updateError = error instanceof HomeHeatingPlanUpdateError ? error : null;
+      const operationStatus = updateError?.outcome ?? 'failed';
+      recordHomeAudit(app, deps, request, {
+        action: 'home.heating.update',
+        targetType: 'home.heating',
+        targetId: 'schedule',
+        outcome: 'failed',
+        metadata: {
+          errorCode: updateError?.message ?? 'home_assistant_unavailable',
+          operationStatus,
+          appliedFieldCount: updateError?.appliedFields.length ?? 0,
+        },
+      });
+      return reply.code(operationStatus === 'uncertain' ? 503 : 502).send({
+        error: updateError?.message ?? 'home_assistant_unavailable',
+        operationStatus,
+        appliedFields: updateError?.appliedFields ?? [],
+      });
+    }
+  });
 
   async function executeHomeAction(
     request: FastifyRequest,

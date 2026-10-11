@@ -23,6 +23,7 @@ Jarvis devient le cockpit du domicile, pas seulement son interface conversationn
 - `config/homes/<homeId>/home.json` décrit déjà le logement, ses niveaux, pièces, ouvertures, assets et espaces d’automatisation. Ce répertoire est un template en lecture seule dans le runtime PC actuel.
 - Le logement courant possède `plan-2d.svg`, `plan-3d.obj` et `plan-3d.mtl`.
 - `src/home/HomeCatalog.ts` charge le modèle et maintient des `deviceId` Jarvis indépendants des `entity_id` Home Assistant.
+- Chaque pièce peut déclarer un `homeAssistantAreaId` stable. Jarvis reste la source du plan et projette explicitement les pièces et affectations d'appareils vers Home Assistant.
 - `GET /v1/home` et `POST /v1/home/actions` exposent un snapshot autorisé et des commandes déterministes.
 - Jarvis Desktop possède `src/home`, `HomeView.tsx` et une première carte 2D pilotable.
 - Le control plane Desktop expose déjà l’inventaire Home Assistant et les équipements non mappés.
@@ -165,6 +166,13 @@ restent à valider.
 - Fixer des budgets mesurés sur les machines réelles plutôt que des objectifs théoriques.
 - Mapper et tester lumière, TV, chauffage et robot depuis Desktop, Android et conversation.
 - Tester changement externe dans Home Assistant, perte réseau, redémarrage HA et appareil indisponible.
+
+## Projection Home Assistant et chauffage
+
+- `GET /v1/home/configuration/home-assistant-sync` prépare un aperçu réservé au propriétaire ou à l'administrateur.
+- `POST /v1/home/configuration/home-assistant-sync` crée les aires manquantes et aligne le nom et l'aire des appareils déjà mappés. Il ne supprime jamais une aire, un appareil ou une entité Home Assistant.
+- Les entités inconnues ou sans appareil de registre sont signalées comme ignorées. Une mutation interrompue après envoi est `uncertain` et n'est jamais rejouée automatiquement.
+- `GET/PATCH /v1/home/heating-plan` expose le même planning Home Assistant aux clients Desktop et Android. Une mise à jour peut être `failed`, `partial` ou `uncertain`; aucun client ne doit présenter ces états comme un succès.
 
 ## Tests et preuves attendues
 

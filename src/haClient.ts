@@ -1,3 +1,5 @@
+import WebSocket from 'ws';
+
 import type { Env } from './env';
 
 export type HomeAssistantServiceCall = {
@@ -18,6 +20,7 @@ export type HomeAssistantConversationProcessInput = {
 };
 
 export type HomeAssistantAutomationConfig = Record<string, unknown>;
+export type HomeAssistantWebSocketCommand = { type: string; [key: string]: unknown };
 
 export class HomeAssistantRequestError extends Error {
   constructor(
@@ -194,6 +197,76 @@ export class HomeAssistantClient {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  async websocketCommand<T = unknown>(
+    command: HomeAssistantWebSocketCommand,
+    options: { mutation?: boolean } = {}
+  ): Promise<T> {
+    const endpoint = new URL(this.baseUrl);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    endpoint.pathname = `${endpoint.pathname.replace(/\/$/u, '')}/api/websocket`;
+    endpoint.search = '';
+    endpoint.hash = '';
+
+    return new Promise<T>((resolve, reject) => {
+      const socket = new WebSocket(endpoint);
+      let settled = false;
+      let commandSent = false;
+      const finish = (error?: Error, result?: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.close();
+        if (error) reject(error);
+        else resolve(result as T);
+      };
+      const transportFailure = (cause: unknown) => new HomeAssistantRequestError(
+        'Home Assistant websocket transport failed',
+        'transport',
+        Boolean(options.mutation && commandSent),
+        { cause }
+      );
+      const timer = setTimeout(() => finish(transportFailure(new Error('timeout'))), this.timeoutMs);
+
+      socket.on('message', (raw) => {
+        let message: Record<string, unknown>;
+        try {
+          message = JSON.parse(raw.toString()) as Record<string, unknown>;
+        } catch (error) {
+          finish(transportFailure(error));
+          return;
+        }
+        if (message.type === 'auth_required') {
+          socket.send(JSON.stringify({ type: 'auth', access_token: this.token }));
+          return;
+        }
+        if (message.type === 'auth_invalid') {
+          finish(new HomeAssistantRequestError(
+            'Home Assistant websocket authentication rejected',
+            'rejected',
+            false
+          ));
+          return;
+        }
+        if (message.type === 'auth_ok') {
+          commandSent = true;
+          socket.send(JSON.stringify({ id: 1, ...command }));
+          return;
+        }
+        if (message.type !== 'result' || message.id !== 1) return;
+        if (message.success === true) finish(undefined, message.result as T);
+        else finish(new HomeAssistantRequestError(
+          'Home Assistant websocket command rejected',
+          'rejected',
+          false
+        ));
+      });
+      socket.on('error', (error) => finish(transportFailure(error)));
+      socket.on('close', () => {
+        if (!settled) finish(transportFailure(new Error('connection_closed')));
+      });
+    });
   }
 
   async getHistory(entityId: string, start: Date, end: Date): Promise<unknown> {

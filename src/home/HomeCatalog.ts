@@ -319,7 +319,13 @@ type HomeFile = {
   homeId: string;
   displayName: string;
   geometry: { quality: string; units: string };
-  rooms: Array<{ roomId: string; name: string; type: string; polygon: Point[] }>;
+  rooms: Array<{
+    roomId: string;
+    name: string;
+    type: string;
+    polygon: Point[];
+    homeAssistantAreaId?: string;
+  }>;
   automation?: {
     spaces?: Array<{ roomId: string; entities?: RawDeviceMapping[] }>;
     quickActions?: HomeQuickAction[];
@@ -350,6 +356,7 @@ export type UpsertHomeScene = Omit<HomeScene, 'sortOrder'> & {
 export type UpsertHomeRoutine = HomeRoutine & { expectedRevision: string };
 
 const entityIdPattern = /^[a-z_]+\.[a-z0-9_]+$/u;
+const homeAssistantAreaIdPattern = /^[a-z0-9_]{1,64}$/u;
 const deviceIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIcons = new Set(['light', 'climate', 'media', 'vacuum', 'home']);
@@ -757,12 +764,16 @@ function validateHome(value: unknown, expectedId: string): HomeFile {
     throw new Error('home_config_invalid');
   }
   const roomIds = new Set<string>();
+  const homeAssistantAreaIds = new Set<string>();
   for (const room of home.rooms) {
     if (
       !room.roomId ||
       roomIds.has(room.roomId) ||
       !room.name ||
       !room.type ||
+      (room.homeAssistantAreaId !== undefined
+        && (!homeAssistantAreaIdPattern.test(room.homeAssistantAreaId)
+          || homeAssistantAreaIds.has(room.homeAssistantAreaId))) ||
       !Array.isArray(room.polygon) ||
       room.polygon.length < 3 ||
       room.polygon.some(
@@ -775,6 +786,7 @@ function validateHome(value: unknown, expectedId: string): HomeFile {
       throw new Error('home_config_invalid');
     }
     roomIds.add(room.roomId);
+    if (room.homeAssistantAreaId) homeAssistantAreaIds.add(room.homeAssistantAreaId);
   }
   return home;
 }
@@ -1073,6 +1085,29 @@ export class HomeCatalog {
     return [...this.mappingsByDeviceId.values()].flatMap((mapping) =>
       mapping.entityId ? [{ deviceId: mapping.deviceId, entityId: mapping.entityId }] : []
     );
+  }
+
+  getHomeAssistantProjection(): {
+    rooms: Array<{ roomId: string; name: string; areaId?: string }>;
+    devices: Array<{ deviceId: string; roomId: string; entityId: string; name: string }>;
+  } {
+    return {
+      rooms: this.home.rooms.map((room) => ({
+        roomId: room.roomId,
+        name: room.name,
+        ...(room.homeAssistantAreaId ? { areaId: room.homeAssistantAreaId } : {}),
+      })),
+      devices: [...this.mappingsByRoom.entries()].flatMap(([roomId, mappings]) =>
+        mappings.flatMap((mapping) => mapping.entityId
+          ? [{
+              deviceId: mapping.deviceId,
+              roomId,
+              entityId: mapping.entityId,
+              name: mapping.name ?? mapping.deviceId,
+            }]
+          : [])
+      ),
+    };
   }
 
   hasEntityId(entityId: string): boolean {

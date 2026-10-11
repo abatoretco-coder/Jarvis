@@ -38,6 +38,7 @@ function setup(
           roomId: 'living',
           name: 'Salon',
           type: 'living_room',
+          homeAssistantAreaId: 'salon',
           polygon: [
             [0, 0],
             [4, 0],
@@ -204,6 +205,28 @@ function setup(
     ]);
   });
   const deleteAutomationConfig = jest.fn(async () => undefined);
+  let registryDeviceUpdated = false;
+  const websocketCommand = jest.fn(async (
+    command: Record<string, unknown>,
+    _options?: { mutation?: boolean }
+  ) => {
+    if (command.type === 'config/area_registry/list') return [{ area_id: 'salon', name: 'Salon' }];
+    if (command.type === 'config/entity_registry/list') {
+      return [{ entity_id: 'light.salon', device_id: 'ha-light' }];
+    }
+    if (command.type === 'config/device_registry/list') {
+      return [{
+        id: 'ha-light',
+        area_id: registryDeviceUpdated ? 'salon' : null,
+        name_by_user: registryDeviceUpdated ? 'Lampe principale' : null,
+      }];
+    }
+    if (command.type === 'config/device_registry/update') {
+      registryDeviceUpdated = true;
+      return { id: 'ha-light', area_id: 'salon', name_by_user: 'Lampe principale' };
+    }
+    throw new Error('unexpected_websocket_command');
+  });
   const recordActorAudit = jest.fn();
   const app = Fastify();
   app.addHook('preHandler', (request, _reply, done) => {
@@ -235,6 +258,7 @@ function setup(
           getAutomationConfig,
           saveAutomationConfig,
           deleteAutomationConfig,
+          websocketCommand,
         } as unknown as AppDeps['ha'])
       : undefined,
     spotifyWebApi: {} as AppDeps['spotifyWebApi'],
@@ -249,6 +273,7 @@ function setup(
     getAutomationConfig,
     saveAutomationConfig,
     deleteAutomationConfig,
+    websocketCommand,
     recordActorAudit,
   };
 }
@@ -344,6 +369,90 @@ describe('home routes', () => {
     expect(response.statusCode).toBe(403);
     expect(guest.getStates).not.toHaveBeenCalled();
     await guest.app.close();
+  });
+
+  test('exposes heating settings to residents and restricts updates to owners', async () => {
+    const resident = setup('resident', ['home']);
+    resident.getStates.mockResolvedValueOnce([
+      { entity_id: 'input_boolean.jarvis_heating_schedule_enabled', state: 'on' },
+      { entity_id: 'input_number.jarvis_temperature_comfort', state: '20.0' },
+      { entity_id: 'input_number.jarvis_temperature_eco', state: '17.0' },
+      {
+        entity_id: 'sensor.planning_chauffage_jarvis',
+        state: 'comfort',
+        attributes: {
+          weekday_morning_start: '06:30', weekday_morning_end: '08:30',
+          weekday_evening_start: '18:00', weekday_evening_end: '22:30',
+          weekend_start: '08:00', weekend_end: '22:30',
+        },
+      },
+    ]);
+    const listed = await resident.app.inject({ method: 'GET', url: '/v1/home/heating-plan' });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      available: true,
+      enabled: true,
+      activeMode: 'comfort',
+      comfortTemperature: 20,
+      ecoTemperature: 17,
+      canManage: false,
+    });
+    const denied = await resident.app.inject({
+      method: 'PATCH', url: '/v1/home/heating-plan', payload: { ecoTemperature: 16.5 },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(resident.callService).not.toHaveBeenCalled();
+    await resident.app.close();
+  });
+
+  test('validates owner heating updates before calling Home Assistant', async () => {
+    const owner = setup('owner', ['home', 'admin']);
+    const invalid = await owner.app.inject({
+      method: 'PATCH', url: '/v1/home/heating-plan', payload: { comfortTemperature: 31 },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(owner.callService).not.toHaveBeenCalled();
+    await owner.app.close();
+  });
+
+  test('keeps Home Assistant topology preview and apply owner-only', async () => {
+    const resident = setup('resident', ['home']);
+    const denied = await resident.app.inject({
+      method: 'GET', url: '/v1/home/configuration/home-assistant-sync',
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(resident.websocketCommand).not.toHaveBeenCalled();
+    await resident.app.close();
+
+    const owner = setup('owner', ['home', 'admin']);
+    const preview = await owner.app.inject({
+      method: 'GET', url: '/v1/home/configuration/home-assistant-sync',
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      changes: [{
+        kind: 'update_device',
+        deviceId: 'living-light',
+        name: 'Lampe principale',
+        roomName: 'Salon',
+      }],
+    });
+
+    const applied = await owner.app.inject({
+      method: 'POST', url: '/v1/home/configuration/home-assistant-sync',
+    });
+    expect(applied.statusCode).toBe(200);
+    expect(owner.websocketCommand).toHaveBeenCalledWith({
+      type: 'config/device_registry/update',
+      device_id: 'ha-light',
+      area_id: 'salon',
+      name_by_user: 'Lampe principale',
+    }, { mutation: true });
+    expect(owner.recordActorAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'home.configuration.sync',
+      outcome: 'success',
+    }));
+    await owner.app.close();
   });
 
   test('lists Home Assistant automations for residents but keeps mutations owner-only', async () => {

@@ -52,6 +52,7 @@
   "rooms": [
     {
       "roomId": "room_bedroom",
+      "homeAssistantAreaId": "chambre",
       "levelId": "level_01",
       "name": "Chambre",
       "aliases": ["la chambre"],
@@ -62,6 +63,7 @@
     },
     {
       "roomId": "room_bathroom",
+      "homeAssistantAreaId": "salle_deau",
       "levelId": "level_01",
       "name": "Salle d’eau",
       "aliases": ["la salle d’eau", "la salle de bain"],
@@ -72,6 +74,7 @@
     },
     {
       "roomId": "room_kitchen",
+      "homeAssistantAreaId": "cuisine",
       "levelId": "level_01",
       "name": "Cuisine",
       "aliases": ["la cuisine"],
@@ -82,6 +85,7 @@
     },
     {
       "roomId": "room_living",
+      "homeAssistantAreaId": "salon",
       "levelId": "level_01",
       "name": "Séjour",
       "aliases": ["le séjour", "le salon"],
@@ -92,6 +96,7 @@
     },
     {
       "roomId": "room_wc",
+      "homeAssistantAreaId": "wc",
       "levelId": "level_01",
       "name": "WC",
       "aliases": ["les toilettes", "le WC"],
@@ -102,6 +107,7 @@
     },
     {
       "roomId": "room_office",
+      "homeAssistantAreaId": "bureau",
       "levelId": "level_01",
       "name": "Bureau",
       "aliases": ["le bureau"],
@@ -209,11 +215,19 @@
   },
   "automation": {
     "spaces": [
-      {"roomId": "room_bedroom", "entities": []},
+      {"roomId": "room_bedroom", "entities": [
+        {
+          "deviceId": "bedroom-radiator",
+          "entityId": "climate.chauffage_chambre_thermostat",
+          "name": "Radiateur",
+          "presetId": "heating",
+          "placement": {"x": 1.6, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
+        }
+      ]},
       {"roomId": "room_bathroom", "entities": [
         {
           "deviceId": "bathroom-water-heater",
-          "name": "Chauffe-eau Ariston Velis Dry",
+          "name": "Chauffe-eau",
           "presetId": "water-heater",
           "placement": {"x": 0.45, "y": 3.72, "z": 1.2, "rotationDeg": 90, "scale": 1}
         }
@@ -251,20 +265,20 @@
       {"roomId": "room_living", "entities": [
         {
           "deviceId": "living-room-thermometer",
-          "name": "Thermomètre Tapo T315",
+          "name": "Thermomètre",
           "presetId": "sensor",
           "placement": {"x": 7.8, "y": 1.7, "z": 1.2, "rotationDeg": 0, "scale": 0.8}
         },
         {
           "deviceId": "living-room-radiator",
-          "name": "Radiateur du séjour",
+          "name": "Radiateur",
           "presetId": "heating",
           "placement": {"x": 9.45, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
         },
         {
           "deviceId": "living-room-tv",
           "entityId": "media_player.lg_webos_tv_oled55c66lb",
-          "name": "TV du séjour",
+          "name": "TV",
           "presetId": "television",
           "television": {
             "wakeOnLanMac": "60:95:F8:5B:E7:CA",
@@ -278,7 +292,8 @@
       {"roomId": "room_office", "entities": [
         {
           "deviceId": "office-radiator",
-          "name": "Radiateur du bureau",
+          "entityId": "climate.chauffage_bureau_thermostat",
+          "name": "Radiateur",
           "presetId": "heating",
           "placement": {"x": 13.35, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
         }
