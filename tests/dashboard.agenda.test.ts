@@ -94,6 +94,7 @@ describe('dashboard Google agenda', () => {
           items: [
             { id: 'owner@example.test', primary: true, accessRole: 'owner' },
             { id: 'family', accessRole: 'writer' },
+            { id: 'formula-one', summary: 'Formula 1', accessRole: 'owner' },
             { id: 'week-numbers', accessRole: 'reader' },
           ],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -150,6 +151,7 @@ describe('dashboard Google agenda', () => {
       'Rendez-vous personnel suivant',
     ]);
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/calendars/week-numbers/events'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/calendars/formula-one/events'))).toBe(false);
   });
 
   it('keeps every event in the expanded weekly dashboard instead of truncating after six', async () => {

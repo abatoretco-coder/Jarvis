@@ -285,6 +285,7 @@ export type CalendarMultiFetchResult = {
 
 export type GoogleCalendarListEntry = {
   id?: string;
+  summary?: string;
   accessRole?: string;
   deleted?: boolean;
   primary?: boolean;
@@ -292,7 +293,12 @@ export type GoogleCalendarListEntry = {
 
 export function selectOwnedCalendarIds(items: GoogleCalendarListEntry[]): string[] {
   const ids = items
-    .filter((item) => !item.deleted && (item.primary || item.accessRole === 'owner' || item.accessRole === 'writer'))
+    .filter((item) => {
+      const label = item.summary?.trim().toLocaleLowerCase('fr-FR') ?? '';
+      const isFormulaOneCalendar = /^(?:f1|formula 1|formule 1|grand prix)$/u.test(label);
+      return !item.deleted && !isFormulaOneCalendar &&
+        (item.primary || item.accessRole === 'owner' || item.accessRole === 'writer');
+    })
     .map((item) => item.id?.trim() ?? '')
     .filter(Boolean);
   return [...new Set(ids.length > 0 ? ids : ['primary'])];

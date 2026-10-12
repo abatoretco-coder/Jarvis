@@ -56,6 +56,7 @@ describe('google calendar route validation', () => {
           items: [
             { id: 'owner@example.test', primary: true, accessRole: 'owner' },
             { id: 'family', accessRole: 'writer' },
+            { id: 'formula-one', summary: 'Formula 1', accessRole: 'owner' },
             { id: 'week-numbers', accessRole: 'reader' },
           ],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -99,6 +100,7 @@ describe('google calendar route validation', () => {
       ],
     });
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/calendars/week-numbers/events'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/calendars/formula-one/events'))).toBe(false);
     await fastify.close();
   });
 
