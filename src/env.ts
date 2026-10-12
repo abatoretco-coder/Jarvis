@@ -172,7 +172,7 @@ const envSchema = z
     OPENAI_MODEL_MUSIC_AGENT: z.string().default('gpt-6-luna'),
     OPENAI_MODEL_ROUTER: z.string().default('gpt-6-luna'),
     OPENAI_MODEL_SYNTHESIS: z.string().default('gpt-6.1-sol'),
-    OPENAI_MAX_OUTPUT_TOKENS_ROUTER: numberFromEnv.pipe(z.number().min(16).max(4096)).default(256),
+    OPENAI_MAX_OUTPUT_TOKENS_ROUTER: numberFromEnv.pipe(z.number().min(16).max(4096)).default(384),
     OPENAI_MAX_OUTPUT_TOKENS_SUMMARY: numberFromEnv.pipe(z.number().min(16).max(4096)).default(512),
     OPENAI_MAX_OUTPUT_TOKENS_AGENT: numberFromEnv.pipe(z.number().min(16).max(4096)).default(512),
     OPENAI_MAX_OUTPUT_TOKENS_MUSIC_AGENT: numberFromEnv

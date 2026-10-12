@@ -425,6 +425,25 @@ export async function executeCatalogHomeScene(input: {
     const { domain } = resolved;
     if (
       input.principal?.kind === 'user' &&
+      isStreamDeckPrincipal(input.principal) &&
+      !isStreamDeckHomeActionAllowed(domain, step.action)
+    ) {
+      return {
+        contractVersion: 2,
+        outcome: 'failed',
+        status: 'failed',
+        errorCode: 'client_scope_forbidden',
+        steps: input.scene.steps.map((candidate) => ({
+          deviceId: candidate.deviceId,
+          action: candidate.action,
+          status: 'failed',
+          outcome: 'failed',
+          error: candidate.deviceId === step.deviceId ? 'client_scope_forbidden' : 'scene_preflight_failed',
+        })),
+      };
+    }
+    if (
+      input.principal?.kind === 'user' &&
       input.principal.roles.includes('guest') &&
       !['light', 'media_player'].includes(domain)
     ) {

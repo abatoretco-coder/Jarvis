@@ -543,6 +543,10 @@ export function inferCultureRequest(
   const value = normalize(text);
   if (/\b(?:mets|joue|lance|ecoute)\b.*\b(?:musique|jazz|rock|rap|playlist|spotify)\b/u.test(value))
     return null;
+  if (
+    /\b(?:active|execute|lance|mets|demarre)\b.*\b(?:mode|scene)\b/u.test(value) ||
+    /\b(?:mode|scene)\b.*\b(?:active|execute|lance|mets|demarre)\b/u.test(value)
+  ) return null;
   const implicitRecommendation =
     /\b(?:quelque chose|un truc|pourrait etre)\b.*\b(sympa|leger|interessant)\b/u.test(value) ||
     /\bqu est ce qu on pourrait faire\b/u.test(value);

@@ -737,9 +737,9 @@ describe('/v1/ingest integration', () => {
       reason: 'home_action',
     });
     mockedPlanHomeAction.mockResolvedValue({
-      route: 'home_action',
+      route: 'home_actions',
       reason: 'volume_requested',
-      command: { deviceId: 'living-tv', action: 'set_volume', value: 22 },
+      commands: [{ deviceId: 'living-tv', action: 'set_volume', value: 22 }],
     });
 
     registerIngestRoute(app, deps);
@@ -783,6 +783,112 @@ describe('/v1/ingest integration', () => {
         }),
       ])
     );
+  });
+
+  it('prevalidates and executes several orchestrated home actions through the shared scene executor', async () => {
+    const callService = jest.fn(async (_call: unknown) => ({ status: 200, data: {} }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.legacy_executor:Ancien agent domotique',
+    });
+    const deps = makeDeps(env);
+    deps.ha = { getStates: async () => [], callService } as unknown as AppDeps['ha'];
+    const mappings = {
+      'living-tv': {
+        deviceId: 'living-tv', entityId: 'media_player.living_tv', name: 'TV', presetId: 'television',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      },
+      'bedroom-tv': {
+        deviceId: 'bedroom-tv', entityId: 'media_player.bedroom_tv', name: 'TV chambre', presetId: 'television',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      },
+    } as const;
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => undefined,
+      getMapping: (deviceId: keyof typeof mappings) => mappings[deviceId],
+      getScene: () => undefined,
+    } as unknown as HomeCatalog;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'home_control', confidence: 0.99 }],
+      reason: 'multiple_home_actions',
+    });
+    mockedPlanHomeAction.mockResolvedValue({
+      route: 'home_actions',
+      reason: 'two_devices_requested',
+      commands: [
+        { deviceId: 'living-tv', action: 'turn_off' },
+        { deviceId: 'bedroom-tv', action: 'set_volume', value: 15 },
+      ],
+    });
+
+    registerIngestRoute(app, deps);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-multi-executor',
+        text: 'Éteins la télé du salon et mets le volume de celle de la chambre à 15 %',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe(
+      'TV et TV chambre, commandes envoyées sans confirmation immédiate.'
+    );
+    expect(callService).toHaveBeenCalledTimes(2);
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'media_player', service: 'turn_off', target: { entity_id: 'media_player.living_tv' },
+    }));
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'media_player', service: 'volume_set', target: { entity_id: 'media_player.bedroom_tv' },
+      serviceData: { volume_level: 0.15 },
+    }));
+  });
+
+  it('launches a scene selected by the planner through the shared scene executor', async () => {
+    const callService = jest.fn(async (_call: unknown) => ({ status: 200, data: {} }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.legacy_executor:Ancien agent domotique',
+    });
+    const deps = makeDeps(env);
+    deps.ha = { getStates: async () => [], callService } as unknown as AppDeps['ha'];
+    const scene = {
+      sceneId: 'scene-film', name: 'Film', icon: 'media' as const,
+      steps: [{ deviceId: 'living-tv', action: 'turn_off' as const }],
+      voicePhrases: ['mode film'], sortOrder: 0,
+    };
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => undefined,
+      getScene: (sceneId: string) => sceneId === scene.sceneId ? scene : undefined,
+      getMapping: () => ({
+        deviceId: 'living-tv', entityId: 'media_player.living_tv', name: 'TV', presetId: 'television',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      }),
+    } as unknown as HomeCatalog;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'home_control', confidence: 0.99 }], reason: 'scene_requested',
+    });
+    mockedPlanHomeAction.mockResolvedValue({
+      route: 'home_scene', reason: 'film_scene_requested', sceneId: 'scene-film',
+    });
+
+    registerIngestRoute(app, deps);
+    const response = await app.inject({
+      method: 'POST', url: '/v1/ingest',
+      payload: { threadId: 'thread-home-scene-planner', text: 'Lance la scène film', clientContext: { channel: 'desktop' } },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe('Film, commandes envoyées sans confirmation immédiate.');
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'media_player', service: 'turn_off', target: { entity_id: 'media_player.living_tv' },
+    }));
   });
 
   it('never forwards a device action to the legacy HA utility executor', async () => {

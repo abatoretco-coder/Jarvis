@@ -17,7 +17,8 @@ type LoggerLike = {
 };
 
 export type HomeVoicePlan =
-  | { route: 'home_action'; reason: string; command: ExecutableHomeAction }
+  | { route: 'home_actions'; reason: string; commands: ExecutableHomeAction[] }
+  | { route: 'home_scene'; reason: string; sceneId: string }
   | { route: 'none'; reason: string };
 
 export function formatHomeVoiceActionReply(
@@ -47,19 +48,20 @@ export function formatHomeVoiceActionReply(
 }
 
 const plannerResponseSchema = z.object({
-  route: z.enum(['home_action', 'none']),
+  route: z.enum(['home_actions', 'home_scene', 'none']),
   reason: z.string().min(1).max(120),
-  command: z
-    .object({
+  commands: z
+    .array(z.object({
       deviceId: z.string().min(1).max(64),
       action: z.string().min(1).max(64),
       value: z.number().finite().nullable(),
       option: z.string().min(1).max(120).nullable(),
-    })
-    .nullable(),
+    }))
+    .max(4),
+  sceneId: z.string().min(1).max(64).nullable(),
 });
 
-function plannerResponseFormat(deviceIds: string[]): {
+function plannerResponseFormat(deviceIds: string[], sceneIds: string[]): {
   name: string;
   schema: Record<string, unknown>;
 } {
@@ -68,21 +70,29 @@ function plannerResponseFormat(deviceIds: string[]): {
     schema: {
       type: 'object',
       additionalProperties: false,
-      required: ['route', 'reason', 'command'],
+      required: ['route', 'reason', 'commands', 'sceneId'],
       properties: {
-        route: { type: 'string', enum: ['home_action', 'none'] },
+        route: { type: 'string', enum: ['home_actions', 'home_scene', 'none'] },
         reason: { type: 'string', minLength: 1, maxLength: 120 },
-        command: {
-          type: ['object', 'null'],
-          additionalProperties: false,
-          required: ['deviceId', 'action', 'value', 'option'],
-          properties: {
-            deviceId: { type: 'string', enum: deviceIds },
-            action: { type: 'string', minLength: 1, maxLength: 64 },
-            value: { type: ['number', 'null'] },
-            option: { type: ['string', 'null'], minLength: 1, maxLength: 120 },
+        commands: {
+          type: 'array',
+          minItems: 0,
+          maxItems: 4,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['deviceId', 'action', 'value', 'option'],
+            properties: {
+              deviceId: { type: 'string', enum: deviceIds },
+              action: { type: 'string', minLength: 1, maxLength: 64 },
+              value: { type: ['number', 'null'] },
+              option: { type: ['string', 'null'], minLength: 1, maxLength: 120 },
+            },
           },
         },
+        sceneId: sceneIds.length
+          ? { type: ['string', 'null'], enum: [...sceneIds, null] }
+          : { type: 'null' },
       },
     },
   };
@@ -188,6 +198,7 @@ export async function planHomeActionFromTextWithOpenAi(input: {
     (device) => device.mapped && device.capabilities.length > 0
   );
   if (devices.length === 0) return { route: 'none', reason: 'home_action_catalog_empty' };
+  const scenes = input.catalog.getScenes();
 
   const content = await completeOpenAiResponse({
     apiKey,
@@ -198,16 +209,19 @@ export async function planHomeActionFromTextWithOpenAi(input: {
       {
         role: 'system',
         content: [
-          'Tu planifies une unique action domotique Jarvis.',
+          'Tu planifies des actions domotiques Jarvis ou le lancement d’une scène enregistrée.',
           'Le catalogue fourni est la seule source de vérité.',
-          'Choisis exactement un deviceId et une action présents dans la même entrée.',
+          'Pour une demande visant une scène enregistrée, utilise route=home_scene, son sceneId exact et commands=[].',
+          'Sinon utilise route=home_actions et produis entre une et quatre commandes explicites, dans l’ordre de la demande.',
+          'Chaque commande doit choisir exactement un deviceId et une action présents dans la même entrée.',
+          'Une commande multiple ne doit contenir qu’une commande par appareil. Si deux opérations sont demandées sur le même appareil, réponds route=none.',
           'N invente jamais un appareil, une action, une option ou une valeur.',
           'Pour une option, recopie exactement une valeur proposée par le catalogue.',
           'value est réservé aux actions numériques; option aux actions textuelles; sinon utilise null.',
           'La demande peut aussi contenir des clauses destinées à d’autres services (musique, recherche, conversation) : ignore-les et ne planifie que la partie domotique.',
-          'S’il existe exactement une action domotique non ambiguë et réalisable, planifie-la même si une autre clause concerne un autre service.',
-          'Si la demande est une question, ambiguë, contient zéro ou plusieurs actions domotiques, ou n’est pas réalisable avec le catalogue, réponds route=none et command=null.',
-          'Tu ne pilotes rien toi-même : tu produis seulement une commande structurée qui sera revalidée côté serveur.',
+          'Planifie toutes les actions domotiques non ambiguës et réalisables, même si une autre clause concerne un autre service.',
+          'Si la demande est une question, ambiguë ou irréalisable avec le catalogue, réponds route=none, commands=[] et sceneId=null.',
+          'Tu ne pilotes rien toi-même : tu produis seulement un plan structuré qui sera intégralement revalidé côté serveur avant toute exécution.',
         ].join('\n'),
       },
       {
@@ -215,34 +229,53 @@ export async function planHomeActionFromTextWithOpenAi(input: {
         content: [
           `Demande: ${JSON.stringify(input.text)}`,
           `Catalogue: ${buildHomeVoiceActionCatalog(devices)}`,
+          `Scènes: ${JSON.stringify(scenes.map((scene) => ({ sceneId: scene.sceneId, name: scene.name, voicePhrases: scene.voicePhrases })))}`,
           `Métadonnées: ${JSON.stringify({ correlationId: input.correlationId ?? null, userId: input.userId ?? null })}`,
         ].join('\n'),
       },
     ],
-    maxOutputTokens: Math.min(384, input.env.OPENAI_MAX_OUTPUT_TOKENS_AGENT),
+    maxOutputTokens: Math.min(640, input.env.OPENAI_MAX_OUTPUT_TOKENS_AGENT),
     timeoutMs: input.env.OPENAI_TIMEOUT_MS,
-    jsonSchema: plannerResponseFormat(devices.map((device) => device.deviceId)),
+    jsonSchema: plannerResponseFormat(
+      devices.map((device) => device.deviceId),
+      scenes.map((scene) => scene.sceneId)
+    ),
     reasoningEffort: 'none',
   });
 
   const parsed = plannerResponseSchema.parse(JSON.parse(content) as unknown);
-  if (parsed.route === 'none' || !parsed.command) {
+  if (parsed.route === 'none') {
     return { route: 'none', reason: parsed.reason };
   }
+  if (parsed.route === 'home_scene') {
+    if (!parsed.sceneId || parsed.commands.length > 0 || !input.catalog.getScene(parsed.sceneId)) {
+      return { route: 'none', reason: 'home_scene_not_in_catalog' };
+    }
+    return { route: 'home_scene', reason: parsed.reason, sceneId: parsed.sceneId };
+  }
+  if (parsed.sceneId !== null || parsed.commands.length === 0) {
+    return { route: 'none', reason: 'home_action_plan_invalid' };
+  }
 
-  const device = devices.find((candidate) => candidate.deviceId === parsed.command?.deviceId);
-  const command: ExecutableHomeAction = {
-    deviceId: parsed.command.deviceId,
-    action: parsed.command.action as ExecutableHomeAction['action'],
-    ...(parsed.command.value === null ? {} : { value: parsed.command.value }),
-    ...(parsed.command.option === null ? {} : { option: parsed.command.option }),
-  };
-  if (!device || !isHomeVoiceCommandAllowedForDevice(device, command)) {
+  const commands: ExecutableHomeAction[] = parsed.commands.map((command) => ({
+    deviceId: command.deviceId,
+    action: command.action as ExecutableHomeAction['action'],
+    ...(command.value === null ? {} : { value: command.value }),
+    ...(command.option === null ? {} : { option: command.option }),
+  }));
+  if (new Set(commands.map((command) => command.deviceId)).size !== commands.length) {
+    return { route: 'none', reason: 'home_action_duplicate_device' };
+  }
+  const rejected = commands.find((command) => {
+    const device = devices.find((candidate) => candidate.deviceId === command.deviceId);
+    return !device || !isHomeVoiceCommandAllowedForDevice(device, command);
+  });
+  if (rejected) {
     input.log?.warn?.(
       {
         correlation_id: input.correlationId,
-        device_id: parsed.command.deviceId,
-        action: parsed.command.action,
+        device_id: rejected.deviceId,
+        action: rejected.action,
       },
       'home_voice_planner_capability_rejected'
     );
@@ -252,10 +285,10 @@ export async function planHomeActionFromTextWithOpenAi(input: {
   input.log?.info?.(
     {
       correlation_id: input.correlationId,
-      device_id: command.deviceId,
-      action: command.action,
+      action_count: commands.length,
+      actions: commands.map((command) => ({ deviceId: command.deviceId, action: command.action })),
     },
     'home_voice_planner_selected'
   );
-  return { route: 'home_action', reason: parsed.reason, command };
+  return { route: 'home_actions', reason: parsed.reason, commands };
 }

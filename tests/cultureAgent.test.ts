@@ -164,6 +164,8 @@ describe('cultureAgent', () => {
 
   test('recognizes generic outings, type, tags, price and venue constraints', () => {
     expect(inferCultureRequest('Mets du jazz au salon')).toBeNull();
+    expect(inferCultureRequest('Lance la scène Film')).toBeNull();
+    expect(inferCultureRequest('Active le mode cinéma')).toBeNull();
     expect(inferCultureRequest('Quelque chose de gratuit.')).toMatchObject({
       action: 'recommend_candidates',
       slots: { freeOnly: true },

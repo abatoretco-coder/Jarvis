@@ -7,6 +7,7 @@ import {
 import {
   aggregateSceneOutcome,
   executeCatalogHomeAction,
+  executeCatalogHomeScene,
 } from '../src/home/HomeActionExecutor';
 import type { HomeCatalog } from '../src/home/HomeCatalog';
 
@@ -124,5 +125,48 @@ describe('home action state verification', () => {
     expect(aggregateSceneOutcome([step('failed'), step('failed')])).toBe('failed');
     expect(aggregateSceneOutcome([step('confirmed'), step('accepted')])).toBe('uncertain');
     expect(aggregateSceneOutcome([step('accepted'), step('failed')])).toBe('uncertain');
+  });
+
+  test('prevalidates every Stream Deck scene step before sending any command', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    const mappings = {
+      light: { deviceId: 'light', entityId: 'light.salon' },
+      vacuum: { deviceId: 'vacuum', entityId: 'vacuum.nono' },
+    };
+    const result = await executeCatalogHomeScene({
+      catalog: {
+        getMapping: (deviceId: keyof typeof mappings) => mappings[deviceId],
+      } as unknown as HomeCatalog,
+      ha: { callService } as unknown as HomeAssistantClient,
+      principal: {
+        kind: 'user',
+        userId: 'owner-id',
+        email: 'owner@example.test',
+        displayName: 'Owner',
+        status: 'active',
+        roles: ['owner'],
+        permissions: ['home'],
+        sessionId: 'session',
+        clientId: 'jarvis-streamdeck',
+      },
+      scene: {
+        sceneId: 'scene-test',
+        name: 'Test',
+        icon: 'home',
+        steps: [
+          { deviceId: 'light', action: 'turn_on' },
+          { deviceId: 'vacuum', action: 'start' },
+        ],
+        voicePhrases: [],
+        sortOrder: 0,
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      outcome: 'failed',
+      errorCode: 'client_scope_forbidden',
+    });
+    expect(callService).not.toHaveBeenCalled();
   });
 });

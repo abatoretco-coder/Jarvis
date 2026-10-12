@@ -4621,51 +4621,126 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     return {
                       kind: 'ha_text',
                       agentId: haTarget.agentId,
-                      text: 'Je n’ai pas identifié une action domotique unique et sûre à exécuter.',
+                      text: 'Je n’ai pas identifié un plan domotique sûr à exécuter.',
                     };
                   }
-                  const result = await executeCatalogHomeAction({
+                  const scene =
+                    plan.route === 'home_scene'
+                      ? deps.homeCatalog!.getScene(plan.sceneId)
+                      : plan.commands.length > 1
+                        ? {
+                            sceneId: `voice-${requestId}`.slice(0, 64),
+                            name: 'Commande multiple',
+                            icon: 'home' as const,
+                            steps: plan.commands,
+                            voicePhrases: [],
+                            sortOrder: 0,
+                          }
+                        : undefined;
+                  if (plan.route === 'home_scene' && !scene) {
+                    return {
+                      kind: 'ha_text',
+                      agentId: haTarget.agentId,
+                      text: 'Je ne trouve plus cette scène dans la configuration du domicile.',
+                    };
+                  }
+                  const actorKind = homePrincipal?.kind ?? 'system';
+                  const actorId =
+                    homePrincipal?.kind === 'user'
+                      ? homePrincipal.userId
+                      : homePrincipal?.kind === 'service'
+                        ? homePrincipal.serviceId
+                        : 'legacy-local';
+                  if (scene) {
+                    const execution = await executeCatalogHomeScene({
+                      catalog: deps.homeCatalog!,
+                      scene,
+                      ha: deps.ha,
+                      principal: homePrincipal,
+                    });
+                    try {
+                      deps.adminAudit?.recordActorAudit({
+                        actorKind,
+                        actorId,
+                        action: plan.route === 'home_scene' ? 'home.scene.voice_run' : 'home.batch.voice_run',
+                        targetType: plan.route === 'home_scene' ? 'home.scene' : 'home.batch',
+                        targetId: scene.sceneId,
+                        outcome:
+                          execution.status === 'success'
+                            ? 'success'
+                            : ['client_scope_forbidden', 'guest_action_forbidden'].includes(
+                                  execution.errorCode ?? ''
+                                )
+                              ? 'denied'
+                              : 'failed',
+                        correlationId: req.id,
+                        metadata: { outcome: execution.outcome, stepCount: execution.steps.length },
+                      });
+                    } catch (error) {
+                      app.log.error(
+                        { errorCode: error instanceof Error ? error.message : 'home_voice_audit_failed' },
+                        'home voice audit persistence failed'
+                      );
+                    }
+                    const label = plan.route === 'home_scene'
+                      ? scene.name
+                      : scene.steps
+                          .map((command) => deps.homeCatalog!.getMapping(command.deviceId)?.name ?? command.deviceId)
+                          .join(' et ');
+                    const text =
+                      execution.outcome === 'confirmed'
+                        ? `${label}, c’est fait.`
+                        : execution.outcome === 'accepted'
+                          ? `${label}, commandes envoyées sans confirmation immédiate.`
+                          : execution.outcome === 'partial'
+                            ? `${label}, certaines actions ont échoué.`
+                            : execution.outcome === 'uncertain'
+                              ? `${label}, commandes envoyées mais résultat incertain.`
+                              : `Je n’ai pas pu exécuter ${label}.`;
+                    return { kind: 'ha_text', agentId: haTarget.agentId, text };
+                  }
+                  if (plan.route !== 'home_actions') {
+                    return {
+                      kind: 'ha_text',
+                      agentId: haTarget.agentId,
+                      text: 'Je ne trouve plus cette scène dans la configuration du domicile.',
+                    };
+                  }
+                  const command = plan.commands[0]!;
+                  const execution = await executeCatalogHomeAction({
                     catalog: deps.homeCatalog!,
                     ha: deps.ha,
                     principal: homePrincipal,
-                    command: plan.command,
+                    command,
                   });
-                  const mapping = deps.homeCatalog!.getMapping(plan.command.deviceId);
                   try {
                     deps.adminAudit?.recordActorAudit({
-                      actorKind: homePrincipal?.kind ?? 'system',
-                      actorId:
-                        homePrincipal?.kind === 'user'
-                          ? homePrincipal.userId
-                          : homePrincipal?.kind === 'service'
-                            ? homePrincipal.serviceId
-                            : 'legacy-local',
+                      actorKind,
+                      actorId,
                       action: 'home.device.voice_run',
                       targetType: 'home.device',
-                      targetId: plan.command.deviceId,
-                      outcome: result.ok ? 'success' : result.status === 403 ? 'denied' : 'failed',
+                      targetId: command.deviceId,
+                      outcome: execution.ok ? 'success' : execution.status === 403 ? 'denied' : 'failed',
                       correlationId: req.id,
-                      metadata: result.ok
-                        ? { domain: result.domain, action: plan.command.action }
+                      metadata: execution.ok
+                        ? { domain: execution.domain, action: command.action }
                         : {
-                            errorCode: result.code,
-                            action: plan.command.action,
-                            ...(result.domain ? { domain: result.domain } : {}),
+                            errorCode: execution.code,
+                            action: command.action,
+                            ...(execution.domain ? { domain: execution.domain } : {}),
                           },
                     });
                   } catch (error) {
                     app.log.error(
-                      {
-                        errorCode:
-                          error instanceof Error ? error.message : 'home_voice_audit_failed',
-                      },
+                      { errorCode: error instanceof Error ? error.message : 'home_voice_audit_failed' },
                       'home voice audit persistence failed'
                     );
                   }
+                  const mapping = deps.homeCatalog!.getMapping(command.deviceId);
                   return {
                     kind: 'ha_text',
                     agentId: haTarget.agentId,
-                    text: formatHomeVoiceActionReply(plan.command, result, mapping?.name),
+                    text: formatHomeVoiceActionReply(command, execution, mapping?.name),
                   };
                 })
                 .catch((err) => {

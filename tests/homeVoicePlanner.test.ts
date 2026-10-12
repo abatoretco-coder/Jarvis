@@ -51,6 +51,22 @@ function makeCatalog(): HomeCatalog {
   const snapshot = { devices } as HomeSnapshot;
   return {
     snapshot: jest.fn(async () => snapshot),
+    getScenes: jest.fn(() => [{
+      sceneId: 'scene-film',
+      name: 'Film',
+      icon: 'media',
+      steps: [{ deviceId: 'living-tv', action: 'turn_off' }],
+      voicePhrases: ['mode film'],
+      sortOrder: 0,
+    }]),
+    getScene: jest.fn((sceneId: string) => sceneId === 'scene-film' ? {
+      sceneId: 'scene-film',
+      name: 'Film',
+      icon: 'media',
+      steps: [{ deviceId: 'living-tv', action: 'turn_off' }],
+      voicePhrases: ['mode film'],
+      sortOrder: 0,
+    } : undefined),
   } as unknown as HomeCatalog;
 }
 
@@ -83,14 +99,15 @@ describe('HomeVoicePlanner', () => {
   it('returns a structured command selected from the catalog', async () => {
     mockedComplete.mockResolvedValue(
       JSON.stringify({
-        route: 'home_action',
+        route: 'home_actions',
         reason: 'source_tv_requested',
-        command: {
+        commands: [{
           deviceId: 'living-tv',
           action: 'select_source',
           value: null,
           option: 'Netflix',
-        },
+        }],
+        sceneId: null,
       })
     );
 
@@ -101,9 +118,9 @@ describe('HomeVoicePlanner', () => {
         text: 'Mets Netflix sur la télé',
       })
     ).resolves.toEqual({
-      route: 'home_action',
+      route: 'home_actions',
       reason: 'source_tv_requested',
-      command: { deviceId: 'living-tv', action: 'select_source', option: 'Netflix' },
+      commands: [{ deviceId: 'living-tv', action: 'select_source', option: 'Netflix' }],
     });
 
     expect(mockedComplete).toHaveBeenCalledWith(
@@ -116,20 +133,90 @@ describe('HomeVoicePlanner', () => {
     expect(plannerMessages[0]?.content).toContain(
       'ignore-les et ne planifie que la partie domotique'
     );
-    expect(plannerMessages[0]?.content).toContain('zéro ou plusieurs actions domotiques');
+    expect(plannerMessages[0]?.content).toContain('Planifie toutes les actions domotiques');
+  });
+
+  it('returns several validated commands for different devices', async () => {
+    mockedComplete.mockResolvedValue(JSON.stringify({
+      route: 'home_actions',
+      reason: 'two_devices_requested',
+      commands: [
+        { deviceId: 'living-tv', action: 'turn_off', value: null, option: null },
+        { deviceId: 'nono', action: 'start', value: null, option: null },
+      ],
+      sceneId: null,
+    }));
+
+    await expect(planHomeActionFromTextWithOpenAi({
+      env: makeEnv(),
+      catalog: makeCatalog(),
+      text: 'Éteins la télé et démarre Nono',
+    })).resolves.toEqual({
+      route: 'home_actions',
+      reason: 'two_devices_requested',
+      commands: [
+        { deviceId: 'living-tv', action: 'turn_off' },
+        { deviceId: 'nono', action: 'start' },
+      ],
+    });
+  });
+
+  it('rejects concurrent commands targeting the same device', async () => {
+    mockedComplete.mockResolvedValue(JSON.stringify({
+      route: 'home_actions',
+      reason: 'conflicting_device_commands',
+      commands: [
+        { deviceId: 'living-tv', action: 'turn_off', value: null, option: null },
+        { deviceId: 'living-tv', action: 'select_source', value: null, option: 'Netflix' },
+      ],
+      sceneId: null,
+    }));
+
+    await expect(planHomeActionFromTextWithOpenAi({
+      env: makeEnv(),
+      catalog: makeCatalog(),
+      text: 'Éteins la télé et mets Netflix dessus',
+    })).resolves.toEqual({ route: 'none', reason: 'home_action_duplicate_device' });
+  });
+
+  it('selects an existing scene without allowing invented scene identifiers', async () => {
+    mockedComplete.mockResolvedValue(JSON.stringify({
+      route: 'home_scene',
+      reason: 'film_scene_requested',
+      commands: [],
+      sceneId: 'scene-film',
+    }));
+    await expect(planHomeActionFromTextWithOpenAi({
+      env: makeEnv(),
+      catalog: makeCatalog(),
+      text: 'Lance le mode film',
+    })).resolves.toEqual({ route: 'home_scene', reason: 'film_scene_requested', sceneId: 'scene-film' });
+
+    mockedComplete.mockResolvedValue(JSON.stringify({
+      route: 'home_scene',
+      reason: 'invented',
+      commands: [],
+      sceneId: 'scene-invented',
+    }));
+    await expect(planHomeActionFromTextWithOpenAi({
+      env: makeEnv(),
+      catalog: makeCatalog(),
+      text: 'Lance une scène inventée',
+    })).resolves.toEqual({ route: 'none', reason: 'home_scene_not_in_catalog' });
   });
 
   it('rejects a model action that is absent from the selected device capabilities', async () => {
     mockedComplete.mockResolvedValue(
       JSON.stringify({
-        route: 'home_action',
+        route: 'home_actions',
         reason: 'hallucinated',
-        command: {
+        commands: [{
           deviceId: 'nono',
           action: 'select_source',
           value: null,
           option: 'Netflix',
-        },
+        }],
+        sceneId: null,
       })
     );
 
@@ -161,14 +248,15 @@ describe('HomeVoicePlanner', () => {
   it('rejects a structured model option that is not in the live device list', async () => {
     mockedComplete.mockResolvedValue(
       JSON.stringify({
-        route: 'home_action',
+        route: 'home_actions',
         reason: 'hallucinated_source',
-        command: {
+        commands: [{
           deviceId: 'living-tv',
           action: 'select_source',
           value: null,
           option: 'Disney+',
-        },
+        }],
+        sceneId: null,
       })
     );
 
