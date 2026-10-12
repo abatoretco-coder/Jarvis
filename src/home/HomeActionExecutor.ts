@@ -7,6 +7,7 @@ import { isHassState } from '../hass';
 import { isStreamDeckHomeActionAllowed, isStreamDeckPrincipal } from '../identity/oidcClientPolicy';
 import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
+import { homeActionStateConflict } from './HomeActionPolicy';
 import { homeActionTiming } from './HomeActionTiming';
 import { type HomeActionName, type HomeCatalog, type HomeScene, isHomeActionValueValid, TV_REMOTE_KEYS } from './HomeCatalog';
 import { ensureTelevisionReady } from './TelevisionReadiness';
@@ -33,6 +34,7 @@ export type HomeActionExecution =
         | 'home_device_not_mapped'
         | 'home_action_unsupported'
         | 'home_action_option_invalid'
+        | 'home_action_state_conflict'
         | 'client_scope_forbidden'
         | 'guest_action_forbidden'
         | 'home_device_state_timeout'
@@ -220,6 +222,8 @@ export async function executeCatalogHomeAction(input: {
     return { ok: false, status: 503, code: 'home_control_unavailable', domain };
   }
   try {
+    const mapping = input.catalog.getMapping(input.command.deviceId);
+    let observedPrimaryState: unknown;
     if (['set_suction_mode', 'set_mop_mode', 'set_hvac_mode', 'set_preset_mode', 'set_operation_mode'].includes(input.command.action)) {
       const entityId = resolved.call.target?.entity_id;
       if (typeof entityId !== 'string') {
@@ -278,7 +282,32 @@ export async function executeCatalogHomeAction(input: {
       const max = typeof attrs.max === 'number' ? attrs.max : 10;
       if (input.command.value === undefined || input.command.value < min || input.command.value > max) return { ok: false, status: 400, code: 'home_action_option_invalid', domain };
     }
-    const mapping = input.catalog.getMapping(input.command.deviceId);
+    if ((domain === 'vacuum' || (domain === 'media_player' && mapping?.presetId === 'television')) && mapping?.entityId) {
+      const primaryState = await input.ha.getState(mapping.entityId);
+      observedPrimaryState = primaryState;
+      const dryingSensitiveActions: HomeActionName[] = [
+        'start', 'empty_dust_bin', 'wash_mop', 'start_mop_drying', 'stop_mop_drying',
+      ];
+      const dryingState = domain === 'vacuum'
+        && dryingSensitiveActions.includes(input.command.action)
+        && mapping.robot?.dryingTimeRemainingEntityId
+        ? await input.ha.getState(mapping.robot.dryingTimeRemainingEntityId)
+        : undefined;
+      const dryingTimeRemainingMinutes = isHassState(dryingState) && Number.isFinite(Number(dryingState.state))
+        ? Number(dryingState.state)
+        : undefined;
+      const conflict = isHassState(primaryState)
+        ? homeActionStateConflict({
+            domain,
+            action: input.command.action,
+            state: primaryState.state,
+            ...(dryingTimeRemainingMinutes === undefined ? {} : { dryingTimeRemainingMinutes }),
+          })
+        : 'device_state_unreadable';
+      if (conflict) {
+        return { ok: false, status: 409, code: 'home_action_state_conflict', domain };
+      }
+    }
     if (
       domain === 'media_player' &&
       mapping?.presetId === 'television' &&
@@ -295,6 +324,7 @@ export async function executeCatalogHomeAction(input: {
           ? { wakeOnLanBroadcastAddress: mapping.television.wakeOnLanBroadcastAddress }
           : {}),
         ...(input.wait ? { wait: input.wait } : {}),
+        initialState: observedPrimaryState,
         ...(input.televisionPollAttempts === undefined
           ? {}
           : { pollAttempts: input.televisionPollAttempts }),

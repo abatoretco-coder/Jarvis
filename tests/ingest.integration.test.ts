@@ -302,6 +302,7 @@ describe('/v1/ingest integration', () => {
       const deps = makeDeps(env);
       deps.ha = {
         getStates: async () => [],
+        getState: async (entityId: string) => ({ entity_id: entityId, state: 'playing', attributes: {} }),
         callService,
       } as unknown as AppDeps['ha'];
       deps.homeCatalog = {
@@ -715,6 +716,7 @@ describe('/v1/ingest integration', () => {
     const deps = makeDeps(env);
     deps.ha = {
       getStates: async () => [],
+      getState: async (entityId: string) => ({ entity_id: entityId, state: 'playing', attributes: {} }),
       callService,
     } as unknown as AppDeps['ha'];
     deps.homeCatalog = {
@@ -792,7 +794,11 @@ describe('/v1/ingest integration', () => {
       HA_AGENT_MAP: 'executors:conversation.legacy_executor:Ancien agent domotique',
     });
     const deps = makeDeps(env);
-    deps.ha = { getStates: async () => [], callService } as unknown as AppDeps['ha'];
+    deps.ha = {
+      getStates: async () => [],
+      getState: async (entityId: string) => ({ entity_id: entityId, state: 'playing', attributes: {} }),
+      callService,
+    } as unknown as AppDeps['ha'];
     const mappings = {
       'living-tv': {
         deviceId: 'living-tv', entityId: 'media_player.living_tv', name: 'TV', presetId: 'television',
@@ -855,7 +861,11 @@ describe('/v1/ingest integration', () => {
       HA_AGENT_MAP: 'executors:conversation.legacy_executor:Ancien agent domotique',
     });
     const deps = makeDeps(env);
-    deps.ha = { getStates: async () => [], callService } as unknown as AppDeps['ha'];
+    deps.ha = {
+      getStates: async () => [],
+      getState: async (entityId: string) => ({ entity_id: entityId, state: 'playing', attributes: {} }),
+      callService,
+    } as unknown as AppDeps['ha'];
     const scene = {
       sceneId: 'scene-film', name: 'Film', icon: 'media' as const,
       steps: [{ deviceId: 'living-tv', action: 'turn_off' as const }],

@@ -26,12 +26,17 @@ export async function ensureTelevisionReady(input: {
   pollAttempts?: number;
   pollIntervalMs?: number;
   wait?: (milliseconds: number) => Promise<void>;
+  initialState?: unknown;
 }): Promise<TelevisionReadinessResult> {
-  try {
-    const initialState = await input.ha.getState(input.entityId);
-    if (isReady(initialState)) return { ok: true, state: initialState };
-  } catch {
-    // A sleeping television may be temporarily absent from Home Assistant.
+  if ('initialState' in input) {
+    if (isReady(input.initialState)) return { ok: true, state: input.initialState };
+  } else {
+    try {
+      const initialState = await input.ha.getState(input.entityId);
+      if (isReady(initialState)) return { ok: true, state: initialState };
+    } catch {
+      // A sleeping television may be temporarily absent from Home Assistant.
+    }
   }
 
   try {

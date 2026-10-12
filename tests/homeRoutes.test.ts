@@ -154,8 +154,11 @@ function setup(
     },
   ]);
   const savedAutomationIds = new Set<string>();
+  let vacuumState = 'docked';
   const callService = jest.fn(async (input: unknown) => {
     const call = input as { domain?: string; service?: string };
+    if (call.domain === 'vacuum' && call.service === 'start') vacuumState = 'cleaning';
+    if (call.domain === 'vacuum' && call.service === 'return_to_base') vacuumState = 'returning';
     if (call.domain === 'xiaomi_vacuum_local' && call.service === 'get_rooms') {
       return {
         status: 200,
@@ -173,6 +176,19 @@ function setup(
     { entity_id: 'vacuum.robot', state: 'docked', last_changed: '2026-10-08T09:42:00.000Z' },
   ]]);
   const getState = jest.fn<(entityId: string) => Promise<unknown>>(async (entityId: string) => {
+    if (entityId === 'light.salon') {
+      return { entity_id: entityId, state: 'on', attributes: { friendly_name: 'Salon' } };
+    }
+    if (entityId === 'vacuum.robot') {
+      return { entity_id: entityId, state: vacuumState, attributes: { friendly_name: 'Nono' } };
+    }
+    if (entityId === 'media_player.lg_tv') {
+      return {
+        entity_id: entityId,
+        state: 'playing',
+        attributes: { volume_level: 0.22, source: 'Netflix', source_list: ['Netflix', 'HDMI 1'] },
+      };
+    }
     if (entityId === 'select.robot_suction') {
       return { entity_id: entityId, state: 'Strong', attributes: { options: ['Silent', 'Strong'] } };
     }
@@ -815,7 +831,7 @@ describe('home routes', () => {
       payload: { deviceId: 'living-vacuum', action: 'set_suction_mode', option: 'Silent' },
     });
     expect(suction.statusCode).toBe(200);
-    expect(getState).toHaveBeenLastCalledWith('select.robot_suction');
+    expect(getState).toHaveBeenCalledWith('select.robot_suction');
     expect(callService).toHaveBeenLastCalledWith({
       domain: 'select',
       service: 'select_option',

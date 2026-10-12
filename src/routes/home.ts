@@ -7,6 +7,7 @@ import type { AuditOutcome } from '../admin/AdminControlPlaneRepository';
 import { isHassState } from '../hass';
 import { HOME_PRESETS } from '../home/devicePresets';
 import { executeCatalogHomeAction, executeCatalogHomeScene } from '../home/HomeActionExecutor';
+import { canStartRobotRoomCleaning } from '../home/HomeActionPolicy';
 import { HomeAssistantAutomationService } from '../home/HomeAssistantAutomationService';
 import {
   HomeAssistantRegistrySyncService,
@@ -547,6 +548,19 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(404).send({ error: 'robot_not_found' });
     }
     try {
+      const robotState = await deps.ha.getState(mapping.entityId);
+      const dryingState = mapping.robot?.dryingTimeRemainingEntityId
+        ? await deps.ha.getState(mapping.robot.dryingTimeRemainingEntityId)
+        : undefined;
+      const dryingTimeRemainingMinutes = isHassState(dryingState) && Number.isFinite(Number(dryingState.state))
+        ? Number(dryingState.state)
+        : undefined;
+      if (
+        !isHassState(robotState)
+        || !canStartRobotRoomCleaning(robotState.state, dryingTimeRemainingMinutes)
+      ) {
+        return reply.code(409).send({ error: 'home_action_state_conflict' });
+      }
       const roomResponse = await deps.ha.callService({
         domain: 'xiaomi_vacuum_local', service: 'get_rooms', returnResponse: true,
       });

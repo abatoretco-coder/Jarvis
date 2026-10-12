@@ -77,7 +77,43 @@ describe('home action state verification', () => {
     });
 
     expect(result).toEqual({ ok: true, domain: 'vacuum', operationStatus: 'uncertain' });
-    expect(getState).toHaveBeenCalledTimes(3);
+    // One read enforces the live-state policy, then three reads verify the outcome.
+    expect(getState).toHaveBeenCalledTimes(4);
+  });
+
+  test('rejects robot commands that contradict the live state before mutation', async () => {
+    const getState = jest.fn<HomeAssistantClient['getState']>(async () => ({
+      entity_id: 'vacuum.robot', state: 'cleaning', attributes: {},
+    }));
+    const callService = jest.fn<HomeAssistantClient['callService']>();
+
+    const result = await executeCatalogHomeAction({
+      catalog: catalog('vacuum.robot'),
+      ha: { getState, callService } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'start' },
+    });
+
+    expect(result).toEqual({ ok: false, status: 409, code: 'home_action_state_conflict', domain: 'vacuum' });
+    expect(callService).not.toHaveBeenCalled();
+  });
+
+  test('rejects television controls while power state is transitioning', async () => {
+    const getState = jest.fn<HomeAssistantClient['getState']>(async () => ({
+      entity_id: 'media_player.tv', state: 'turning_on', attributes: {},
+    }));
+    const callService = jest.fn<HomeAssistantClient['callService']>();
+    const tvCatalog = {
+      getMapping: () => ({ deviceId: 'device-1', entityId: 'media_player.tv', presetId: 'television' }),
+    } as unknown as HomeCatalog;
+
+    const result = await executeCatalogHomeAction({
+      catalog: tvCatalog,
+      ha: { getState, callService } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'remote_key', option: 'HOME' },
+    });
+
+    expect(result).toEqual({ ok: false, status: 409, code: 'home_action_state_conflict', domain: 'media_player' });
+    expect(callService).not.toHaveBeenCalled();
   });
 
   test('keeps an accepted result when state observation itself is unavailable', async () => {
