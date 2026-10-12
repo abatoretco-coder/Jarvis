@@ -15,6 +15,24 @@ function catalog(entityId: string): HomeCatalog {
 }
 
 describe('home action state verification', () => {
+  test('rejects malformed commands before calling Home Assistant on every entry path', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+
+    const result = await executeCatalogHomeAction({
+      catalog: catalog('media_player.tv'),
+      ha: { callService } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'set_volume' },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      code: 'home_action_option_invalid',
+      domain: 'media_player',
+    });
+    expect(callService).not.toHaveBeenCalled();
+  });
+
   test('confirms a light only after Home Assistant exposes the requested state', async () => {
     const getState = jest
       .fn<HomeAssistantClient['getState']>()

@@ -8,6 +8,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import type { Env } from '../src/env';
 import type { HomeCatalog } from '../src/home/HomeCatalog';
+import { planHomeActionFromTextWithOpenAi } from '../src/home/HomeVoicePlanner';
 import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { callMailAgent } from '../src/mail/mailAgent';
 import { resetOpenAiResilienceForTests } from '../src/openai/resilience';
@@ -37,6 +38,13 @@ jest.mock('../src/spotify/musicAgentPlanner', () => {
     planSpotifyActionFromTextWithOpenAi: jest.fn(),
   };
 });
+jest.mock('../src/home/HomeVoicePlanner', () => {
+  const actual = jest.requireActual('../src/home/HomeVoicePlanner') as Record<string, unknown>;
+  return {
+    ...actual,
+    planHomeActionFromTextWithOpenAi: jest.fn(),
+  };
+});
 jest.mock('../src/todo/todoAgent', () => {
   const actual = jest.requireActual('../src/todo/todoAgent') as Record<string, unknown>;
   return {
@@ -56,6 +64,9 @@ const mockedRouteUserRequest = routeUserRequest as jest.MockedFunction<typeof ro
 const mockedTrySemanticRouter = trySemanticRouter as jest.MockedFunction<typeof trySemanticRouter>;
 const mockedPlanSpotifyAction = planSpotifyActionFromTextWithOpenAi as jest.MockedFunction<
   typeof planSpotifyActionFromTextWithOpenAi
+>;
+const mockedPlanHomeAction = planHomeActionFromTextWithOpenAi as jest.MockedFunction<
+  typeof planHomeActionFromTextWithOpenAi
 >;
 const mockedCallTodoAgent = callTodoAgent as jest.MockedFunction<typeof callTodoAgent>;
 const mockedCallMailAgent = callMailAgent as jest.MockedFunction<typeof callMailAgent>;
@@ -156,6 +167,7 @@ describe('/v1/ingest integration', () => {
     mockedRouteUserRequest.mockReset();
     mockedTrySemanticRouter.mockReset();
     mockedPlanSpotifyAction.mockReset();
+    mockedPlanHomeAction.mockReset();
     mockedCallTodoAgent.mockReset();
     mockedCallMailAgent.mockReset();
   });
@@ -282,64 +294,64 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
-  it.each([
-    'hey jarvis, met le son de la téléphone à 2',
-    'met le son de la télé à 2',
-  ])('executes an explicit TV volume command without an AI router: %s', async (text) => {
-    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
-    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
-    const deps = makeDeps(env);
-    deps.ha = {
-      getStates: async () => [],
-      callService,
-    } as unknown as AppDeps['ha'];
-    deps.homeCatalog = {
-      findSceneByVoicePhrase: () => undefined,
-      findQuickActionByVoicePhrase: () => undefined,
-      inferDeterministicVoiceAction: () => ({
-        name: 'TV du séjour',
-        deviceId: 'living-room-tv',
-        action: 'set_volume',
-        value: 2,
-      }),
-      getMapping: () => ({
-        deviceId: 'living-room-tv',
-        entityId: 'media_player.lg_webos_tv_oled55c66lb',
-        presetId: 'television',
-        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
-      }),
-    } as unknown as HomeCatalog;
-    registerIngestRoute(app, deps);
+  it.each(['hey jarvis, met le son de la téléphone à 2', 'met le son de la télé à 2'])(
+    'executes an explicit TV volume command without an AI router: %s',
+    async (text) => {
+      const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+      const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+      const deps = makeDeps(env);
+      deps.ha = {
+        getStates: async () => [],
+        callService,
+      } as unknown as AppDeps['ha'];
+      deps.homeCatalog = {
+        findSceneByVoicePhrase: () => undefined,
+        findQuickActionByVoicePhrase: () => undefined,
+        inferDeterministicVoiceAction: () => ({
+          name: 'TV du séjour',
+          deviceId: 'living-room-tv',
+          action: 'set_volume',
+          value: 2,
+        }),
+        getMapping: () => ({
+          deviceId: 'living-room-tv',
+          entityId: 'media_player.lg_webos_tv_oled55c66lb',
+          presetId: 'television',
+          placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+        }),
+      } as unknown as HomeCatalog;
+      registerIngestRoute(app, deps);
 
-    const response = await app.inject({
-      method: 'POST',
-      url: '/v1/ingest',
-      payload: {
-        threadId: `thread-tv-volume-${text.length}`,
-        text,
-        clientContext: { channel: 'desktop' },
-      },
-    });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/ingest',
+        payload: {
+          threadId: `thread-tv-volume-${text.length}`,
+          text,
+          clientContext: { channel: 'desktop' },
+        },
+      });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
         responseText: 'Réglage du volume accepté, sans confirmation de la télé.',
-      replyMeta: {
-        kind: 'home',
-        source: 'deterministic_home_action',
-        routeKey: 'home.television.set_volume',
+        replyMeta: {
+          kind: 'home',
+          source: 'deterministic_home_action',
+          routeKey: 'home.television.set_volume',
           semanticDecision: 'accepted',
-      },
-    });
-    expect(callService).toHaveBeenCalledWith({
-      domain: 'media_player',
-      service: 'volume_set',
-      target: { entity_id: 'media_player.lg_webos_tv_oled55c66lb' },
-      serviceData: { volume_level: 0.02 },
-    });
-    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
-    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
-  });
+        },
+      });
+      expect(callService).toHaveBeenCalledWith({
+        domain: 'media_player',
+        service: 'volume_set',
+        target: { entity_id: 'media_player.lg_webos_tv_oled55c66lb' },
+        serviceData: { volume_level: 0.02 },
+      });
+      expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+      expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+    }
+  );
 
   it('refreshes stale proactive context before answering from cache', async () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
@@ -609,6 +621,150 @@ describe('/v1/ingest integration', () => {
         'Je n’ai pas pu joindre Home Assistant pour cette requête. Réessaie dans quelques secondes.',
     });
     expect(response.json().responseText).not.toContain('Spotify');
+  });
+
+  it('executes orchestrated home actions through the same local catalog executor as direct actions', async () => {
+    const callService = jest.fn(async (_call: unknown) => ({ status: 200, data: {} }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP:
+        'executors:conversation.legacy_executor:Ancien agent domotique|search.news:search.news:Recherche internet',
+    });
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      callService,
+    } as unknown as AppDeps['ha'];
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => undefined,
+      getMapping: (deviceId: string) =>
+        deviceId === 'living-tv'
+          ? {
+              deviceId,
+              entityId: 'media_player.living_tv',
+              name: 'TV',
+              presetId: 'television',
+              placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+            }
+          : undefined,
+    } as unknown as HomeCatalog;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'home_control', confidence: 0.99 }],
+      reason: 'home_action',
+    });
+    mockedPlanHomeAction.mockResolvedValue({
+      route: 'home_action',
+      reason: 'volume_requested',
+      command: { deviceId: 'living-tv', action: 'set_volume', value: 22 },
+    });
+
+    registerIngestRoute(app, deps);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-local-executor',
+        text: 'Mets le volume de la télé à 22 %',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe(
+      'Commande envoyée à TV, sans confirmation immédiate.'
+    );
+    expect(callService).toHaveBeenCalledWith({
+      domain: 'media_player',
+      service: 'volume_set',
+      target: { entity_id: 'media_player.living_tv' },
+      serviceData: { volume_level: 0.22 },
+    });
+    expect(mockedPlanHomeAction).toHaveBeenCalledTimes(1);
+    expect(mockedRouteUserRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.arrayContaining([
+          expect.objectContaining({
+            agentId: 'home_control',
+            key: 'executors',
+          }),
+        ]),
+      })
+    );
+    const routedAgents = mockedRouteUserRequest.mock.calls[0]?.[0].agents ?? [];
+    expect(routedAgents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agentId: 'conversation.legacy_executor',
+          routerId: 'home_utility',
+        }),
+      ])
+    );
+  });
+
+  it('never forwards a device action to the legacy HA utility executor', async () => {
+    const fetchMock = jest.fn(async () => {
+      throw new Error('legacy_executor_must_not_be_called');
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.legacy_executor:Commandes Home Assistant',
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.legacy_executor', confidence: 0.99 }],
+      reason: 'misrouted_device_action',
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-legacy-guard',
+        text: 'Allume la télévision',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe(
+      'Cette demande doit passer par le catalogue domotique Jarvis.'
+    );
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('rejects a mixed utility and device request instead of forwarding it to the legacy executor', async () => {
+    const fetchMock = jest.fn(async () => {
+      throw new Error('legacy_executor_must_not_be_called');
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.legacy_executor:Commandes Home Assistant',
+    });
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.legacy_executor', confidence: 0.99 }],
+      reason: 'misrouted_mixed_request',
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-legacy-mixed-guard',
+        text: 'Mets un minuteur puis allume la télévision',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe(
+      'Cette demande doit passer par le catalogue domotique Jarvis.'
+    );
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(0);
   });
 
   it('uses OpenAI directly for Android chat when Home Assistant is not configured', async () => {

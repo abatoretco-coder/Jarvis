@@ -41,7 +41,7 @@ export function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false):
     filters.push(
       `asetrate=${shiftedRate}`,
       'aresample=44100',
-      `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`,
+      `atempo=${Math.max(0.5, Math.min(2.0, 1 / ratio)).toFixed(6)}`
     );
   }
   if (!skipSpeed && opts.speed !== 1.0) {
@@ -53,18 +53,30 @@ export function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false):
   return filters;
 }
 
-export function pipeStreamThroughFfmpeg(body: ReadableStream<Uint8Array>, filters: string[]): Promise<Buffer> {
+export function pipeStreamThroughFfmpeg(
+  body: ReadableStream<Uint8Array>,
+  filters: string[]
+): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const proc = spawn('ffmpeg', [
-      '-f', 'mp3', '-i', 'pipe:0',
-      '-filter:a', filters.join(','),
-      '-f', 'mp3', 'pipe:1',
-      '-loglevel', 'error',
+      '-f',
+      'mp3',
+      '-i',
+      'pipe:0',
+      '-filter:a',
+      filters.join(','),
+      '-f',
+      'mp3',
+      'pipe:1',
+      '-loglevel',
+      'error',
     ]);
     const chunks: Buffer[] = [];
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => chunks.push(d));
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
     proc.on('close', (code) => {
       if (code === 0) resolve(Buffer.concat(chunks));
       else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(0, 200)}`));
@@ -72,12 +84,21 @@ export function pipeStreamThroughFfmpeg(body: ReadableStream<Uint8Array>, filter
     proc.on('error', reject);
     const reader = body.getReader();
     const pump = (): void => {
-      reader.read().then(({ done, value }) => {
-        if (done) { proc.stdin.end(); return; }
-        const ok = proc.stdin.write(value);
-        if (ok) pump();
-        else proc.stdin.once('drain', pump);
-      }).catch((err: unknown) => { proc.stdin.destroy(err as Error); reject(err); });
+      reader
+        .read()
+        .then(({ done, value }) => {
+          if (done) {
+            proc.stdin.end();
+            return;
+          }
+          const ok = proc.stdin.write(value);
+          if (ok) pump();
+          else proc.stdin.once('drain', pump);
+        })
+        .catch((err: unknown) => {
+          proc.stdin.destroy(err as Error);
+          reject(err);
+        });
     };
     pump();
   });
@@ -122,6 +143,38 @@ export function pcm16MonoToWav(pcm: Buffer, sampleRate = 24_000): Buffer {
   return Buffer.concat([header, pcm]);
 }
 
+export function buildRealtimeSpeechResponseEvent(params: {
+  voice: string;
+  input: string;
+  instructions?: string;
+}): Record<string, unknown> {
+  return {
+    type: 'response.create',
+    response: {
+      output_modalities: ['audio'],
+      instructions: [
+        params.instructions,
+        'Lis exactement le texte fourni, sans ajout, reformulation ni commentaire.',
+      ]
+        .filter(Boolean)
+        .join(' '),
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: params.input }],
+        },
+      ],
+      audio: {
+        output: {
+          format: { type: 'audio/pcm', rate: 24_000 },
+          voice: params.voice,
+        },
+      },
+    },
+  };
+}
+
 export function synthesizeRealtimeSpeech(params: {
   apiKey: string;
   baseUrl: string;
@@ -129,7 +182,6 @@ export function synthesizeRealtimeSpeech(params: {
   voice: string;
   input: string;
   instructions?: string;
-  speed?: number;
   timeoutMs: number;
   signal?: AbortSignal;
 }): Promise<Buffer> {
@@ -145,7 +197,10 @@ export function synthesizeRealtimeSpeech(params: {
     const socket = new WebSocket(endpoint, {
       headers: { Authorization: `Bearer ${params.apiKey}` },
     });
-    const timeout = setTimeout(() => finish(new Error('openai_realtime_tts_timeout')), params.timeoutMs);
+    const timeout = setTimeout(
+      () => finish(new Error('openai_realtime_tts_timeout')),
+      params.timeoutMs
+    );
     const onAbort = (): void => finish(new DOMException('Aborted', 'AbortError'));
     params.signal?.addEventListener('abort', onAbort, { once: true });
     if (params.signal?.aborted) onAbort();
@@ -169,28 +224,7 @@ export function synthesizeRealtimeSpeech(params: {
     }
 
     socket.on('open', () => {
-      socket.send(JSON.stringify({
-        type: 'response.create',
-        response: {
-          output_modalities: ['audio'],
-          instructions: [
-            params.instructions,
-            'Lis exactement le texte fourni, sans ajout, reformulation ni commentaire.',
-          ].filter(Boolean).join(' '),
-          input: [{
-            type: 'message',
-            role: 'user',
-            content: [{ type: 'input_text', text: params.input }],
-          }],
-          audio: {
-            output: {
-              format: { type: 'audio/pcm', rate: 24_000 },
-              voice: params.voice,
-              speed: Math.max(0.25, Math.min(1.5, params.speed ?? 1)),
-            },
-          },
-        },
-      }));
+      socket.send(JSON.stringify(buildRealtimeSpeechResponseEvent(params)));
     });
     socket.on('message', (raw) => {
       let event: RealtimeServerEvent;
@@ -209,7 +243,11 @@ export function synthesizeRealtimeSpeech(params: {
         }
         chunks.push(chunk);
       } else if (event.type === 'response.done') {
-        finish(event.response?.status === 'completed' ? undefined : new Error('openai_realtime_tts_incomplete'));
+        finish(
+          event.response?.status === 'completed'
+            ? undefined
+            : new Error('openai_realtime_tts_incomplete')
+        );
       } else if (event.type === 'error') {
         finish(new Error('openai_realtime_tts_error'));
       }
@@ -223,7 +261,7 @@ export function synthesizeRealtimeSpeech(params: {
 
 export async function synthesizeOpenAiSpeech(
   config: OpenAiTtsRuntimeConfig,
-  input: string,
+  input: string
 ): Promise<{ bytes: Buffer; contentType: string }> {
   return executeOpenAiOperation({
     capability: 'tts',
@@ -239,7 +277,6 @@ export async function synthesizeOpenAiSpeech(
               voice: config.voice,
               input,
               instructions: config.instructions,
-              speed: config.speed,
               timeoutMs: config.timeoutMs,
               signal: operationSignal,
             }),
@@ -267,7 +304,7 @@ export async function synthesizeOpenAiSpeech(
         throw new OpenAiHttpError(
           response.status,
           retryAfterMsFromHeaders(response.headers),
-          `openai_tts_failed:${response.status}`,
+          `openai_tts_failed:${response.status}`
         );
       }
       return {
@@ -286,7 +323,10 @@ export function hasHaTtsConfig(env: Env): boolean {
   return Boolean(env.HA_BASE_URL && env.HA_TOKEN);
 }
 
-export function resolveRequestedTtsMode(defaultMode: TtsRouteMode, requested?: TtsRouteMode): TtsRouteMode {
+export function resolveRequestedTtsMode(
+  defaultMode: TtsRouteMode,
+  requested?: TtsRouteMode
+): TtsRouteMode {
   if (defaultMode !== 'auto' || !requested || requested === 'auto') return defaultMode;
   return requested;
 }

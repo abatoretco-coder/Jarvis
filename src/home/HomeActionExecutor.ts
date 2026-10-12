@@ -8,7 +8,7 @@ import { isStreamDeckHomeActionAllowed, isStreamDeckPrincipal } from '../identit
 import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
 import { homeActionTiming } from './HomeActionTiming';
-import { type HomeActionName, type HomeCatalog, type HomeScene, TV_REMOTE_KEYS } from './HomeCatalog';
+import { type HomeActionName, type HomeCatalog, type HomeScene, isHomeActionValueValid, TV_REMOTE_KEYS } from './HomeCatalog';
 import { ensureTelevisionReady } from './TelevisionReadiness';
 
 export type ExecutableHomeAction = {
@@ -90,7 +90,7 @@ export type ResolvedCatalogHomeAction =
   | {
       ok: false;
       status: 400 | 404 | 409;
-      code: 'home_device_not_found' | 'home_device_not_mapped' | 'home_action_unsupported';
+      code: 'home_device_not_found' | 'home_device_not_mapped' | 'home_action_unsupported' | 'home_action_option_invalid';
       domain?: string;
     };
 
@@ -104,6 +104,9 @@ export function resolveCatalogHomeAction(
   const domain = mapping.entityId.split('.')[0] ?? '';
   if (!allowedActions[domain]?.includes(command.action)) {
     return { ok: false, status: 400, code: 'home_action_unsupported', domain };
+  }
+  if (!isHomeActionValueValid(command.action, command.value, command.option)) {
+    return { ok: false, status: 400, code: 'home_action_option_invalid', domain };
   }
   if (command.action === 'remote_key' && !TV_REMOTE_KEYS.includes(command.option as typeof TV_REMOTE_KEYS[number])) {
     return { ok: false, status: 400, code: 'home_action_unsupported', domain };

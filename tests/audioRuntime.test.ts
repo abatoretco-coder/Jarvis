@@ -2,6 +2,7 @@ import { describe, expect, test } from '@jest/globals';
 
 import { loadEnv } from '../src/env';
 import {
+  buildRealtimeSpeechResponseEvent,
   isRealtimeSpeechModel,
   pcm16MonoToWav,
   resolveOpenAiTtsRuntimeConfig,
@@ -50,5 +51,26 @@ describe('Phase 1 cloud TTS runtime', () => {
     expect(wav.readUInt32LE(24)).toBe(24_000);
     expect(wav.readUInt32LE(40)).toBe(4);
     expect(wav.subarray(44)).toEqual(Buffer.from([0, 0, 1, 0]));
+  });
+
+  test('does not send the unsupported speed field to the Realtime API', () => {
+    const event = buildRealtimeSpeechResponseEvent({
+      voice: 'marin',
+      input: 'Bonjour.',
+      instructions: 'Parle en français.',
+    });
+
+    expect(event).toMatchObject({
+      type: 'response.create',
+      response: {
+        audio: {
+          output: {
+            format: { type: 'audio/pcm', rate: 24_000 },
+            voice: 'marin',
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(event)).not.toContain('speed');
   });
 });

@@ -17,7 +17,7 @@
         "2. Un ou plusieurs agents spécialisés seulement lorsque la demande vise explicitement leur service. N'invente jamais de domaine.",
         "3. Si plusieurs services sont demandés, retourne un target par service. Sinon retourne un seul target.",
         "4. En cas de doute, retourne general seul. Ne devine pas une action connectée.",
-        "Exemples : « Test, tu me reçois ? » -> general ; « lis mes emails » -> gmail ; « allume le salon » -> home_control ; « programme un rappel à 18 heures » -> home_control."
+        "Exemples : « Test, tu me reçois ? » -> general ; « lis mes emails » -> gmail ; « allume le salon » -> home_control ; « programme un rappel à 18 heures » -> home_utility si cet identifiant est autorisé, sinon general."
       ]
     },
     {
@@ -25,11 +25,11 @@
       "lines": [
         "Frontières importantes :",
         "- email/Gmail/boîte de réception avec lire, chercher, envoyer, répondre, transférer, supprimer ou marquer -> gmail. Une demande de retrouver un message, devis, facture, expéditeur ou pièce jointe est aussi gmail, même sans le mot « email ». Exemple strict : « trouve le message avec le devis » -> gmail.",
-        "- todo est réservé aux tâches, listes et checklists explicitement demandées. Un minuteur, rappel ou alarme N'EST JAMAIS une tâche : minuteur, rappel, alarme, scène, script, appareil ou lumière -> home_control, même sans nommer Home Assistant.",
+        "- todo est réservé aux tâches, listes et checklists explicitement demandées. Un minuteur, rappel, alarme ou note Home Assistant N'EST JAMAIS une tâche : -> home_utility si cet identifiant est autorisé. Une scène, un script, une TV, une lumière, une prise, un chauffage, un robot ou tout autre appareil -> home_control.",
         "- PRIORITÉ MÉTÉO : météo sans lieu externe explicite -> weather_local, y compris les prévisions « demain », « cette semaine » ou « ce week-end ». Dès qu'une ville, région ou pays externe est nommé (Paris, Londres, Lyon, Rome, etc.) -> search.news, JAMAIS weather_local, même si le message contient « météo », « temps », « pleut » ou « prévisions ». Exemples stricts : « Va-t-il pleuvoir cette semaine ? » -> weather_local ; « météo à Paris », « est-ce qu'il pleut à Lyon ? » et « prévisions pour Rome » -> search.news.",
         "- actualité, score, prix ou information très récente -> search.news ; fait ou définition simple -> search.web ; analyse, histoire ou comparaison approfondie -> search.deep. Un cours ou prix de marché actuel (Bitcoin, action, devise) est toujours search.news. Exemple strict : « quel est le prix du bitcoin ? » -> search.news.",
         "- spotify uniquement pour une demande de musique. Ne confonds jamais musique et minuteur, rappel, lumière, prise ou scène. Transférer, déplacer ou jouer la musique sur une pièce/appareil est spotify avec action transfer, jamais home_control. Exemple strict : « transfère la musique sur le salon » -> spotify transfer.",
-        "- robot, aspirateur, volets, garage, chauffage et interphone sont des appareils de maison : toute action ou question sur eux -> home_control. Exemple : « renvoie le robot à sa base » -> home_control."
+        "- robot, aspirateur, TV, lumière, prise, scène, script, volets, garage, chauffage et interphone sont des appareils de maison : toute action ou question sur eux -> home_control, jamais home_utility. Exemple : « renvoie le robot à sa base » -> home_control."
       ]
     },
     {
@@ -37,7 +37,9 @@
       "lines": [
         "Pour spotify, action est obligatoire : pause, play, next, previous, now_playing, like_track, list_devices, volume_set, search_and_play, transfer, search, queue_add, shuffle_set ou repeat_set.",
         "search_and_play, search et queue_add exigent slots.query non vide. transfer exige slots.device. volume_set utilise volume_percent ou volume_delta.",
-        "Une chanson, artiste, album, genre ou ambiance -> search_and_play ; reprise sans contenu -> play ; appareil seul -> transfer."
+        "Une chanson, artiste, album, genre ou ambiance -> search_and_play ; reprise sans contenu -> play ; appareil seul -> transfer.",
+        "Une action de lecture explicite reste prioritaire même si un appareil est mentionné : « passe au morceau suivant sur le PC » et « change de musique sur le PC » -> next sans slots.device ; « mets en pause sur le PC » -> pause ; « reprends sur le PC » -> play. Utilise transfer seulement quand la demande porte sur le déplacement de la lecture vers un appareil, sans autre action de lecture.",
+        "Dans slots.query, corrige uniquement les erreurs phonétiques évidentes sur un artiste ou titre connu quand l'intention musicale est certaine. Exemples : « deft pink », « def de pink » ou « dafte punk » -> « Daft Punk »."
       ]
     },
     {

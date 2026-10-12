@@ -29,50 +29,18 @@ export const HOME_DEVICE_ICON_KEYS = [
   'door', 'window', 'shower', 'washer', 'kitchen', 'sofa', 'bed',
 ] as const;
 export type HomeDeviceIcon = (typeof HOME_DEVICE_ICON_KEYS)[number];
-export type HomeActionName =
-  | 'turn_on'
-  | 'turn_off'
-  | 'toggle'
-  | 'play_pause'
-  | 'start'
-  | 'return_to_base'
-  | 'locate'
-  | 'set_suction_mode'
-  | 'set_mop_mode'
-  | 'set_temperature'
-  | 'set_hvac_mode'
-  | 'set_preset_mode'
-  | 'set_temperature_offset'
-  | 'set_child_lock'
-  | 'set_preheating'
-  | 'set_operation_mode'
-  | 'set_away_mode'
-  | 'set_eco_mode'
-  | 'set_boost_mode'
-  | 'set_antilegionella'
-  | 'open'
-  | 'close'
-  | 'stop'
-  | 'set_brightness'
-  | 'set_color'
-  | 'set_volume'
-  | 'volume_up'
-  | 'volume_down'
-  | 'mute'
-  | 'unmute'
-  | 'media_play'
-  | 'media_pause'
-  | 'media_stop'
-  | 'media_next'
-  | 'media_previous'
-  | 'play_channel'
-  | 'select_source'
-  | 'select_sound_output'
-  | 'remote_key'
-  | 'empty_dust_bin'
-  | 'wash_mop'
-  | 'start_mop_drying'
-  | 'stop_mop_drying';
+export const HOME_ACTION_NAMES = [
+  'turn_on', 'turn_off', 'toggle', 'play_pause', 'start', 'return_to_base', 'locate',
+  'set_suction_mode', 'set_mop_mode', 'set_temperature', 'set_hvac_mode',
+  'set_preset_mode', 'set_temperature_offset', 'set_child_lock', 'set_preheating',
+  'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode',
+  'set_antilegionella', 'open', 'close', 'stop', 'set_brightness', 'set_color',
+  'set_volume', 'volume_up', 'volume_down', 'mute', 'unmute', 'media_play',
+  'media_pause', 'media_stop', 'media_next', 'media_previous', 'play_channel',
+  'select_source', 'select_sound_output', 'remote_key', 'empty_dust_bin', 'wash_mop',
+  'start_mop_drying', 'stop_mop_drying',
+] as const;
+export type HomeActionName = (typeof HOME_ACTION_NAMES)[number];
 export type HomeQuickAction = {
   quickActionId: string;
   name: string;
@@ -374,50 +342,7 @@ const deviceIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIcons = new Set(['light', 'climate', 'media', 'vacuum', 'home']);
 const homeDeviceIcons = new Set<string>(HOME_DEVICE_ICON_KEYS);
-const quickActionNames = new Set<HomeActionName>([
-  'turn_on',
-  'turn_off',
-  'toggle',
-  'play_pause',
-  'start',
-  'return_to_base',
-  'locate',
-  'set_suction_mode',
-  'set_mop_mode',
-  'set_temperature',
-  'set_hvac_mode',
-  'set_preset_mode',
-  'set_temperature_offset',
-  'set_child_lock',
-  'set_preheating',
-  'set_operation_mode',
-  'set_away_mode',
-  'set_eco_mode',
-  'set_boost_mode',
-  'set_antilegionella',
-  'open',
-  'close',
-  'stop',
-  'set_brightness',
-  'set_volume',
-  'volume_up',
-  'volume_down',
-  'mute',
-  'unmute',
-  'media_play',
-  'media_pause',
-  'media_stop',
-  'media_next',
-  'media_previous',
-  'play_channel',
-  'select_source',
-  'select_sound_output',
-  'remote_key',
-  'empty_dust_bin',
-  'wash_mop',
-  'start_mop_drying',
-  'stop_mop_drying',
-]);
+const quickActionNames = new Set<HomeActionName>(HOME_ACTION_NAMES);
 
 export const TV_REMOTE_KEYS = [
   'HOME', 'BACK', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'ENTER', 'EXIT', 'INFO',
@@ -426,7 +351,7 @@ export const TV_REMOTE_KEYS = [
 ] as const;
 const tvRemoteKeys = new Set<string>(TV_REMOTE_KEYS);
 
-function isActionValueValid(
+export function isHomeActionValueValid(
   action: HomeActionName,
   value: number | undefined,
   option: string | undefined
@@ -438,6 +363,9 @@ function isActionValueValid(
   }
   if (action === 'set_brightness' || action === 'set_volume') {
     return typeof value === 'number' && value >= 0 && value <= 100;
+  }
+  if (action === 'set_color') {
+    return value === undefined && /^#[0-9a-f]{6}$/iu.test(option ?? '');
   }
   if (['select_source', 'select_sound_output', 'set_suction_mode', 'set_mop_mode', 'set_hvac_mode', 'set_preset_mode', 'set_operation_mode'].includes(action)) {
     return value === undefined && typeof option === 'string' && option.trim().length >= 1 && option.length <= 120;
@@ -511,7 +439,7 @@ function normalizeQuickAction(value: HomeQuickAction): HomeQuickAction | null {
     !Number.isInteger(value.sortOrder) ||
     value.sortOrder < 0 ||
     value.sortOrder > 999 ||
-    !isActionValueValid(value.action, value.value, value.option)
+    !isHomeActionValueValid(value.action, value.value, value.option)
   ) {
     return null;
   }
@@ -551,7 +479,7 @@ function normalizeScene(value: HomeScene): HomeScene | null {
     if (
       !deviceIdPattern.test(step.deviceId) ||
       !quickActionNames.has(step.action) ||
-      !isActionValueValid(step.action, step.value, step.option)
+      !isHomeActionValueValid(step.action, step.value, step.option)
     ) return null;
     return {
       deviceId: step.deviceId,

@@ -26,6 +26,7 @@ import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
 import {
   type AgentRouteEntry,
+  HOME_CONTROL_ROUTER_AGENT_ID,
   LOCAL_WEATHER_ROUTER_AGENT_ID,
   parseAgentMap,
   type RouterResult,
@@ -69,6 +70,10 @@ import {
 } from '../culture/CultureProfileIdentity';
 import { CultureProfileRepository } from '../culture/CultureProfileRepository';
 import { executeCatalogHomeAction, executeCatalogHomeScene } from '../home/HomeActionExecutor';
+import {
+  formatHomeVoiceActionReply,
+  planHomeActionFromTextWithOpenAi,
+} from '../home/HomeVoicePlanner';
 import {
   permissionForCapabilityAgent,
   permissionForRouteKey,
@@ -350,6 +355,19 @@ function simpleConversationalReply(text: string): string | undefined {
   return undefined;
 }
 
+function isAllowedHomeUtilityIntent(text: string): boolean {
+  const normalized = normalizeIntentText(text);
+  const hasUtility = /\b(minuteur|timer|chronometre|chrono|rappel|alarme|reveil|note|memo)\b/u.test(
+    normalized
+  );
+  const hasDevice =
+    /\b(tv|tele|television|lampe|lumiere|prise|chauffage|radiateur|robot|nono|aspirateur|volet|garage|interphone|scene|script)\b/u.test(
+      normalized
+    );
+  const hasMultipleClauses = /\b(et|puis|ensuite|apres)\b/u.test(normalized);
+  return hasUtility && !hasDevice && !hasMultipleClauses;
+}
+
 function isLikelyCalendarIntent(text: string): boolean {
   const t = normalizeIntentText(text);
   if (!t) return false;
@@ -404,19 +422,32 @@ function applyFrenchVoiceHubGuard(text: string, clientChannel?: string): string 
 const SEMANTIC_E1_LIVE_SUPPORTED_ROUTE_KEYS = new Set(
   SEMANTIC_ROUTES.filter((route) => route.level === 'E1').map((route) => route.key)
 );
+const LOCAL_HOME_SEMANTIC_ROUTE_KEYS = new Set([
+  'executor.scene_set',
+  'executor.media_play_pause',
+  'executor.media_next',
+  'executor.media_previous',
+  'executor.volume_up',
+  'executor.volume_down',
+  'executor.mute',
+  'executor.unmute',
+  'executor.climate_set',
+  'executor.lock',
+  'executor.unlock',
+  'executor.vacuum_start',
+  'executor.vacuum_stop',
+  'executor.cover_open',
+  'executor.cover_close',
+]);
 
-function resolveExecutorsEntry(
+function resolveLegacyUtilityEntry(
   agentEntries: AgentRouteEntry[],
   generalAgentId: string
 ): AgentRouteEntry | null {
-  // Preferred explicit mapping: key=executors or direct pseudo-agent id.
   const explicit = agentEntries.find(
     (entry) => entry.key === 'executors' || entry.agentId === 'executors'
   );
   if (explicit) return explicit;
-
-  // Compatibility fallback: if there is exactly one remaining HA specialized target,
-  // treat it as the executors route sink.
   const candidates = agentEntries.filter((entry) => {
     if (entry.agentId === generalAgentId) return false;
     if (entry.key === 'weather') return false;
@@ -1067,9 +1098,10 @@ function inferSimpleSpotifyControl(
   const hasMusicNoun = /\b(musique|spotify|piste|titre|morceau|chanson|track|lecture)\b/u.test(
     normalized
   );
-  const isGenericMusicStart = /^(?:(?:hey )?(?:jarvis|chatgpt) )?(?:s )?(?:allume|lance|demarre|mets|met)(?: moi)? (?:de la |de |la )musique(?: (?:stp|s il te plait))?$/u.test(
-    normalized
-  );
+  const isGenericMusicStart =
+    /^(?:(?:hey )?(?:jarvis|chatgpt) )?(?:s )?(?:allume|lance|demarre|mets|met)(?: moi)? (?:de la |de |la )musique(?: (?:stp|s il te plait))?$/u.test(
+      normalized
+    );
   if (
     options.voiceHub &&
     /^(la |le |titre |piste |morceau |chanson )?(suivante?|next|skip)$/u.test(normalized)
@@ -1097,7 +1129,10 @@ function inferSimpleSpotifyControl(
   if (/\b(pause|mets en pause|arrete|stop)\b/u.test(normalized) && hasMusicNoun) {
     return 'pause';
   }
-  if (isGenericMusicStart || (/\b(reprends|relance|continue|play|lecture)\b/u.test(normalized) && hasMusicNoun)) {
+  if (
+    isGenericMusicStart ||
+    (/\b(reprends|relance|continue|play|lecture)\b/u.test(normalized) && hasMusicNoun)
+  ) {
     return 'play';
   }
   return null;
@@ -1828,7 +1863,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const spotifyWebApi = () => {
     const ownerUserId = getCurrentOwnerUserId();
     const connectionId = getCurrentIntegrationConnectionId();
-    return deps.spotifyClients?.forUser(ownerUserId ?? undefined, connectionId) ?? deps.spotifyWebApi;
+    return (
+      deps.spotifyClients?.forUser(ownerUserId ?? undefined, connectionId) ?? deps.spotifyWebApi
+    );
   };
 
   const executePendingMutation = async (mutation: PendingMutation): Promise<string> => {
@@ -2311,7 +2348,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           ? `${voiceScene.name}, c'est fait.`
           : result.outcome === 'accepted'
             ? `${voiceScene.name} a été acceptée, sans confirmation des équipements.`
-          : result.outcome === 'uncertain'
+            : result.outcome === 'uncertain'
               ? `${voiceScene.name} a été lancée, mais son résultat reste incertain.`
               : result.outcome === 'partial'
                 ? `${voiceScene.name} n'a été exécutée qu'en partie.`
@@ -3396,7 +3433,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     //   - HA specialized only     → call those, combine
     //   - router fails / none     → HA general called as fallback
 
-    const agentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
+    // Device control is a local Jarvis capability. A legacy HA executor may
+    // remain available for utilities with no direct device equivalent (timer,
+    // reminder, alarm, note), but it receives a distinct router identity and
+    // must never be selected for TV/light/climate/vacuum actions.
+    const configuredAgentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
     const spotifyEntry = spotifyWebApi().isConfigured()
       ? {
           agentId: SPOTIFY_AGENT_ID,
@@ -3413,10 +3454,30 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
       : null;
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
-    const executorsEntry = resolveExecutorsEntry(agentEntries, generalAgentId);
+    const legacyUtilityEntry = resolveLegacyUtilityEntry(configuredAgentEntries, generalAgentId);
+    const agentEntries = configuredAgentEntries.map((entry) =>
+      legacyUtilityEntry && entry.agentId === legacyUtilityEntry.agentId
+        ? {
+            ...entry,
+            routerId: 'home_utility',
+            hint: 'Utilitaires Home Assistant sans appareil: minuteur, rappel, alarme et note. Jamais TV, lumière, chauffage, robot, prise, scène ou équipement.',
+          }
+        : entry
+    );
+    const homeControlEntry =
+      deps.homeCatalog && deps.ha
+        ? {
+            agentId: HOME_CONTROL_ROUTER_AGENT_ID,
+            routerId: HOME_CONTROL_ROUTER_AGENT_ID,
+            hint: 'Domotique locale Jarvis: appareils et actions validés par le catalogue du domicile',
+            key: 'executors' as const,
+          }
+        : null;
+    const executorsEntry = legacyUtilityEntry;
     const allAgentEntries = [
       ...(spotifyEntry ? [spotifyEntry] : []),
       ...(weatherEntry ? [weatherEntry] : []),
+      ...(homeControlEntry ? [homeControlEntry] : []),
       ...agentEntries,
     ];
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
@@ -3880,7 +3941,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
                 if (highRiskAllowed) {
                   if (routeKey.startsWith('executor.')) {
-                    if (!executorsEntry) {
+                    const executorTargetEntry = LOCAL_HOME_SEMANTIC_ROUTE_KEYS.has(routeKey)
+                      ? homeControlEntry
+                      : executorsEntry;
+                    if (!executorTargetEntry) {
                       app.log.info(
                         {
                           threadId,
@@ -3899,7 +3963,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                         'semantic_router_e1_activation_fallback_unsupported_target'
                       );
                     } else {
-                      semanticActivatedTarget = { agentId: executorsEntry.agentId, confidence: 1 };
+                      semanticActivatedTarget = {
+                        agentId: executorTargetEntry.agentId,
+                        confidence: 1,
+                      };
                       semanticActivatedRouteKey = routeKey;
                       app.log.info(
                         {
@@ -4520,19 +4587,93 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           );
         }
 
-        // HA specialized tasks
-        const agentEntryByAgentId = new Map(agentEntries.map((e) => [e.agentId, e]));
-        if (weatherEntry) {
-          agentEntryByAgentId.set(weatherEntry.agentId, weatherEntry);
-        }
+        // Specialized tasks. Home control is local and deliberately shares the
+        // exact catalog/executor used by the direct API; it is never forwarded
+        // to a second Home Assistant conversation agent.
+        const agentEntryByAgentId = new Map(allAgentEntries.map((e) => [e.agentId, e]));
         for (const haTarget of haSpecTargets) {
           const agentEntry = agentEntryByAgentId.get(haTarget.agentId);
+          const isHomeControlAgent = haTarget.agentId === HOME_CONTROL_ROUTER_AGENT_ID;
           const isSearchAgent = isSearchAgentKey(agentEntry?.key);
           const isTodoAgent = isTodoAgentKey(agentEntry?.key);
           const isMailAgent = isMailAgentKey(agentEntry?.key);
           const isCalendarAgent = isCalendarAgentKey(agentEntry?.key);
           const isWeatherAgent = agentEntry?.key === 'weather';
-          if (isSearchAgent) {
+          if (isHomeControlAgent) {
+            const homePrincipal = getRequestPrincipal(req);
+            app.log.info({ threadId, requestId }, 'home_control_local_planner');
+            tasks.push(
+              planHomeActionFromTextWithOpenAi({
+                env: deps.env,
+                catalog: deps.homeCatalog!,
+                ha: deps.ha,
+                text: assistantInputText,
+                correlationId: correlationId || undefined,
+                userId: homePrincipal?.kind === 'user' ? homePrincipal.userId : undefined,
+                log: app.log,
+              })
+                .then(async (plan): Promise<SpecializedResult | null> => {
+                  if (plan.route === 'none') {
+                    app.log.info(
+                      { threadId, requestId, reason: plan.reason },
+                      'home_control_local_no_action'
+                    );
+                    return {
+                      kind: 'ha_text',
+                      agentId: haTarget.agentId,
+                      text: 'Je n’ai pas identifié une action domotique unique et sûre à exécuter.',
+                    };
+                  }
+                  const result = await executeCatalogHomeAction({
+                    catalog: deps.homeCatalog!,
+                    ha: deps.ha,
+                    principal: homePrincipal,
+                    command: plan.command,
+                  });
+                  const mapping = deps.homeCatalog!.getMapping(plan.command.deviceId);
+                  try {
+                    deps.adminAudit?.recordActorAudit({
+                      actorKind: homePrincipal?.kind ?? 'system',
+                      actorId:
+                        homePrincipal?.kind === 'user'
+                          ? homePrincipal.userId
+                          : homePrincipal?.kind === 'service'
+                            ? homePrincipal.serviceId
+                            : 'legacy-local',
+                      action: 'home.device.voice_run',
+                      targetType: 'home.device',
+                      targetId: plan.command.deviceId,
+                      outcome: result.ok ? 'success' : result.status === 403 ? 'denied' : 'failed',
+                      correlationId: req.id,
+                      metadata: result.ok
+                        ? { domain: result.domain, action: plan.command.action }
+                        : {
+                            errorCode: result.code,
+                            action: plan.command.action,
+                            ...(result.domain ? { domain: result.domain } : {}),
+                          },
+                    });
+                  } catch (error) {
+                    app.log.error(
+                      {
+                        errorCode:
+                          error instanceof Error ? error.message : 'home_voice_audit_failed',
+                      },
+                      'home voice audit persistence failed'
+                    );
+                  }
+                  return {
+                    kind: 'ha_text',
+                    agentId: haTarget.agentId,
+                    text: formatHomeVoiceActionReply(plan.command, result, mapping?.name),
+                  };
+                })
+                .catch((err) => {
+                  app.log.warn({ threadId, requestId, err }, 'home_control_local_failed');
+                  return null;
+                })
+            );
+          } else if (isSearchAgent) {
             // Search agents: dispatch to appropriate Perplexity/OpenAI strategy — bypass HA entirely.
             const searchAgentKey =
               externalWeatherCandidate && agentEntry?.key === 'search.news'
@@ -4735,6 +4876,21 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       return null;
                     })
                 : Promise.resolve(null)
+            );
+          } else if (
+            agentEntry?.routerId === 'home_utility' &&
+            !isAllowedHomeUtilityIntent(assistantInputText)
+          ) {
+            app.log.warn(
+              { threadId, requestId, agent: haTarget.agentId },
+              'home_utility_device_action_blocked'
+            );
+            tasks.push(
+              Promise.resolve({
+                kind: 'ha_text' as const,
+                agentId: haTarget.agentId,
+                text: 'Cette demande doit passer par le catalogue domotique Jarvis.',
+              })
             );
           } else {
             tasks.push(

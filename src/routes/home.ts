@@ -12,7 +12,7 @@ import {
   HomeAssistantRegistrySyncService,
   HomeAssistantSyncError,
 } from '../home/HomeAssistantRegistrySyncService';
-import { HOME_DEVICE_ICON_KEYS, HomeCatalog } from '../home/HomeCatalog';
+import { HOME_ACTION_NAMES, HOME_DEVICE_ICON_KEYS, HomeCatalog, isHomeActionValueValid } from '../home/HomeCatalog';
 import {
   HomeHeatingPlanService,
   HomeHeatingPlanUpdateError,
@@ -22,51 +22,7 @@ import type { AppDeps } from '../server';
 
 const deviceIdSchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/u);
 const revisionSchema = z.string().regex(/^[a-f0-9]{16}$/u);
-const actionNameSchema = z.enum([
-  'turn_on',
-  'turn_off',
-  'toggle',
-  'play_pause',
-  'start',
-  'return_to_base',
-  'locate',
-  'set_suction_mode',
-  'set_mop_mode',
-  'set_temperature',
-  'set_hvac_mode',
-  'set_preset_mode',
-  'set_temperature_offset',
-  'set_child_lock',
-  'set_preheating',
-  'set_operation_mode',
-  'set_away_mode',
-  'set_eco_mode',
-  'set_boost_mode',
-  'set_antilegionella',
-  'open',
-  'close',
-  'stop',
-  'set_brightness',
-  'set_color',
-  'set_volume',
-  'volume_up',
-  'volume_down',
-  'mute',
-  'unmute',
-  'media_play',
-  'media_pause',
-  'media_stop',
-  'media_next',
-  'media_previous',
-  'play_channel',
-  'select_source',
-  'select_sound_output',
-  'remote_key',
-  'empty_dust_bin',
-  'wash_mop',
-  'start_mop_drying',
-  'stop_mop_drying',
-]);
+const actionNameSchema = z.enum(HOME_ACTION_NAMES);
 const actionSchema = z
   .object({
     deviceId: deviceIdSchema,
@@ -76,28 +32,8 @@ const actionSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    const needsValue = ['set_temperature', 'set_temperature_offset', 'set_brightness', 'set_volume'].includes(value.action);
-    const needsOption = ['set_color', 'select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
-    if (needsValue && value.value === undefined) {
-      context.addIssue({ code: 'custom', message: 'value_required', path: ['value'] });
-    }
-    if (value.action === 'set_temperature' && value.value !== undefined && (value.value < 5 || value.value > 80)) {
-      context.addIssue({ code: 'custom', message: 'temperature_invalid', path: ['value'] });
-    }
-    if (!needsValue && value.value !== undefined) {
-      context.addIssue({ code: 'custom', message: 'unexpected_value', path: ['value'] });
-    }
-    if (needsOption && value.option === undefined) {
-      context.addIssue({ code: 'custom', message: 'option_required', path: ['option'] });
-    }
-    if (['set_child_lock', 'set_preheating', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action) && !['on', 'off'].includes(value.option ?? '')) {
-      context.addIssue({ code: 'custom', message: 'switch_option_invalid', path: ['option'] });
-    }
-    if (value.action === 'set_color' && !/^#[0-9a-f]{6}$/iu.test(value.option ?? '')) {
-      context.addIssue({ code: 'custom', message: 'color_invalid', path: ['option'] });
-    }
-    if (!needsOption && value.option !== undefined) {
-      context.addIssue({ code: 'custom', message: 'unexpected_option', path: ['option'] });
+    if (!isHomeActionValueValid(value.action, value.value, value.option)) {
+      context.addIssue({ code: 'custom', message: 'action_parameters_invalid' });
     }
   });
 
@@ -141,28 +77,8 @@ const quickActionSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    const needsValue = ['set_temperature', 'set_temperature_offset', 'set_brightness', 'set_volume'].includes(value.action);
-    const needsOption = ['set_color', 'select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
-    if (needsValue && value.value === undefined) {
-      context.addIssue({ code: 'custom', message: 'value_required', path: ['value'] });
-    }
-    if (value.action === 'set_temperature' && value.value !== undefined && (value.value < 5 || value.value > 80)) {
-      context.addIssue({ code: 'custom', message: 'temperature_invalid', path: ['value'] });
-    }
-    if (!needsValue && value.value !== undefined) {
-      context.addIssue({ code: 'custom', message: 'unexpected_value', path: ['value'] });
-    }
-    if (needsOption && value.option === undefined) {
-      context.addIssue({ code: 'custom', message: 'option_required', path: ['option'] });
-    }
-    if (['set_child_lock', 'set_preheating', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action) && !['on', 'off'].includes(value.option ?? '')) {
-      context.addIssue({ code: 'custom', message: 'switch_option_invalid', path: ['option'] });
-    }
-    if (value.action === 'set_color' && !/^#[0-9a-f]{6}$/iu.test(value.option ?? '')) {
-      context.addIssue({ code: 'custom', message: 'color_invalid', path: ['option'] });
-    }
-    if (!needsOption && value.option !== undefined) {
-      context.addIssue({ code: 'custom', message: 'unexpected_option', path: ['option'] });
+    if (!isHomeActionValueValid(value.action, value.value, value.option)) {
+      context.addIssue({ code: 'custom', message: 'action_parameters_invalid' });
     }
   });
 const sceneSchema = z

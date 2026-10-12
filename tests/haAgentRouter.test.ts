@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
 
 import type { HaAgentEntry, RouterOptions } from '../src/conversation/haAgentRouter';
-import {
-  parseAgentMap,
-  routeToHaAgent,
-  SPOTIFY_AGENT_ID,
-} from '../src/conversation/haAgentRouter';
+import { parseAgentMap, routeToHaAgent, SPOTIFY_AGENT_ID } from '../src/conversation/haAgentRouter';
 import {
   buildOrchestratorResponseFormat,
   HOME_CONTROL_ROUTER_AGENT_ID,
@@ -27,7 +23,7 @@ const DEFAULT_OPTIONS: RouterOptions = {
   openAiBaseUrl: BASE_URL,
   model: 'gpt-4o-mini',
   timeoutMs: 3000,
-  confidenceThreshold: 0.70,
+  confidenceThreshold: 0.7,
   generalAgentId: 'conversation.jarvis_conversation',
 };
 
@@ -40,8 +36,11 @@ function jsonResponse(payload: unknown, status = 200): Response {
 
 function openAiResponse(content: string, status = 200): Response {
   return jsonResponse(
-    { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: content }] }] },
-    status,
+    {
+      status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: content }] }],
+    },
+    status
   );
 }
 
@@ -66,22 +65,28 @@ describe('parseAgentMap', () => {
 
   test('parses a single entry correctly', () => {
     const result = parseAgentMap('search:conversation.jarvis_search:Recherche internet');
-    expect(result).toEqual([
-      { agentId: 'conversation.jarvis_search', hint: 'Recherche internet' },
-    ]);
+    expect(result).toEqual([{ agentId: 'conversation.jarvis_search', hint: 'Recherche internet' }]);
   });
 
   test('parses multiple entries separated by pipe', () => {
     const result = parseAgentMap(
-      'search:conversation.jarvis_search:Recherche internet|executors:conversation.jarvis_executors:Domotique météo',
+      'search:conversation.jarvis_search:Recherche internet|executors:conversation.jarvis_executors:Domotique météo'
     );
     expect(result).toHaveLength(2);
-    expect(result[0]).toEqual({ agentId: 'conversation.jarvis_search', hint: 'Recherche internet' });
-    expect(result[1]).toEqual({ agentId: 'conversation.jarvis_executors', hint: 'Domotique météo' });
+    expect(result[0]).toEqual({
+      agentId: 'conversation.jarvis_search',
+      hint: 'Recherche internet',
+    });
+    expect(result[1]).toEqual({
+      agentId: 'conversation.jarvis_executors',
+      hint: 'Domotique météo',
+    });
   });
 
   test('hint may contain colons (splits on first two only)', () => {
-    const result = parseAgentMap('search:conversation.jarvis_search:Recherche: internet et actualités');
+    const result = parseAgentMap(
+      'search:conversation.jarvis_search:Recherche: internet et actualités'
+    );
     expect(result).toHaveLength(1);
     expect(result[0]?.hint).toBe('Recherche: internet et actualités');
   });
@@ -111,18 +116,44 @@ describe('routeToHaAgent', () => {
       name: 'jarvis_orchestrator_route',
       schema: {
         properties: {
-          targets: { items: { properties: { agentId: { enum: ['general', SPOTIFY_AGENT_ID] } } } },
+          targets: {
+            items: {
+              additionalProperties: false,
+              required: ['agentId', 'confidence', 'action', 'slots'],
+              properties: {
+                agentId: { enum: ['general', SPOTIFY_AGENT_ID] },
+                action: { type: ['string', 'null'] },
+                slots: {
+                  type: ['object', 'null'],
+                  additionalProperties: false,
+                },
+              },
+            },
+          },
         },
       },
     });
+    const schema = format.schema as {
+      properties: {
+        targets: {
+          items: {
+            properties: { slots: { required: string[]; properties: Record<string, unknown> } };
+          };
+        };
+      };
+    };
+    const slots = schema.properties.targets.items.properties.slots;
+    expect(slots.required).toEqual(Object.keys(slots.properties));
   });
 
   test('maps the explicit general model destination to the configured HA general agent', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
-      openAiResponse(JSON.stringify({
-        targets: [{ agentId: 'general', confidence: 0.99 }],
-        reason: 'ordinary conversation',
-      }))) as unknown as typeof fetch;
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: 'general', confidence: 0.99 }],
+          reason: 'ordinary conversation',
+        })
+      )) as unknown as typeof fetch;
 
     const result = await routeUserRequest({
       text: 'Test, tu me reçois ?',
@@ -131,17 +162,17 @@ describe('routeToHaAgent', () => {
       options: DEFAULT_OPTIONS,
     });
 
-    expect(result.targets).toEqual([
-      { agentId: DEFAULT_OPTIONS.generalAgentId, confidence: 0.99 },
-    ]);
+    expect(result.targets).toEqual([{ agentId: DEFAULT_OPTIONS.generalAgentId, confidence: 0.99 }]);
   });
 
   test('keeps the general alias stable when the general agent is also in HA_AGENT_MAP', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
-      openAiResponse(JSON.stringify({
-        targets: [{ agentId: 'general', confidence: 0.99 }],
-        reason: 'ordinary conversation',
-      }))) as unknown as typeof fetch;
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: 'general', confidence: 0.99 }],
+          reason: 'ordinary conversation',
+        })
+      )) as unknown as typeof fetch;
 
     const result = await routeUserRequest({
       text: 'Bonjour',
@@ -155,13 +186,20 @@ describe('routeToHaAgent', () => {
 
   test('maps home_control back to the real HA executor agent', async () => {
     const agents = [
-      { agentId: 'conversation.jarvis_executors', hint: 'Domotique', key: 'executors', routerId: HOME_CONTROL_ROUTER_AGENT_ID },
+      {
+        agentId: 'conversation.jarvis_executors',
+        hint: 'Domotique',
+        key: 'executors',
+        routerId: HOME_CONTROL_ROUTER_AGENT_ID,
+      },
     ];
     (global as { fetch: typeof fetch }).fetch = (async () =>
-      openAiResponse(JSON.stringify({
-        targets: [{ agentId: HOME_CONTROL_ROUTER_AGENT_ID, confidence: 0.97 }],
-        reason: 'home control',
-      }))) as unknown as typeof fetch;
+      openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: HOME_CONTROL_ROUTER_AGENT_ID, confidence: 0.97 }],
+          reason: 'home control',
+        })
+      )) as unknown as typeof fetch;
 
     const result = await routeUserRequest({
       text: 'Allume la lumière du salon',
@@ -178,7 +216,10 @@ describe('routeToHaAgent', () => {
   test('returns single spotify target when LLM picks spotify', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
       openAiResponse(
-        JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.95 }], reason: 'music request' }),
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.95 }],
+          reason: 'music request',
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -203,7 +244,7 @@ describe('routeToHaAgent', () => {
             { agentId: 'conversation.jarvis_executors', confidence: 0.88 },
           ],
           reason: 'music and weather',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -225,11 +266,11 @@ describe('routeToHaAgent', () => {
         JSON.stringify({
           targets: [{ agentId: 'conversation.jarvis_search', confidence: 0.91 }],
           reason: 'web search needed',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
-      text: "qui a gagné le GP de F1 hier",
+      text: 'qui a gagné le GP de F1 hier',
       agents: AGENTS,
       recentMessages: [],
       options: DEFAULT_OPTIONS,
@@ -247,7 +288,7 @@ describe('routeToHaAgent', () => {
             { agentId: 'conversation.jarvis_search', confidence: 0.85 },
           ],
           reason: 'mixed',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -268,11 +309,11 @@ describe('routeToHaAgent', () => {
         JSON.stringify({
           targets: [{ agentId: 'conversation.ghost', confidence: 0.99 }],
           reason: 'unknown',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     await expect(
-      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
+      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS })
     ).rejects.toThrow('router_no_valid_targets');
   });
 
@@ -281,7 +322,7 @@ describe('routeToHaAgent', () => {
       jsonResponse({ error: 'unauthorized' }, 401)) as unknown as typeof fetch;
 
     await expect(
-      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
+      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS })
     ).rejects.toThrow('openai_responses_http_401');
   });
 
@@ -290,7 +331,7 @@ describe('routeToHaAgent', () => {
       openAiResponse('not json at all')) as unknown as typeof fetch;
 
     await expect(
-      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
+      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS })
     ).rejects.toThrow('router_invalid_json');
   });
 
@@ -300,10 +341,20 @@ describe('routeToHaAgent', () => {
     (global as { fetch: typeof fetch }).fetch = (async (input: unknown, init?: RequestInit) => {
       url = String(input);
       body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return openAiResponse(JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.94 }], reason: 'music' }));
+      return openAiResponse(
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.94 }],
+          reason: 'music',
+        })
+      );
     }) as unknown as typeof fetch;
 
-    await routeToHaAgent({ text: 'mets du jazz', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS });
+    await routeToHaAgent({
+      text: 'mets du jazz',
+      agents: AGENTS,
+      recentMessages: [],
+      options: DEFAULT_OPTIONS,
+    });
 
     expect(url).toBe(`${BASE_URL}/responses`);
     expect(body.store).toBe(false);
@@ -315,7 +366,7 @@ describe('routeToHaAgent', () => {
       openAiResponse(JSON.stringify({ reason: 'forgot targets' }))) as unknown as typeof fetch;
 
     await expect(
-      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS }),
+      routeToHaAgent({ text: 'test', agents: AGENTS, recentMessages: [], options: DEFAULT_OPTIONS })
     ).rejects.toThrow('router_no_valid_targets');
   });
 
@@ -325,7 +376,10 @@ describe('routeToHaAgent', () => {
     (global as { fetch: typeof fetch }).fetch = (async (_url: unknown, init?: RequestInit) => {
       if (init?.body) capturedBodies.push(JSON.parse(init.body as string));
       return openAiResponse(
-        JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.9 }], reason: 'music' }),
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.9 }],
+          reason: 'music',
+        })
       );
     }) as unknown as typeof fetch;
 
@@ -350,7 +404,9 @@ describe('routeToHaAgent', () => {
 
   test('times out when fetch hangs beyond timeoutMs', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
-      new Promise<Response>((resolve) => setTimeout(() => resolve(jsonResponse({})), 5000))) as unknown as typeof fetch;
+      new Promise<Response>((resolve) =>
+        setTimeout(() => resolve(jsonResponse({})), 5000)
+      )) as unknown as typeof fetch;
 
     await expect(
       routeToHaAgent({
@@ -358,7 +414,7 @@ describe('routeToHaAgent', () => {
         agents: AGENTS,
         recentMessages: [],
         options: { ...DEFAULT_OPTIONS, timeoutMs: 50 },
-      }),
+      })
     ).rejects.toThrow();
   }, 10000);
 
@@ -366,9 +422,16 @@ describe('routeToHaAgent', () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
       openAiResponse(
         JSON.stringify({
-          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.95, action: 'transfer', slots: { device: 'alias:pc' } }],
+          targets: [
+            {
+              agentId: SPOTIFY_AGENT_ID,
+              confidence: 0.95,
+              action: 'transfer',
+              slots: { device: 'alias:pc' },
+            },
+          ],
           reason: 'transfer to pc',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -391,7 +454,7 @@ describe('routeToHaAgent', () => {
         JSON.stringify({
           targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.97, action: 'play' }],
           reason: 'resume playback',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -410,9 +473,16 @@ describe('routeToHaAgent', () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
       openAiResponse(
         JSON.stringify({
-          targets: [{ agentId: 'conversation.jarvis_search', confidence: 0.88, action: 'some_action', slots: { q: 'x' } }],
+          targets: [
+            {
+              agentId: 'conversation.jarvis_search',
+              confidence: 0.88,
+              action: 'some_action',
+              slots: { q: 'x' },
+            },
+          ],
           reason: 'search',
-        }),
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({
@@ -431,7 +501,10 @@ describe('routeToHaAgent', () => {
   test('backward-compat: spotify target without action still works', async () => {
     (global as { fetch: typeof fetch }).fetch = (async () =>
       openAiResponse(
-        JSON.stringify({ targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.9 }], reason: 'music' }),
+        JSON.stringify({
+          targets: [{ agentId: SPOTIFY_AGENT_ID, confidence: 0.9 }],
+          reason: 'music',
+        })
       )) as unknown as typeof fetch;
 
     const result = await routeToHaAgent({

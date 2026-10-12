@@ -75,8 +75,6 @@ export type RouterOptions = {
 // System prompt loaded from conversation/prompts/orchestratorSystemPrompt.json
 const SYSTEM_PROMPT = buildOrchestratorSystemPrompt();
 
-
-
 export async function routeUserRequest(params: {
   text: string;
   agents: AgentRouteEntry[];
@@ -88,7 +86,10 @@ export async function routeUserRequest(params: {
 }
 
 /** Builds the strict Responses API schema and prevents unknown agent identifiers. */
-export function buildOrchestratorResponseFormat(routerIds: string[]): { name: string; schema: Record<string, unknown> } {
+export function buildOrchestratorResponseFormat(routerIds: string[]): {
+  name: string;
+  schema: Record<string, unknown>;
+} {
   return {
     name: 'jarvis_orchestrator_route',
     schema: buildOrchestratorJsonSchema(routerIds),
@@ -96,29 +97,61 @@ export function buildOrchestratorResponseFormat(routerIds: string[]): { name: st
 }
 
 function buildOrchestratorJsonSchema(routerIds: string[]): Record<string, unknown> {
+  const nullableString = { type: ['string', 'null'] };
+  const nullableNumber = { type: ['number', 'null'] };
+  const nullableBoolean = { type: ['boolean', 'null'] };
+  const slotProperties = {
+    context_uri: nullableString,
+    device_id: nullableString,
+    device: nullableString,
+    display_name: nullableString,
+    payload_version: nullableString,
+    playlist_id: nullableString,
+    playlist_name: nullableString,
+    query: nullableString,
+    text: nullableString,
+    track_id: nullableString,
+    track_uri: nullableString,
+    type: nullableString,
+    uri: nullableString,
+    delta: nullableNumber,
+    limit: nullableNumber,
+    percent: nullableNumber,
+    volume_delta: nullableNumber,
+    volume_percent: nullableNumber,
+    volume: nullableNumber,
+    play: nullableBoolean,
+    state: nullableBoolean,
+    uris: { type: ['array', 'null'], items: { type: 'string' } },
+  };
   return {
-        type: 'object',
-        additionalProperties: false,
-        required: ['targets', 'reason'],
-        properties: {
-          targets: {
-            type: 'array',
-            minItems: 1,
-            maxItems: Math.max(1, routerIds.length),
-            items: {
-              type: 'object',
+    type: 'object',
+    additionalProperties: false,
+    required: ['targets', 'reason'],
+    properties: {
+      targets: {
+        type: 'array',
+        minItems: 1,
+        maxItems: Math.max(1, routerIds.length),
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['agentId', 'confidence', 'action', 'slots'],
+          properties: {
+            agentId: { type: 'string', enum: routerIds },
+            confidence: { type: 'number', minimum: 0, maximum: 1 },
+            action: nullableString,
+            slots: {
+              type: ['object', 'null'],
               additionalProperties: false,
-              required: ['agentId', 'confidence'],
-              properties: {
-                agentId: { type: 'string', enum: routerIds },
-                confidence: { type: 'number', minimum: 0, maximum: 1 },
-                action: { type: 'string' },
-                slots: { type: 'object', additionalProperties: true },
-              },
+              required: Object.keys(slotProperties),
+              properties: slotProperties,
             },
           },
-          reason: { type: 'string', minLength: 2, maxLength: 80 },
         },
+      },
+      reason: { type: 'string', minLength: 2, maxLength: 80 },
+    },
   };
 }
 
@@ -134,17 +167,27 @@ async function routeWithOpenAi(params: {
   const t0 = Date.now();
 
   const routingAgents = withGeneralRoutingAgent(params.agents, options.generalAgentId);
-  const routerIdToAgentId = new Map(routingAgents.map((agent) => [agent.routerId ?? agent.agentId, agent.agentId]));
+  const routerIdToAgentId = new Map(
+    routingAgents.map((agent) => [agent.routerId ?? agent.agentId, agent.agentId])
+  );
 
   log?.info(
-    { provider: 'openai', model: options.model, agents: [...routerIdToAgentId.keys()], timeout_ms: options.timeoutMs },
-    'ha_agent_router_start',
+    {
+      provider: 'openai',
+      model: options.model,
+      agents: [...routerIdToAgentId.keys()],
+      timeout_ms: options.timeoutMs,
+    },
+    'ha_agent_router_start'
   );
 
   try {
     const messages = [
       { role: 'system' as const, content: SYSTEM_PROMPT },
-      { role: 'user' as const, content: buildOrchestratorUserPrompt({ ...params, agents: routingAgents }) },
+      {
+        role: 'user' as const,
+        content: buildOrchestratorUserPrompt({ ...params, agents: routingAgents }),
+      },
     ];
     const content = await completeOpenAiResponse({
       apiKey: options.openAiApiKey,
@@ -162,7 +205,10 @@ async function routeWithOpenAi(params: {
     try {
       parsed = JSON.parse(content);
     } catch {
-      log?.warn({ output_chars: content.length, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_invalid_json');
+      log?.warn(
+        { output_chars: content.length, elapsed_ms: Date.now() - t0 },
+        'ha_agent_router_invalid_json'
+      );
       throw new Error('router_invalid_json');
     }
 
@@ -191,33 +237,59 @@ async function routeWithOpenAi(params: {
       .filter((t) => t.agentId);
 
     if (targets.length === 0) {
-      log?.warn({ raw_target_count: rawTargets.length, known_agent_count: knownIds.size, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_no_valid_targets');
+      log?.warn(
+        {
+          raw_target_count: rawTargets.length,
+          known_agent_count: knownIds.size,
+          elapsed_ms: Date.now() - t0,
+        },
+        'ha_agent_router_no_valid_targets'
+      );
       throw new Error('router_no_valid_targets');
     }
 
     if (!targets.some((target) => target.confidence >= options.confidenceThreshold)) {
-      log?.warn({ targets, threshold: options.confidenceThreshold, elapsed_ms: Date.now() - t0 }, 'ha_agent_router_low_confidence');
+      log?.warn(
+        { targets, threshold: options.confidenceThreshold, elapsed_ms: Date.now() - t0 },
+        'ha_agent_router_low_confidence'
+      );
       throw new Error('router_low_confidence');
     }
 
     log?.info(
-      { targets: targets.map((t) => `${t.agentId}:${t.confidence}`), reason, elapsed_ms: Date.now() - t0 },
-      'ha_agent_router_done',
+      {
+        targets: targets.map((t) => `${t.agentId}:${t.confidence}`),
+        reason,
+        elapsed_ms: Date.now() - t0,
+      },
+      'ha_agent_router_done'
     );
-    return { targets, reason, provider: 'openai', model: options.model, latencyMs: Date.now() - t0 };
+    return {
+      targets,
+      reason,
+      provider: 'openai',
+      model: options.model,
+      latencyMs: Date.now() - t0,
+    };
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error('router_timeout', { cause: error });
+    if (error instanceof DOMException && error.name === 'TimeoutError')
+      throw new Error('router_timeout', { cause: error });
     throw error;
   }
 }
 
-function withGeneralRoutingAgent(agents: AgentRouteEntry[], generalAgentId: string): AgentRouteEntry[] {
+function withGeneralRoutingAgent(
+  agents: AgentRouteEntry[],
+  generalAgentId: string
+): AgentRouteEntry[] {
   if (agents.some((agent) => agent.agentId === generalAgentId)) {
     // Keep the model contract stable even when an operator also puts the
     // general agent in HA_AGENT_MAP.
-    return agents.map((agent) => agent.agentId === generalAgentId
-      ? { ...agent, routerId: GENERAL_ROUTER_AGENT_ID, key: agent.key ?? GENERAL_ROUTER_AGENT_ID }
-      : agent);
+    return agents.map((agent) =>
+      agent.agentId === generalAgentId
+        ? { ...agent, routerId: GENERAL_ROUTER_AGENT_ID, key: agent.key ?? GENERAL_ROUTER_AGENT_ID }
+        : agent
+    );
   }
   return [
     {
@@ -290,11 +362,11 @@ export async function synthesizeAgentResponses(params: {
 
   const systemPrompt =
     'Tu es un assistant vocal français. ' +
-    'Plusieurs sous-agents ont chacun traité une partie de la demande de l\'utilisateur. ' +
+    "Plusieurs sous-agents ont chacun traité une partie de la demande de l'utilisateur. " +
     'Synthétise leurs réponses en une seule réponse naturelle, fluide et concise. ' +
     'Ne répète pas les réponses mot pour mot — fusionne-les intelligemment. ' +
-    'Ne mentionne jamais les noms d\'agents ni les termes techniques. ' +
-    'Réponds uniquement par la synthèse, sans phrase d\'introduction ni de conclusion.';
+    "Ne mentionne jamais les noms d'agents ni les termes techniques. " +
+    "Réponds uniquement par la synthèse, sans phrase d'introduction ni de conclusion.";
 
   const userPrompt =
     `Demande originale de l'utilisateur : "${params.userText}"\n\n` +
