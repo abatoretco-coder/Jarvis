@@ -215,6 +215,26 @@ describe('personal integration isolation', () => {
       expect(url.searchParams.get('state')).toBeTruthy();
     }
     expect(service.providerStates().every((provider) => provider.configured)).toBe(true);
+    expect(service.providerStates().every((provider) => provider.unavailableReason === null)).toBe(true);
+    db.close();
+  });
+
+  it('reports why a provider cannot start OAuth without exposing configuration values', () => {
+    const db = createConversationDb(':memory:');
+    const missingGoogle = new IntegrationService(new IntegrationRepository(db), {
+      ...env(), GOOGLE_CLIENT_ID: undefined, GOOGLE_CLIENT_SECRET: undefined,
+    } as Env);
+    expect(missingGoogle.providerStates().find((provider) => provider.key === 'google-calendar'))
+      .toMatchObject({ configured: false, unavailableReason: 'oauth_client_missing' });
+    expect(missingGoogle.providerStates().find((provider) => provider.key === 'gmail'))
+      .toMatchObject({ configured: false, unavailableReason: 'oauth_client_missing' });
+
+    const missingVault = new IntegrationService(new IntegrationRepository(db), {
+      ...env(), OAUTH_TOKEN_ENCRYPTION_KEY: undefined,
+    } as Env);
+    expect(missingVault.providerStates().every((provider) => (
+      !provider.configured && provider.unavailableReason === 'credential_vault_missing'
+    ))).toBe(true);
     db.close();
   });
 

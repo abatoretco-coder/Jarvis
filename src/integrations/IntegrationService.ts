@@ -13,6 +13,7 @@ function base64UrlSha256(value: string): string {
 }
 
 type ProviderClient = { clientId: string; clientSecret: string; authorizeUrl: string; tokenUrl: string };
+type ProviderUnavailableReason = 'credential_vault_missing' | 'oauth_client_missing';
 
 export class IntegrationService {
   private readonly vault: CredentialVault | null;
@@ -23,8 +24,21 @@ export class IntegrationService {
       : null;
   }
 
+  private providerUnavailableReason(provider: IntegrationProvider): ProviderUnavailableReason | null {
+    if (!this.vault) return 'credential_vault_missing';
+    if (provider.oauthFamily === 'google') {
+      return this.env.GOOGLE_CLIENT_ID && this.env.GOOGLE_CLIENT_SECRET ? null : 'oauth_client_missing';
+    }
+    if (provider.oauthFamily === 'microsoft') {
+      return this.env.MICROSOFT_CLIENT_ID && this.env.MICROSOFT_CLIENT_SECRET ? null : 'oauth_client_missing';
+    }
+    return this.env.SPOTIFY_WEBAPI_CLIENT_ID && this.env.SPOTIFY_WEBAPI_CLIENT_SECRET
+      ? null
+      : 'oauth_client_missing';
+  }
+
   private providerClient(provider: IntegrationProvider): ProviderClient | null {
-    if (!this.vault) return null;
+    if (this.providerUnavailableReason(provider)) return null;
     if (provider.oauthFamily === 'google') {
       return this.env.GOOGLE_CLIENT_ID && this.env.GOOGLE_CLIENT_SECRET ? {
         clientId: this.env.GOOGLE_CLIENT_ID, clientSecret: this.env.GOOGLE_CLIENT_SECRET,
@@ -48,8 +62,10 @@ export class IntegrationService {
   providerStates() {
     return ['google-calendar', 'gmail', 'microsoft-todo', 'spotify'].map((key) => {
       const provider = findIntegrationProvider(key)!;
+      const unavailableReason = this.providerUnavailableReason(provider);
       return { key: provider.key, label: provider.label, scopes: provider.scopes,
-        configured: Boolean(this.providerClient(provider)), aiDisclosure: provider.aiDisclosure ?? null };
+        configured: unavailableReason === null, unavailableReason,
+        aiDisclosure: provider.aiDisclosure ?? null };
     });
   }
 
