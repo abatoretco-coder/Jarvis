@@ -283,12 +283,20 @@ export type CalendarMultiFetchResult = {
   failedCalendarIds: string[];
 };
 
-type GoogleCalendarListEntry = {
+export type GoogleCalendarListEntry = {
   id?: string;
-  accessRole?: 'freeBusyReader' | 'reader' | 'writer' | 'owner';
+  accessRole?: string;
   deleted?: boolean;
   primary?: boolean;
 };
+
+export function selectOwnedCalendarIds(items: GoogleCalendarListEntry[]): string[] {
+  const ids = items
+    .filter((item) => !item.deleted && (item.primary || item.accessRole === 'owner' || item.accessRole === 'writer'))
+    .map((item) => item.id?.trim() ?? '')
+    .filter(Boolean);
+  return [...new Set(ids.length > 0 ? ids : ['primary'])];
+}
 
 /**
  * Discover calendars that belong to the connected Google account.
@@ -303,11 +311,7 @@ export async function discoverOwnedCalendarIds(env: CalendarTokenEnv): Promise<s
     '/users/me/calendarList?showDeleted=false&showHidden=false&maxResults=250',
     token,
   );
-  const ids = (payload.items ?? [])
-    .filter((item) => !item.deleted && (item.primary || item.accessRole === 'owner' || item.accessRole === 'writer'))
-    .map((item) => item.id?.trim() ?? '')
-    .filter(Boolean);
-  return [...new Set(ids.length > 0 ? ids : ['primary'])];
+  return selectOwnedCalendarIds(payload.items ?? []);
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { getGoogleCalendarConfigState } from '../calendar/googleCalendarClient';
+import { getGoogleCalendarConfigState, selectOwnedCalendarIds } from '../calendar/googleCalendarClient';
 import { resolveGoogleCredentials } from '../google/googleCredentialService';
 import { getRequestPrincipal } from '../identity/requestIdentity';
 import type { AppDeps } from '../server';
@@ -25,6 +25,7 @@ type GoogleCalendarEventDateTime = {
 
 type GoogleCalendarEvent = {
   id: string;
+  iCalUID?: string;
   status?: string;
   htmlLink?: string;
   created?: string;
@@ -266,9 +267,12 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
     if (!ready.ok) return reply.code(503).send({ error: 'google_calendar_not_configured', state: ready.error });
 
     const query = req.query as Record<string, unknown>;
-    const resolvedCalendarId = resolveAllowedCalendarId(query.calendarId, deps.env);
-    if (!resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
-    const calendarId = encodeURIComponent(resolvedCalendarId);
+    const requestedCalendarId = asStringQuery(query.calendarId, 'primary');
+    const aggregateCalendars = requestedCalendarId === 'all';
+    const resolvedCalendarId = aggregateCalendars
+      ? null
+      : resolveAllowedCalendarId(requestedCalendarId, deps.env);
+    if (!aggregateCalendars && !resolvedCalendarId) return reply.code(400).send({ error: 'calendar_id_not_allowed' });
     const timeMin = asStringQuery(query.timeMin);
     const timeMax = asStringQuery(query.timeMax);
     const q = asStringQuery(query.q);
@@ -291,6 +295,44 @@ export function registerGoogleCalendarRoute(app: FastifyInstance, deps: AppDeps)
 
     try {
       const token = await refreshGoogleAccessToken(deps, req, connectionIdFromRequest(req));
+      if (aggregateCalendars) {
+        const calendarList = await googleCalendarRequest<{ items?: GoogleCalendarListItem[] }>(
+          '/users/me/calendarList?showDeleted=false&showHidden=false&maxResults=250',
+          token,
+        );
+        const calendarIds = selectOwnedCalendarIds(calendarList.items ?? []);
+        const results = await Promise.allSettled(calendarIds.map(async (id) => {
+          const payload = await googleCalendarRequest<{
+            items?: GoogleCalendarEvent[];
+            timeZone?: string;
+          }>(`/calendars/${encodeURIComponent(id)}/events?${params.toString()}`, token);
+          return (payload.items ?? []).map((item) => ({ ...item, calendarId: id }));
+        }));
+        const failedCalendarIds = results.flatMap((result, index) =>
+          result.status === 'rejected' ? [calendarIds[index] ?? 'unknown'] : []
+        );
+        const fetchedItems = results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
+        if (failedCalendarIds.length === calendarIds.length && fetchedItems.length === 0) {
+          throw new Error('google_calendar_all_calendars_failed');
+        }
+        const items = [...new Map(fetchedItems.map((item) => [
+          `${item.iCalUID?.trim() || item.id}|${item.start?.dateTime ?? item.start?.date ?? ''}`,
+          item,
+        ])).values()].sort((left, right) =>
+          (left.start?.dateTime ?? left.start?.date ?? '').localeCompare(
+            right.start?.dateTime ?? right.start?.date ?? ''
+          )
+        );
+        return reply.code(200).send({
+          status: failedCalendarIds.length > 0 ? 'partial' : 'ok',
+          timeZone: '',
+          nextPageToken: null,
+          failedCalendarIds,
+          items,
+        });
+      }
+
+      const calendarId = encodeURIComponent(resolvedCalendarId!);
       const payload = await googleCalendarRequest<{
         items?: GoogleCalendarEvent[];
         nextPageToken?: string;

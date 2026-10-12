@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import Fastify from 'fastify';
 
 import type { Env } from '../src/env';
@@ -39,6 +39,66 @@ describe('google calendar route validation', () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ error: 'calendar_id_not_allowed' });
+    await fastify.close();
+  });
+
+  it('aggregates the personal and writable shared calendars for the expanded agenda', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      const rawUrl = String(url);
+      if (rawUrl.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: 'access-token' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (rawUrl.includes('/users/me/calendarList')) {
+        return new Response(JSON.stringify({
+          items: [
+            { id: 'owner@example.test', primary: true, accessRole: 'owner' },
+            { id: 'family', accessRole: 'writer' },
+            { id: 'week-numbers', accessRole: 'reader' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (rawUrl.includes('/calendars/owner%40example.test/events')) {
+        return new Response(JSON.stringify({
+          items: [{
+            id: 'personal',
+            summary: 'Personnel',
+            start: { dateTime: '2026-10-13T09:00:00+02:00' },
+            end: { dateTime: '2026-10-13T10:00:00+02:00' },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (rawUrl.includes('/calendars/family/events')) {
+        return new Response(JSON.stringify({
+          items: [{
+            id: 'shared',
+            summary: 'Partage',
+            start: { dateTime: '2026-10-14T19:00:00+02:00' },
+            end: { dateTime: '2026-10-14T20:00:00+02:00' },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected fetch ${rawUrl}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const fastify = app();
+
+    const res = await fastify.inject({
+      method: 'GET',
+      url: '/v1/calendar/google/events?calendarId=all&timeMin=2026-10-13T00%3A00%3A00.000Z&timeMax=2026-10-20T00%3A00%3A00.000Z',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      status: 'ok',
+      items: [
+        { id: 'personal', summary: 'Personnel', calendarId: 'owner@example.test' },
+        { id: 'shared', summary: 'Partage', calendarId: 'family' },
+      ],
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/calendars/week-numbers/events'))).toBe(false);
     await fastify.close();
   });
 
