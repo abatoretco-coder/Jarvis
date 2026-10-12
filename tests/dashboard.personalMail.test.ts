@@ -90,10 +90,27 @@ describe('dashboard personal Gmail connection', () => {
           headers: { 'content-type': 'application/json' },
         });
       }
+      if (url.endsWith('/messages/message-alice/trash')) {
+        expect(init?.method).toBe('POST');
+        expect((init?.headers as Record<string, string>).authorization).toBe('Bearer access-alice');
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       throw new Error(`unavailable test dependency: ${url}`);
     }) as typeof fetch;
 
     const response = await app.inject({ method: 'GET', url: '/v1/dashboard' });
+    const detail = await app.inject({
+      method: 'GET',
+      url: '/v1/mail/message?messageId=message-alice&accountLabel=gmail',
+    });
+    const trash = await app.inject({
+      method: 'POST',
+      url: '/v1/mail/trash',
+      payload: { messageId: 'message-alice', accountLabel: 'gmail' },
+    });
 
     expect(response.statusCode).toBe(200);
     expect(response.json().organization.mail).toMatchObject({
@@ -101,8 +118,16 @@ describe('dashboard personal Gmail connection', () => {
       status: 'ok',
       items: [{ id: 'message-alice', subject: 'Message personnel' }],
     });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      messageId: 'message-alice',
+      accountLabel: 'gmail',
+      text: 'Le contenu utile du message',
+    });
+    expect(trash.statusCode).toBe(200);
+    expect(trash.json()).toEqual({ ok: true });
     expect(resolveRefreshToken).toHaveBeenCalledWith('alice', 'gmail', undefined);
-    expect(refreshTokens).toEqual(['refresh-alice']);
+    expect(refreshTokens).toEqual(['refresh-alice', 'refresh-alice', 'refresh-alice']);
     expect(refreshTokens).not.toContain('must-never-be-used');
 
     await app.close();

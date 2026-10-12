@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import {
   type CalendarTokenEnv,
@@ -1026,6 +1026,37 @@ export async function buildMailSection(
   };
 }
 
+function resolveMailRequestContext(
+  request: FastifyRequest,
+  deps: AppDeps,
+  connectionId?: string,
+): { env: AppDeps['env']; accounts: MailAccount[] } {
+  const principal = getRequestPrincipal(request);
+  if (principal?.kind !== 'user') {
+    return { env: deps.env, accounts: buildMailAccounts(deps.env) };
+  }
+
+  const refreshToken = deps.integrations?.resolveRefreshToken(
+    principal.userId,
+    'gmail',
+    connectionId,
+  );
+  const env = {
+    ...deps.env,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: '',
+  };
+  const accounts: MailAccount[] = refreshToken && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
+    ? [{
+        label: 'gmail',
+        provider: 'gmail',
+        clientId: deps.env.GOOGLE_CLIENT_ID,
+        clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
+        refreshToken,
+      }]
+    : [];
+  return { env, accounts };
+}
+
 type DashboardGeoLocation = {
   latitude: number;
   longitude: number;
@@ -1253,12 +1284,13 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
   const dashboardCacheTtlMs = 2 * 60 * 1000;
   app.get('/v1/mail/messages', async (req, reply) => {
     try {
-      const query = (req.query ?? {}) as { page?: unknown; pageSize?: unknown; accountLabel?: unknown };
+      const query = (req.query ?? {}) as { page?: unknown; pageSize?: unknown; accountLabel?: unknown; connectionId?: unknown };
       const page = Number(query.page ?? 0);
       const pageSize = Number(query.pageSize ?? 40);
       const accountLabel = typeof query.accountLabel === 'string' ? query.accountLabel.trim().toLowerCase() : '';
+      const connectionId = typeof query.connectionId === 'string' ? query.connectionId.trim().slice(0, 128) : '';
 
-      const accounts = buildMailAccounts(deps.env);
+      const { accounts, env } = resolveMailRequestContext(req, deps, connectionId || undefined);
       if (accounts.length === 0) {
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
@@ -1269,7 +1301,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
 
       const safePage = Number.isFinite(page) ? Math.max(0, Math.floor(page)) : 0;
       const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.min(100, Math.floor(pageSize))) : 40;
-      const payload = await fetchMailItemsPageForAccount(account, deps.env, safePage, safePageSize);
+      const payload = await fetchMailItemsPageForAccount(account, env, safePage, safePageSize);
       return reply.code(200).send({
         page: safePage,
         pageSize: safePageSize,
@@ -1284,15 +1316,16 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
 
   app.get('/v1/mail/message', async (req, reply) => {
     try {
-      const query = (req.query ?? {}) as { messageId?: unknown; accountLabel?: unknown };
+      const query = (req.query ?? {}) as { messageId?: unknown; accountLabel?: unknown; connectionId?: unknown };
       const messageId = typeof query.messageId === 'string' ? query.messageId.trim() : '';
       const accountLabel = typeof query.accountLabel === 'string' ? query.accountLabel.trim().toLowerCase() : '';
+      const connectionId = typeof query.connectionId === 'string' ? query.connectionId.trim().slice(0, 128) : '';
 
       if (!messageId) {
         return reply.code(400).send({ error: 'message_id_required' });
       }
 
-      const accounts = buildMailAccounts(deps.env);
+      const { accounts, env } = resolveMailRequestContext(req, deps, connectionId || undefined);
       if (accounts.length === 0) {
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
@@ -1301,7 +1334,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
         : accounts[0];
 
-      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, deps.env, messageId);
+      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, env, messageId);
       return reply.code(200).send({
         messageId,
         accountLabel: account.label,
@@ -1319,15 +1352,16 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
 
   app.post('/v1/mail/trash', async (req, reply) => {
     try {
-      const body = (req.body ?? {}) as { messageId?: unknown; accountLabel?: unknown };
+      const body = (req.body ?? {}) as { messageId?: unknown; accountLabel?: unknown; connectionId?: unknown };
       const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
       const accountLabel = typeof body.accountLabel === 'string' ? body.accountLabel.trim().toLowerCase() : '';
+      const connectionId = typeof body.connectionId === 'string' ? body.connectionId.trim().slice(0, 128) : '';
 
       if (!messageId) {
         return reply.code(400).send({ error: 'message_id_required' });
       }
 
-      const accounts = buildMailAccounts(deps.env);
+      const { accounts, env } = resolveMailRequestContext(req, deps, connectionId || undefined);
       if (accounts.length === 0) {
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
@@ -1336,7 +1370,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
         : accounts[0];
 
-      const token = await refreshGoogleAccessToken(account, deps.env);
+      const token = await refreshGoogleAccessToken(account, env);
       await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token, {});
       return reply.code(200).send({ ok: true });
     } catch (error) {
@@ -1534,31 +1568,8 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         cache: { hit: true, fetchedAt: new Date(cached.fetchedAt).toISOString() },
       });
     }
-    const personalGmailToken = principal?.kind === 'user'
-      ? deps.integrations?.resolveRefreshToken(
-          principal.userId,
-          'gmail',
-          requestedConnectionId || undefined,
-        )
-      : undefined;
-    const mailEnv = principal?.kind === 'user'
-      ? {
-          ...deps.env,
-          OAUTH_REFRESH_TOKEN_STORE_PATH: '',
-        }
-      : deps.env;
-    const mailAccounts = principal?.kind === 'user'
-      ? personalGmailToken && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
-        ? [{
-            label: 'gmail',
-            provider: 'gmail' as const,
-            clientId: deps.env.GOOGLE_CLIENT_ID,
-            clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
-            refreshToken: personalGmailToken,
-          }]
-        : []
-      : undefined;
-    const mailPromise = buildMailSection(mailEnv, app.log, mailAccounts).catch((error) => {
+    const mailContext = resolveMailRequestContext(req, deps, requestedConnectionId || undefined);
+    const mailPromise = buildMailSection(mailContext.env, app.log, mailContext.accounts).catch((error) => {
       app.log.warn({ error }, 'dashboard_mail_failed');
       return makeSection('Mail', 'jarvis-mail', 'Impossible de recuperer les emails pour le moment.');
     });
