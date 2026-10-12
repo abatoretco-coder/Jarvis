@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import {
   type CalendarTokenEnv,
+  discoverOwnedCalendarIds,
   fetchUpcomingEventsMultiCalendarDetailed,
   getGoogleCalendarConfigState,
   parseCalendarIds,
@@ -262,7 +263,18 @@ export async function buildAgendaFromGoogle(
 
   const windowStart = getParisStartOfDayUtc(now);
   const windowEnd = getParisStartOfDayUtc(now, 7);
-  const calendarIds = parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
+  let calendarIds: string[];
+  let calendarDiscoveryFailed = false;
+  if (env.GOOGLE_CALENDAR_CALENDAR_IDS?.trim()) {
+    calendarIds = parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
+  } else {
+    try {
+      calendarIds = await discoverOwnedCalendarIds(env as CalendarTokenEnv);
+    } catch {
+      calendarIds = ['primary'];
+      calendarDiscoveryFailed = true;
+    }
+  }
 
   const result = await fetchUpcomingEventsMultiCalendarDetailed(
     env as CalendarTokenEnv,
@@ -274,9 +286,9 @@ export async function buildAgendaFromGoogle(
 
   const events = result.events;
   const active = events.filter((ev) => ev.status !== 'cancelled');
-  const failedCount = result.failedCalendarIds.length;
+  const failedCount = result.failedCalendarIds.length + (calendarDiscoveryFailed ? 1 : 0);
 
-  if (failedCount === calendarIds.length && active.length === 0) {
+  if (result.failedCalendarIds.length === calendarIds.length && active.length === 0) {
     return {
       ...makeSection('Agenda', 'google-calendar', 'Je n ai pas pu lire Google Calendar pour le moment.'),
       status: 'error',
@@ -292,15 +304,15 @@ export async function buildAgendaFromGoogle(
     };
   }
 
-  const limited = active.slice(0, 6);
+  const visible = active;
 
-  const lines = limited.map((ev) => {
+  const lines = visible.map((ev) => {
     const start = resolveEventStart(ev);
     const title = ev.summary?.trim() || '(sans titre)';
     return `${formatDateForLine(start)} | ${title}`;
   });
 
-  const items: AgendaEventItem[] = limited.map((ev, idx) => {
+  const items: AgendaEventItem[] = visible.map((ev, idx) => {
     const isAllDay = !ev.start?.dateTime;
     const start = resolveEventStart(ev);
     const end = resolveEventEnd(ev);
@@ -321,7 +333,7 @@ export async function buildAgendaFromGoogle(
   return {
     title: 'Agenda',
     source: 'google-calendar',
-    summary: `${limited.length} evenement${limited.length > 1 ? 's' : ''} prevu${limited.length > 1 ? 's' : ''} cette semaine${failedCount > 0 ? `, avec ${failedCount} calendrier${failedCount > 1 ? 's' : ''} indisponible${failedCount > 1 ? 's' : ''}` : ''}.`,
+    summary: `${visible.length} evenement${visible.length > 1 ? 's' : ''} prevu${visible.length > 1 ? 's' : ''} cette semaine${failedCount > 0 ? `, avec ${failedCount} calendrier${failedCount > 1 ? 's' : ''} indisponible${failedCount > 1 ? 's' : ''}` : ''}.`,
     lines,
     status: failedCount > 0 ? 'partial' : 'ok',
     items,

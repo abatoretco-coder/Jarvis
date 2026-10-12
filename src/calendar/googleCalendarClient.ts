@@ -29,6 +29,7 @@ export interface GoogleCalendarEventDateTime {
 
 export interface GoogleCalendarEvent {
   id: string;
+  iCalUID?: string;
   /** 'confirmed' | 'tentative' | 'cancelled' */
   status?: string;
   summary?: string;
@@ -282,6 +283,33 @@ export type CalendarMultiFetchResult = {
   failedCalendarIds: string[];
 };
 
+type GoogleCalendarListEntry = {
+  id?: string;
+  accessRole?: 'freeBusyReader' | 'reader' | 'writer' | 'owner';
+  deleted?: boolean;
+  primary?: boolean;
+};
+
+/**
+ * Discover calendars that belong to the connected Google account.
+ *
+ * Read-only subscriptions (week numbers, public holidays, sports feeds, etc.)
+ * are deliberately excluded from the dashboard. Shared calendars remain
+ * included when the connected member can write to them.
+ */
+export async function discoverOwnedCalendarIds(env: CalendarTokenEnv): Promise<string[]> {
+  const token = await refreshCalendarToken(env);
+  const payload = await calendarApiRequest<{ items?: GoogleCalendarListEntry[] }>(
+    '/users/me/calendarList?showDeleted=false&showHidden=false&maxResults=250',
+    token,
+  );
+  const ids = (payload.items ?? [])
+    .filter((item) => !item.deleted && (item.primary || item.accessRole === 'owner' || item.accessRole === 'writer'))
+    .map((item) => item.id?.trim() ?? '')
+    .filter(Boolean);
+  return [...new Set(ids.length > 0 ? ids : ['primary'])];
+}
+
 /**
  * Fetch upcoming events from multiple calendars in parallel.
  *
@@ -328,12 +356,19 @@ export async function fetchUpcomingEventsMultiCalendarDetailed(
     else failedCalendarIds.push(calendarIds[index] ?? 'unknown');
   });
 
+  // The same event can be exposed through the primary alias and a concrete
+  // calendar id, or through two calendars participating in one invitation.
+  const unique = [...new Map(all.map((event) => [
+    `${event.iCalUID?.trim() || event.id}|${event.start?.dateTime ?? event.start?.date ?? ''}`,
+    event,
+  ])).values()];
+
   // Merge & sort by start time across all calendars
-  all.sort((a, b) => {
+  unique.sort((a, b) => {
     const aStart = a.start?.dateTime ?? a.start?.date ?? '';
     const bStart = b.start?.dateTime ?? b.start?.date ?? '';
     return aStart.localeCompare(bStart);
   });
 
-  return { events: all, failedCalendarIds };
+  return { events: unique, failedCalendarIds };
 }
