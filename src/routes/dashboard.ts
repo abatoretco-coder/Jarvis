@@ -563,21 +563,32 @@ async function gmailGet<T>(path: string, token: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function gmailPost<T>(path: string, token: string, body: Record<string, unknown>): Promise<T> {
+class GmailApiError extends Error {
+  constructor(readonly status: number) {
+    super(`gmail_post_failed:${status}`);
+    this.name = 'GmailApiError';
+  }
+}
+
+async function gmailPost<T>(
+  path: string,
+  token: string,
+  body?: Record<string, unknown>,
+): Promise<T> {
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${token}`,
+    accept: 'application/json',
+  };
+  if (body !== undefined) headers['content-type'] = 'application/json';
   const response = await fetch(`${GMAIL_BASE}${path}`, {
     method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/json',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
+    headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(8_000),
   });
 
   if (!response.ok) {
-    const rawBody = await response.text().catch(() => '');
-    throw new Error(`gmail_post_failed:${response.status}:${rawBody.slice(0, 200)}`);
+    throw new GmailApiError(response.status);
   }
 
   const text = await response.text().catch(() => '');
@@ -1371,10 +1382,39 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         : accounts[0];
 
       const token = await refreshGoogleAccessToken(account, env);
-      await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token, {});
+      // Gmail's users.messages.trash contract requires an empty request body.
+      await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
       return reply.code(200).send({ ok: true });
     } catch (error) {
-      app.log.warn({ error }, 'dashboard_mail_trash_failed');
+      const upstreamStatus = error instanceof GmailApiError ? error.status : undefined;
+      app.log.warn(
+        {
+          err: error,
+          provider: 'gmail',
+          ...(upstreamStatus === undefined ? {} : { upstreamStatus }),
+        },
+        'dashboard_mail_trash_failed',
+      );
+      // The requested end state is already satisfied when the message no
+      // longer exists. This also makes harmless repeated clicks idempotent.
+      if (upstreamStatus === 404) {
+        return reply.code(200).send({ ok: true, alreadyAbsent: true });
+      }
+      if (upstreamStatus === 401 || upstreamStatus === 403) {
+        return reply.code(409).send({ error: 'mail_reconnect_required' });
+      }
+      if (upstreamStatus === 429) {
+        return reply.code(429).send({ error: 'mail_rate_limited' });
+      }
+      if (upstreamStatus !== undefined && upstreamStatus >= 500) {
+        return reply.code(502).send({ error: 'mail_provider_unavailable' });
+      }
+      if (upstreamStatus !== undefined) {
+        return reply.code(502).send({ error: 'mail_provider_rejected' });
+      }
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        return reply.code(504).send({ error: 'mail_provider_timeout' });
+      }
       return reply.code(500).send({ error: 'mail_trash_failed' });
     }
   });

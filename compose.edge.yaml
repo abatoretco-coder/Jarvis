@@ -72,7 +72,7 @@ services:
       - ${JARVIS_EDGE_BIND_HOST:-127.0.0.1}:${JARVIS_EDGE_HTTPS_PORT:-8443}:443
     volumes:
       - ./ops/edge/Caddyfile.pc-edge:/etc/caddy/Caddyfile:ro
-      - ../Jarvis Desktop/dist:/srv/jarvis-web:ro
+      - ../Jarvis Desktop/dist-web:/srv/jarvis-web:ro
       - edge-data:/data
       - edge-config:/config
     depends_on:

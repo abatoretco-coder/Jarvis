@@ -93,6 +93,8 @@ describe('dashboard personal Gmail connection', () => {
       if (url.endsWith('/messages/message-alice/trash')) {
         expect(init?.method).toBe('POST');
         expect((init?.headers as Record<string, string>).authorization).toBe('Bearer access-alice');
+        expect(init?.body).toBeUndefined();
+        expect((init?.headers as Record<string, string>)['content-type']).toBeUndefined();
         return new Response('{}', {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -132,4 +134,61 @@ describe('dashboard personal Gmail connection', () => {
 
     await app.close();
   });
+
+  it.each([
+    { upstreamStatus: 404, expectedStatus: 200, expectedBody: { ok: true, alreadyAbsent: true } },
+    { upstreamStatus: 403, expectedStatus: 409, expectedBody: { error: 'mail_reconnect_required' } },
+    { upstreamStatus: 429, expectedStatus: 429, expectedBody: { error: 'mail_rate_limited' } },
+    { upstreamStatus: 503, expectedStatus: 502, expectedBody: { error: 'mail_provider_unavailable' } },
+    { upstreamStatus: 400, expectedStatus: 502, expectedBody: { error: 'mail_provider_rejected' } },
+  ])(
+    'maps Gmail trash status $upstreamStatus to a stable dashboard contract',
+    async ({ upstreamStatus, expectedStatus, expectedBody }) => {
+      const env = loadEnv({
+        REQUIRE_API_KEY: 'false',
+        LOG_LEVEL: 'silent',
+        GOOGLE_CLIENT_ID: 'client',
+        GOOGLE_CLIENT_SECRET: 'secret',
+      });
+      const app = Fastify({ logger: false });
+      app.addHook('preHandler', async (request) => {
+        setRequestPrincipal(request, principal('alice'));
+      });
+      registerDashboardRoute(app, {
+        env,
+        integrations: {
+          resolveRefreshToken: () => 'refresh-alice',
+        } as unknown as IntegrationService,
+        spotifyWebApi: { isConfigured: () => false } as AppDeps['spotifyWebApi'],
+      });
+
+      global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('oauth2.googleapis.com/token')) {
+          return new Response(JSON.stringify({ access_token: 'access-alice' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages/message-alice/trash')) {
+          expect(init?.body).toBeUndefined();
+          return new Response(JSON.stringify({ error: { message: 'provider failure' } }), {
+            status: upstreamStatus,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error(`unavailable test dependency: ${url}`);
+      }) as typeof fetch;
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/mail/trash',
+        payload: { messageId: 'message-alice', accountLabel: 'gmail' },
+      });
+
+      expect(response.statusCode).toBe(expectedStatus);
+      expect(response.json()).toEqual(expectedBody);
+      await app.close();
+    },
+  );
 });
