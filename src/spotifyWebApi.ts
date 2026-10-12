@@ -43,7 +43,8 @@ function withTimeout(timeoutMs: number): AbortController {
 function toText(v: unknown): string {
   if (typeof v === 'string') return v;
   try {
-    return JSON.stringify(v);
+    const serialized = JSON.stringify(v);
+    return typeof serialized === 'string' ? serialized : String(v ?? '');
   } catch {
     return String(v ?? '');
   }
@@ -183,11 +184,14 @@ function parseSpotifyUri(uri: string): { type: string; id: string } | undefined 
   };
 }
 
-type SpotifyDevice = {
+export type SpotifyDevice = {
   id: string;
   name: string;
   type?: string;
   isActive: boolean;
+  volumePercent?: number;
+  supportsVolume?: boolean;
+  isRestricted?: boolean;
 };
 
 type SpotifyPlaylist = {
@@ -226,7 +230,10 @@ export class SpotifyWebApiClient {
   private cachedDeviceList?: { result: Awaited<ReturnType<SpotifyWebApiClient['listDevices']>>; fetchedAtMs: number };
   private cachedNowPlaying?: { result: Awaited<ReturnType<SpotifyWebApiClient['getNowPlaying']>>; fetchedAtMs: number };
   private cachedUserPlaylists?: { playlists: SpotifyPlaylist[]; fetchedAtMs: number };
-  private readonly shortCacheTtlMs = 65_000;
+  // Spotify Connect devices appear and disappear as their apps open and close.
+  // Keep this shorter than the UI polling interval so a newly opened phone is
+  // reflected on the next visible refresh without multiplying upstream calls.
+  private readonly shortCacheTtlMs = 4_000;
   private readonly nowPlayingCacheTtlMs = 2_500;
   private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
@@ -605,7 +612,7 @@ export class SpotifyWebApiClient {
     return last ?? { ok: false, error: 'spotify_action_retry_exhausted' };
   }
 
-  private async request(method: string, path: string, opts?: { query?: Record<string, string | undefined>; json?: unknown }): Promise<SpotifyWebApiResult> {
+  private async request(method: string, path: string, opts?: { query?: Record<string, string | undefined>; json?: unknown; retryable?: boolean }): Promise<SpotifyWebApiResult> {
     if (Object.values(opts?.query ?? {}).includes(MISSING_TARGET_DEVICE_SENTINEL)) {
       return { ok: false, status: 404, error: 'spotify_device_not_available' };
     }
@@ -632,7 +639,7 @@ export class SpotifyWebApiClient {
       return { response, rawText };
     };
 
-    const canRetry = method === 'GET' || method === 'PUT';
+    const canRetry = opts?.retryable !== false && (method === 'GET' || method === 'PUT');
     const maxRetries = canRetry ? Math.max(0, this.env.SPOTIFY_WEBAPI_REQUEST_RETRIES) : 0;
     let accessToken = tokenRes.token;
     let lastError: SpotifyWebApiErrorResult | undefined;
@@ -869,6 +876,11 @@ export class SpotifyWebApiClient {
         name: String(rec?.name ?? '').trim() || 'unknown',
         type: String(rec?.type ?? '').trim() || undefined,
         isActive: Boolean(rec?.is_active),
+        ...(typeof rec?.volume_percent === 'number' && Number.isFinite(rec.volume_percent)
+          ? { volumePercent: Math.max(0, Math.min(100, Math.round(rec.volume_percent))) }
+          : {}),
+        ...(typeof rec?.supports_volume === 'boolean' ? { supportsVolume: rec.supports_volume } : {}),
+        ...(typeof rec?.is_restricted === 'boolean' ? { isRestricted: rec.is_restricted } : {}),
       });
     }
     return { ok: true, devices };
@@ -1190,7 +1202,7 @@ export class SpotifyWebApiClient {
   async addToQueueUri(uri: string, deviceId?: string): Promise<SpotifyWebApiResult> {
     const did = await this.resolveDeviceIdWithFallback(deviceId);
     const normalized = String(uri ?? '').trim();
-    if (!normalized.startsWith('spotify:track:')) {
+    if (!/^spotify:(?:track|episode):[A-Za-z0-9]+$/u.test(normalized)) {
       return { ok: false, error: 'spotify_queue_invalid_uri' };
     }
 
@@ -1609,6 +1621,54 @@ export class SpotifyWebApiClient {
     });
   }
 
+  async replaceQueueUris(uris: string[], deviceId?: string): Promise<SpotifyWebApiResult> {
+    const clean = (Array.isArray(uris) ? uris : []).map((uri) => String(uri).trim());
+    if (clean.some((uri) => !/^spotify:track:[A-Za-z0-9]+$/u.test(uri)) || clean.length > 100) {
+      return { ok: false, status: 400, error: 'spotify_queue_invalid_tracks' };
+    }
+
+    const did = await this.resolveDeviceIdWithFallback(deviceId);
+    const now = await this.fetchNowPlayingRaw();
+    if (!now.ok) return now;
+    const item = asRecord(now.data.item);
+    const currentUri = typeof item?.uri === 'string' ? item.uri.trim() : '';
+    if (!/^spotify:track:[A-Za-z0-9]+$/u.test(currentUri)) {
+      return { ok: false, status: 409, error: 'spotify_queue_current_item_unsupported' };
+    }
+
+    const rawPositionMs = typeof now.data.progress_ms === 'number' && Number.isFinite(now.data.progress_ms)
+      ? now.data.progress_ms
+      : 0;
+    const positionMs = Math.max(0, Math.round(rawPositionMs));
+    const wasPlaying = now.data.is_playing === true;
+    if (now.data.shuffle_state === true) {
+      const shuffle = await this.setShuffle(false, did || undefined);
+      if (!shuffle.ok) return shuffle;
+    }
+
+    // Starting an explicit URI list is the only Spotify Web API operation that
+    // can replace/reorder upcoming tracks. Do not retry it automatically: a
+    // transport timeout leaves the physical result uncertain.
+    const replaced = await this.request('PUT', '/v1/me/player/play', {
+      query: { device_id: did || undefined },
+      json: { uris: [currentUri, ...clean], position_ms: positionMs },
+      retryable: false,
+    });
+    if (!replaced.ok) return replaced;
+
+    if (!wasPlaying) {
+      const paused = await this.request('PUT', '/v1/me/player/pause', {
+        query: { device_id: did || undefined },
+        retryable: false,
+      });
+      if (!paused.ok) {
+        return { ok: false, status: paused.status, error: 'spotify_queue_replaced_pause_unconfirmed', details: paused.details };
+      }
+    }
+    this.cachedNowPlaying = undefined;
+    return replaced;
+  }
+
   async playContextUri(contextUri: string, deviceId?: string): Promise<SpotifyWebApiResult> {
     return this.withActionRetry('play_context', async () => {
       const did = await this.resolveDeviceIdWithFallback(deviceId);
@@ -1703,7 +1763,7 @@ export class SpotifyWebApiClient {
   }
 
   async listDevicesPublic(options?: { forceRefresh?: boolean }): Promise<
-    | { ok: true; devices: Array<{ id: string; name: string; type?: string; isActive: boolean }> }
+    | { ok: true; devices: Array<{ id: string; name: string; type?: string; isActive: boolean; volumePercent?: number; supportsVolume?: boolean; isRestricted?: boolean }> }
     | { ok: false; error: string; status?: number; details?: unknown }
   > {
     const now = Date.now();
@@ -1843,17 +1903,43 @@ export class SpotifyWebApiClient {
 
   async addUrisToPlaylist(playlistId: string, uris: string[]): Promise<SpotifyWebApiResult> {
     const cleanPlaylistId = String(playlistId ?? '').trim();
-    if (!cleanPlaylistId) return { ok: false, error: 'spotify_missing_playlist_id' };
+    if (!/^[A-Za-z0-9]+$/u.test(cleanPlaylistId)) {
+      return { ok: false, error: 'spotify_playlist_id_invalid', status: 400 };
+    }
 
-    const cleanUris = (Array.isArray(uris) ? uris : [])
+    const cleanUris = [...new Set((Array.isArray(uris) ? uris : [])
       .map((uri) => String(uri ?? '').trim())
-      .filter((uri) => uri.startsWith('spotify:'));
+      .filter((uri) => /^spotify:track:[A-Za-z0-9]+$/u.test(uri)))]
+      .slice(0, 100);
 
-    if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris' };
+    if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris', status: 400 };
 
-    return this.request('POST', `/v1/playlists/${encodeURIComponent(cleanPlaylistId)}/items`, {
+    const result = await this.request('POST', `/v1/playlists/${encodeURIComponent(cleanPlaylistId)}/items`, {
       json: { uris: cleanUris },
     });
+    if (result.ok) this.cachedUserPlaylists = undefined;
+    return result;
+  }
+
+  async removeUrisFromPlaylist(playlistId: string, uris: string[]): Promise<SpotifyWebApiResult> {
+    const cleanPlaylistId = String(playlistId ?? '').trim();
+    if (!/^[A-Za-z0-9]+$/u.test(cleanPlaylistId)) {
+      return { ok: false, error: 'spotify_playlist_id_invalid', status: 400 };
+    }
+
+    const cleanUris = [...new Set((Array.isArray(uris) ? uris : [])
+      .map((uri) => String(uri ?? '').trim())
+      .filter((uri) => /^spotify:track:[A-Za-z0-9]+$/u.test(uri)))]
+      .slice(0, 100);
+
+    if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris', status: 400 };
+
+    const result = await this.request('DELETE', `/v1/playlists/${encodeURIComponent(cleanPlaylistId)}/items`, {
+      json: { items: cleanUris.map((uri) => ({ uri })) },
+      retryable: false,
+    });
+    if (result.ok) this.cachedUserPlaylists = undefined;
+    return result;
   }
 
   async searchCatalog(type: string, query: string, limit = 5): Promise<

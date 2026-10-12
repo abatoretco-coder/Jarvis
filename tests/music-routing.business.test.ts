@@ -189,6 +189,45 @@ describe('music routing business tests', () => {
     expect(mockedPlanSpotifyAction).not.toHaveBeenCalled();
   });
 
+  it('commande naturelle "allume la musique" reste sur Spotify sans appeler Home Assistant', async () => {
+    mockedRouteUserRequest.mockRejectedValue(new Error('router_should_not_be_called'));
+
+    const play = jest.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: false,
+    });
+    const deps = makeDeps(env);
+    deps.spotifyWebApi = {
+      ...deps.spotifyWebApi,
+      getNowPlaying: async () => ({ ok: false, status: 204, error: 'spotify_no_active_playback' }),
+      play,
+    } as unknown as AppDeps['spotifyWebApi'];
+
+    registerIngestRoute(app, deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'music-natural-allume',
+        text: "ChatGPT, s'allume la musique s'il te plaît.",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as MusicResponse;
+    expect(payload.responseText).toContain('Lecture reprise');
+    expect(payload.replyMeta?.kind).toBe('spotify');
+    expect(payload.replyMeta?.routeKey).toBe('spotify.play');
+    expect(payload.music?.routing?.path).toBe('router_direct');
+    expect(payload.music?.routing?.action).toBe('play');
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(play).toHaveBeenCalledWith(undefined);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(mockedPlanSpotifyAction).not.toHaveBeenCalled();
+  });
+
   it('routing semantic planner: search_and_play sans query => planner puis action play', async () => {
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,

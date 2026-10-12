@@ -330,6 +330,10 @@ export function registerAdminRoutes(
   app.get('/v1/admin/services', async (request, reply) => {
     if (!requireAdminActor(request, reply, admin)) return;
     const haStatus = deps.ha ? await deps.ha.probeHealth() : 'not_configured';
+    const personalSpotifyConnected = admin.listIntegrations().some(
+      (connection) => connection.provider === 'spotify' && connection.status === 'active'
+    );
+    const spotifyConfigured = deps.spotifyWebApi.isConfigured() || personalSpotifyConnected;
     return {
       version: '0.1.0',
       services: [
@@ -347,8 +351,8 @@ export function registerAdminRoutes(
         },
         {
           key: 'spotify',
-          status: deps.spotifyWebApi.isConfigured() ? 'configured' : 'not_configured',
-          configured: deps.spotifyWebApi.isConfigured(),
+          status: personalSpotifyConnected ? 'connected' : spotifyConfigured ? 'configured' : 'not_configured',
+          configured: spotifyConfigured,
         },
         {
           key: 'nas-status',

@@ -10,10 +10,12 @@ import type { AppDeps } from '../server';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 
 const actionSchema = z.object({
-  action: z.enum(['play', 'pause', 'next', 'previous', 'transfer', 'play_playlist', 'play_context', 'play_item', 'play_artist_mix', 'seek', 'volume', 'shuffle', 'repeat', 'add_queue', 'save_library', 'remove_library']),
+  action: z.enum(['play', 'pause', 'next', 'previous', 'transfer', 'play_playlist', 'play_context', 'play_item', 'play_artist_mix', 'seek', 'volume', 'shuffle', 'repeat', 'add_queue', 'replace_queue', 'add_to_playlist', 'remove_from_playlist', 'save_library', 'remove_library']),
   deviceId: z.string().trim().min(1).max(180).optional(),
   playlistUri: z.string().trim().regex(/^spotify:playlist:[A-Za-z0-9]+$/u).optional(),
+  playlistId: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9]+$/u).optional(),
   uri: z.string().trim().regex(/^spotify:(?:track|album|artist|playlist|show|episode|audiobook|user):[A-Za-z0-9]+$/u).optional(),
+  uris: z.array(z.string().trim().regex(/^spotify:track:[A-Za-z0-9]+$/u)).max(100).optional(),
   positionMs: z.number().int().min(0).max(86_400_000).optional(),
   volumePercent: z.number().int().min(0).max(100).optional(),
   state: z.boolean().optional(),
@@ -43,6 +45,12 @@ const actionSchema = z.object({
   }
   if (value.action === 'add_queue' && value.uri && !/^spotify:(?:track|episode):/u.test(value.uri)) {
     context.addIssue({ code: 'custom', path: ['uri'], message: 'queue_uri_required' });
+  }
+  if (value.action === 'replace_queue' && !value.uris) {
+    context.addIssue({ code: 'custom', path: ['uris'], message: 'queue_uris_required' });
+  }
+  if (['add_to_playlist', 'remove_from_playlist'].includes(value.action) && (!value.playlistId || !value.uris?.length)) {
+    context.addIssue({ code: 'custom', path: ['playlistId'], message: 'playlist_and_tracks_required' });
   }
   if (value.action === 'seek' && value.positionMs === undefined) context.addIssue({ code: 'custom', path: ['positionMs'], message: 'position_required' });
   if (value.action === 'volume' && value.volumePercent === undefined) context.addIssue({ code: 'custom', path: ['volumePercent'], message: 'volume_required' });
@@ -105,6 +113,7 @@ function normalizeNowPlaying(data: Record<string, unknown>) {
       name: text(device.name) ?? 'Appareil inconnu',
       type: text(device.type),
       volumePercent: number(device.volume_percent),
+      supportsVolume: typeof device.supports_volume === 'boolean' ? device.supports_volume : undefined,
     } : null,
   };
 }
@@ -211,6 +220,8 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
             id: activeDevice.id,
             name: activeDevice.name,
             type: activeDevice.type,
+            volumePercent: activeDevice.volumePercent,
+            supportsVolume: activeDevice.supportsVolume,
           },
         }
       : normalizedPlayback;
@@ -225,6 +236,9 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
           isActive: salonStatus.isActive,
           zone: 'salon',
           availability: salonStatus.availability,
+          volumePercent: salonStatus.spotifyDevice?.volumePercent,
+          supportsVolume: salonStatus.spotifyDevice?.supportsVolume,
+          restricted: salonStatus.spotifyDevice?.isRestricted,
           statusLabel: salonStatus.isActive
             ? 'Lecture active'
             : salonStatus.availability === 'ready'
@@ -242,6 +256,9 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
           isActive: pcStatus.isActive,
           zone: 'pc',
           availability: pcStatus.availability,
+          volumePercent: pcStatus.spotifyDevice?.volumePercent,
+          supportsVolume: pcStatus.spotifyDevice?.supportsVolume,
+          restricted: pcStatus.spotifyDevice?.isRestricted,
           statusLabel: pcStatus.statusLabel,
         },
         {
@@ -251,11 +268,14 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
           isActive: phoneStatus.isActive,
           zone: 'phone',
           availability: phoneStatus.availability,
+          volumePercent: phoneStatus.spotifyDevice?.volumePercent,
+          supportsVolume: phoneStatus.spotifyDevice?.supportsVolume,
+          restricted: phoneStatus.spotifyDevice?.isRestricted,
           statusLabel: phoneStatus.statusLabel,
         },
         ...discoveredDevices
           .filter((device) => device.id !== salonStatus.spotifyDevice?.id && device.id !== pcStatus.spotifyDevice?.id && device.id !== phoneStatus.spotifyDevice?.id)
-          .map((device) => ({ ...device, zone: null, availability: 'ready' })),
+          .map((device) => ({ ...device, restricted: device.isRestricted, zone: null, availability: 'ready' })),
       ],
       playlists: playlists.ok ? playlists.playlists : [],
       multiZone: { supported: false, mode: 'spotify_connect_group' },
@@ -321,7 +341,7 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(403).send({ error: 'client_scope_forbidden' });
     }
     const spotify = spotifyClientForRequest(request, deps);
-    const { action, playlistUri, activationHint, uri, positionMs, volumePercent, state, repeatMode } = parsed.data;
+    const { action, playlistUri, playlistId, activationHint, uri, uris, positionMs, volumePercent, state, repeatMode } = parsed.data;
     let { deviceId } = parsed.data;
     if (deviceId === SALON_MUSIC_TARGET_ID) {
       const prepared = await new SalonMusicOrchestrator({
@@ -385,6 +405,9 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
                 : action === 'play_artist_mix' ? await spotify.playContextUri(uri!, deviceId)
                   : action === 'play_playlist' ? await spotify.playContextUri(playlistUri!, deviceId)
               : action === 'add_queue' ? await spotify.addToQueueUri(uri!, deviceId)
+                : action === 'replace_queue' ? await spotify.replaceQueueUris(uris!, deviceId)
+                  : action === 'add_to_playlist' ? await spotify.addUrisToPlaylist(playlistId!, uris!)
+                    : action === 'remove_from_playlist' ? await spotify.removeUrisFromPlaylist(playlistId!, uris!)
                 : action === 'save_library' ? await spotify.saveLibraryUri(uri!)
                   : action === 'remove_library' ? await spotify.removeLibraryUri(uri!)
                   : undefined;
@@ -394,16 +417,26 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (directResult) {
       const outcome = directResult.ok ? 'success' as const : 'failed' as const;
       try {
-        auditAction(request, deps, { action, targetId: deviceId ?? uri, outcome, errorCode: directResult.ok ? undefined : directResult.error });
+        auditAction(request, deps, { action, targetId: deviceId ?? playlistId ?? uri, outcome, errorCode: directResult.ok ? undefined : directResult.error });
       } catch (error) {
         app.log.error({ errorCode: error instanceof Error ? error.message : 'music_audit_failed' }, 'music UI audit persistence failed');
       }
-      if (!directResult.ok) return reply.code(409).send({ error: directResult.error, message: 'Commande Spotify indisponible.' });
+      if (!directResult.ok) {
+        if (directResult.error === 'spotify_webapi_network_error') {
+          return reply.code(503).send({
+            error: directResult.error,
+            operationStatus: 'uncertain',
+            message: 'Commande envoyée, résultat Spotify non vérifiable.',
+          });
+        }
+        return reply.code(409).send({ error: directResult.error, message: 'Commande Spotify indisponible.' });
+      }
       spotify.scheduleSituationRefresh();
+      const playlistMutation = action === 'add_to_playlist' || action === 'remove_from_playlist';
       return reply.send({
         status: 'success',
-        operationStatus: 'accepted',
-        message: 'Commande Spotify acceptée. Vérification de la lecture en cours.',
+        operationStatus: playlistMutation ? 'succeeded' : 'accepted',
+        message: playlistMutation ? 'Playlist Spotify modifiée.' : 'Commande Spotify acceptée. Vérification de la lecture en cours.',
       });
     }
     const requestAction = action === 'play' || action === 'pause' || action === 'next' || action === 'previous' || action === 'transfer'

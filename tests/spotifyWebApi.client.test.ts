@@ -243,6 +243,60 @@ describe('spotify web api client integration mocks', () => {
     expect(transferBodies[0].play).toBe(false);
   });
 
+  test('available devices preserve live volume and control capability', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (_method, path) => {
+      expect(path).toBe('/v1/me/player/devices');
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          devices: [{
+            id: 'phone-1', name: 'Galaxy', type: 'Smartphone', is_active: true,
+            volume_percent: 37, supports_volume: true, is_restricted: false,
+          }, {
+            id: 'speaker-1', name: 'Speaker', type: 'Speaker', is_active: false,
+            volume_percent: null, supports_volume: false, is_restricted: true,
+          }],
+        },
+      };
+    };
+
+    await expect(client.listDevicesPublic()).resolves.toEqual({
+      ok: true,
+      devices: [{
+        id: 'phone-1', name: 'Galaxy', type: 'Smartphone', isActive: true,
+        volumePercent: 37, supportsVolume: true, isRestricted: false,
+      }, {
+        id: 'speaker-1', name: 'Speaker', type: 'Speaker', isActive: false,
+        supportsVolume: false, isRestricted: true,
+      }],
+    });
+  });
+
+  test('returns a controlled inactive-device error when Spotify sends a bodyless 404', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (_method, path) => {
+      if (path === '/v1/me/player/next') {
+        return { ok: false, status: 404, error: 'spotify_webapi_request_failed' };
+      }
+      if (path === '/v1/me/player/devices') {
+        return {
+          ok: true,
+          status: 200,
+          data: { devices: [{ id: 'pc-device', name: 'Jarvis Desktop', is_active: false }] },
+        };
+      }
+      return { ok: false, status: 500, error: 'unexpected_call' };
+    };
+
+    await expect(client.next('pc-device')).resolves.toMatchObject({
+      ok: false,
+      status: 409,
+      error: 'spotify_target_device_not_active',
+    });
+  });
+
   test('play resolves the salon alias to the LG television', async () => {
     const env = makeEnv({ SPOTIFY_WEBAPI_DEVICE_ALIAS_SALON_NAME: 'LG TV' });
     const client = new SpotifyWebApiClient(env);
@@ -387,5 +441,100 @@ describe('spotify web api client integration mocks', () => {
       items: [{ id: 'track-1', uri: 'spotify:track:track1' }],
     });
     expect(calledPath).toBe('/v1/playlists/abc123/items');
+  });
+
+  test('uses the 2026 playlist items contract for add and remove mutations', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: Array<{ method: string; path: string; options?: { json?: unknown; retryable?: boolean } }> = [];
+    (client as unknown as { request: (method: string, path: string, options?: { json?: unknown; retryable?: boolean }) => Promise<unknown> }).request = async (method, path, options) => {
+      calls.push({ method, path, options });
+      return { ok: true, status: method === 'POST' ? 201 : 200 };
+    };
+
+    await expect(client.addUrisToPlaylist('abc123', ['spotify:track:first'])).resolves.toMatchObject({ ok: true });
+    await expect(client.removeUrisFromPlaylist('abc123', ['spotify:track:first', 'spotify:track:first'])).resolves.toMatchObject({ ok: true });
+    expect(calls).toEqual([
+      { method: 'POST', path: '/v1/playlists/abc123/items', options: { json: { uris: ['spotify:track:first'] } } },
+      { method: 'DELETE', path: '/v1/playlists/abc123/items', options: { json: { items: [{ uri: 'spotify:track:first' }] }, retryable: false } },
+    ]);
+  });
+
+  test('invalidates cached playlist counts after a successful playlist mutation', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    let playlistReads = 0;
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (method, path) => {
+      if (method === 'GET' && path === '/v1/me/playlists') {
+        playlistReads += 1;
+        return {
+          ok: true,
+          status: 200,
+          data: { items: [{ id: 'abc123', name: 'Maison', uri: 'spotify:playlist:abc123', items: { total: playlistReads } }], next: null },
+        };
+      }
+      return { ok: true, status: 201 };
+    };
+
+    await client.listUserPlaylistsPublic();
+    await client.listUserPlaylistsPublic();
+    expect(playlistReads).toBe(1);
+    await client.addUrisToPlaylist('abc123', ['spotify:track:first']);
+    const refreshed = await client.listUserPlaylistsPublic();
+
+    expect(playlistReads).toBe(2);
+    expect(refreshed).toMatchObject({ ok: true, playlists: [{ trackCount: 2 }] });
+  });
+
+  test('rebuilds the queue behind the current track while preserving progress', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: Array<{ method: string; path: string; options?: { query?: Record<string, string | undefined>; json?: unknown; retryable?: boolean } }> = [];
+    (client as unknown as { request: (method: string, path: string, options?: { query?: Record<string, string | undefined>; json?: unknown; retryable?: boolean }) => Promise<unknown> }).request = async (method, path, options) => {
+      calls.push({ method, path, options });
+      if (method === 'GET' && path === '/v1/me/player/currently-playing') {
+        return { ok: true, status: 200, data: { is_playing: true, progress_ms: 73_000, shuffle_state: false, item: { uri: 'spotify:track:current' } } };
+      }
+      return { ok: true, status: 204 };
+    };
+
+    await expect(client.replaceQueueUris(['spotify:track:two', 'spotify:track:one'], 'pc-1')).resolves.toMatchObject({ ok: true });
+    expect(calls).toEqual([
+      { method: 'GET', path: '/v1/me/player/currently-playing', options: undefined },
+      {
+        method: 'PUT', path: '/v1/me/player/play',
+        options: { query: { device_id: 'pc-1' }, json: { uris: ['spotify:track:current', 'spotify:track:two', 'spotify:track:one'], position_ms: 73_000 }, retryable: false },
+      },
+    ]);
+  });
+
+  test('restores pause after rebuilding a paused queue and disables shuffle first', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: Array<{ method: string; path: string }> = [];
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (method, path) => {
+      calls.push({ method, path });
+      if (method === 'GET') {
+        return { ok: true, status: 200, data: { is_playing: false, progress_ms: 12_000, shuffle_state: true, item: { uri: 'spotify:track:current' } } };
+      }
+      return { ok: true, status: 204 };
+    };
+
+    await expect(client.replaceQueueUris([], 'pc-1')).resolves.toMatchObject({ ok: true });
+    expect(calls).toEqual([
+      { method: 'GET', path: '/v1/me/player/currently-playing' },
+      { method: 'PUT', path: '/v1/me/player/shuffle' },
+      { method: 'PUT', path: '/v1/me/player/play' },
+      { method: 'PUT', path: '/v1/me/player/pause' },
+    ]);
+  });
+
+  test('rejects queue replacement without a current track and never mutates playback', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: string[] = [];
+    (client as unknown as { request: (method: string, path: string) => Promise<unknown> }).request = async (method, path) => {
+      calls.push(`${method} ${path}`);
+      return { ok: true, status: 200, data: { is_playing: false, item: { uri: 'spotify:episode:episode1' } } };
+    };
+    await expect(client.replaceQueueUris(['spotify:track:one'], 'pc-1')).resolves.toMatchObject({
+      ok: false, error: 'spotify_queue_current_item_unsupported',
+    });
+    expect(calls).toEqual(['GET /v1/me/player/currently-playing']);
   });
 });

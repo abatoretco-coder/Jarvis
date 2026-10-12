@@ -2,13 +2,11 @@ import type { HomeAssistantClient } from '../haClient';
 import { isHassState } from '../hass';
 import type { HomeCatalog } from '../home/HomeCatalog';
 import { ensureTelevisionReady } from '../home/TelevisionReadiness';
-import type { SpotifyWebApiClient } from '../spotifyWebApi';
+import type { SpotifyDevice, SpotifyWebApiClient } from '../spotifyWebApi';
 
 export const SALON_MUSIC_TARGET_ID = 'zone:salon';
 const SALON_TV_DEVICE_ID = 'living-room-tv';
 const DEFAULT_SPOTIFY_SOURCE = 'Spotify - Musique et podcasts';
-
-type SpotifyDevice = { id: string; name: string; type?: string; isActive: boolean };
 
 export type SalonMusicAvailability = 'off' | 'on' | 'ready' | 'unavailable';
 

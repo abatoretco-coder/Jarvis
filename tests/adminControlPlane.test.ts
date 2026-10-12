@@ -658,6 +658,29 @@ describe('admin control plane', () => {
     db.close();
   });
 
+  test('reports Spotify connected when an active personal connection exists', async () => {
+    const { app, db } = setup();
+    const owner = await ensureOwner(app);
+    db.prepare(
+      `INSERT INTO integration_connections(
+      connection_id,owner_user_id,provider,scopes_json,status,created_at_ms,updated_at_ms
+    ) VALUES ('spotify-owner',?,'spotify','[]','active',1,1)`
+    ).run(owner.userId);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/admin/services',
+      headers: { authorization: 'Bearer owner-token' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().services).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'spotify', status: 'connected', configured: true }),
+    ]));
+    await app.close();
+    db.close();
+  });
+
   test('paginates audit events without skipping entries sharing a timestamp', () => {
     const db = createConversationDb(':memory:');
     const identities = new IdentityRepository(db);

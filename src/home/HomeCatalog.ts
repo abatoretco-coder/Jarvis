@@ -22,6 +22,13 @@ import {
 
 type Point = [number, number];
 type RiskLevel = 'low' | 'moderate' | 'high';
+export const HOME_DEVICE_ICON_KEYS = [
+  'lamp', 'bulb', 'plug', 'power', 'tv', 'robot', 'thermometer', 'droplets',
+  'sensor', 'camera', 'bell', 'speaker', 'computer', 'router', 'fan', 'ceiling-light',
+  'floor-lamp', 'led-strip', 'outlet', 'game-console', 'phone', 'laptop', 'lock',
+  'door', 'window', 'shower', 'washer', 'kitchen', 'sofa', 'bed',
+] as const;
+export type HomeDeviceIcon = (typeof HOME_DEVICE_ICON_KEYS)[number];
 export type HomeActionName =
   | 'turn_on'
   | 'turn_off'
@@ -47,6 +54,7 @@ export type HomeActionName =
   | 'close'
   | 'stop'
   | 'set_brightness'
+  | 'set_color'
   | 'set_volume'
   | 'volume_up'
   | 'volume_down'
@@ -109,6 +117,7 @@ type DeviceMapping = {
   entityId?: string;
   name?: string;
   presetId: string;
+  icon?: HomeDeviceIcon;
   placement: DevicePlacement;
   robot?: RobotEntityMapping;
   television?: TelevisionEntityMapping;
@@ -216,6 +225,7 @@ type RawDeviceMapping =
       entityId?: string;
       name?: string;
       presetId?: string;
+      icon?: HomeDeviceIcon;
       placement?: Partial<DevicePlacement>;
       robot?: Partial<RobotEntityMapping>;
       television?: Partial<TelevisionEntityMapping>;
@@ -240,9 +250,11 @@ export type HomeDevice = {
   available: boolean;
   mapped: boolean;
   presetId: string;
+  icon?: HomeDeviceIcon;
   placement: DevicePlacement;
   capabilities: string[];
   riskLevel: RiskLevel;
+  color?: string;
   targetTemperature?: number;
   currentTemperature?: number;
   minTemperature?: number;
@@ -342,6 +354,7 @@ export type UpsertHomeDevice = {
   entityId?: string;
   name: string;
   presetId: string;
+  icon?: HomeDeviceIcon;
   placement: DevicePlacement;
 };
 
@@ -360,6 +373,7 @@ const homeAssistantAreaIdPattern = /^[a-z0-9_]{1,64}$/u;
 const deviceIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIcons = new Set(['light', 'climate', 'media', 'vacuum', 'home']);
+const homeDeviceIcons = new Set<string>(HOME_DEVICE_ICON_KEYS);
 const quickActionNames = new Set<HomeActionName>([
   'turn_on',
   'turn_off',
@@ -713,6 +727,7 @@ function normalizeMapping(
     !deviceIdPattern.test(value.deviceId) ||
     (entityId !== undefined && !entityIdPattern.test(entityId)) ||
     (value.name !== undefined && (!value.name.trim() || value.name.length > 100)) ||
+    (value.icon !== undefined && !homeDeviceIcons.has(value.icon)) ||
     !preset ||
     (domain !== undefined && preset.domain !== domain) ||
     (value.robot !== undefined && (preset.domain !== 'vacuum' || !robot)) ||
@@ -741,6 +756,7 @@ function normalizeMapping(
     deviceId: value.deviceId,
     ...(entityId ? { entityId } : {}),
     ...(value.name ? { name: value.name.trim() } : {}),
+    ...(value.icon ? { icon: value.icon } : {}),
     presetId: preset.presetId,
     placement,
     ...(robot ? { robot } : {}),
@@ -1123,6 +1139,7 @@ export class HomeCatalog {
     const current = this.mappingsByDeviceId.get(input.deviceId);
     const mapping = normalizeMapping({
       ...input,
+      ...(input.icon === undefined && current?.icon ? { icon: current.icon } : {}),
       ...(current?.presetId === input.presetId && current.entityId === input.entityId && current.robot
         ? { robot: current.robot }
         : {}),
@@ -1345,8 +1362,22 @@ export class HomeCatalog {
           if (action === 'set_eco_mode') return Boolean(mapping.waterHeater?.ecoEntityId);
           if (action === 'set_boost_mode') return Boolean(mapping.waterHeater?.boostEntityId);
           if (action === 'set_antilegionella') return Boolean(mapping.waterHeater?.antiLegionellaEntityId);
+          if (action === 'set_brightness') {
+            const modes = stringOptions(attributes.supported_color_modes) ?? [];
+            return modes.some((mode) => mode !== 'onoff');
+          }
+          if (action === 'set_color') {
+            const modes = stringOptions(attributes.supported_color_modes) ?? [];
+            return modes.some((mode) => ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(mode));
+          }
           return true;
         });
+        const rgb = Array.isArray(attributes.rgb_color)
+          ? attributes.rgb_color.slice(0, 3).map((value) => Number(value))
+          : [];
+        const color = rgb.length === 3 && rgb.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
+          ? `#${rgb.map((value) => value.toString(16).padStart(2, '0')).join('')}`
+          : undefined;
         devices.push({
           deviceId: mapping.deviceId,
           roomId,
@@ -1360,9 +1391,11 @@ export class HomeCatalog {
           available: Boolean(state && !['unavailable', 'unknown'].includes(state.state)),
           mapped: Boolean(mapping.entityId),
           presetId: preset.presetId,
+          ...(mapping.icon ? { icon: mapping.icon } : {}),
           placement: mapping.placement,
           capabilities,
           riskLevel: preset.riskLevel,
+          ...(color ? { color } : {}),
           ...(targetTemperature === undefined ? {} : { targetTemperature }),
           ...(currentTemperature === undefined ? {} : { currentTemperature }),
           ...(minTemperature === undefined ? {} : { minTemperature }),

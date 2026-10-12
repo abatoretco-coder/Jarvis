@@ -47,7 +47,7 @@ const allowedActions: Record<string, readonly string[]> = Object.fromEntries(
 function serviceFor(domain: string, action: string): string {
   if (domain === 'media_player' && action === 'play_pause') return 'media_play_pause';
   if (domain === 'cover' && ['open', 'close', 'stop'].includes(action)) return `${action}_cover`;
-  if (domain === 'light' && action === 'set_brightness') return 'turn_on';
+  if (domain === 'light' && ['set_brightness', 'set_color'].includes(action)) return 'turn_on';
   if (domain === 'media_player' && action === 'set_volume') return 'volume_set';
   if (domain === 'media_player' && action === 'media_next') return 'media_next_track';
   if (domain === 'media_player' && action === 'media_previous') return 'media_previous_track';
@@ -71,6 +71,10 @@ function serviceDataFor(command: ExecutableHomeAction): Record<string, unknown> 
   if (command.action === 'set_away_mode') return { away_mode: command.option === 'on' };
   if (command.action === 'set_temperature_offset') return { value: command.value };
   if (command.action === 'set_brightness') return { brightness_pct: command.value };
+  if (command.action === 'set_color' && /^#[0-9a-f]{6}$/iu.test(command.option ?? '')) {
+    const hex = command.option!.slice(1);
+    return { rgb_color: [0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)) };
+  }
   if (command.action === 'set_volume') return { volume_level: (command.value ?? 0) / 100 };
   if (command.action === 'mute') return { is_volume_muted: true };
   if (command.action === 'unmute') return { is_volume_muted: false };
@@ -105,6 +109,9 @@ export function resolveCatalogHomeAction(
     return { ok: false, status: 400, code: 'home_action_unsupported', domain };
   }
   if (['select_source', 'select_sound_output'].includes(command.action) && (!command.option || command.option.length > 120)) {
+    return { ok: false, status: 400, code: 'home_action_unsupported', domain };
+  }
+  if (command.action === 'set_color' && !/^#[0-9a-f]{6}$/iu.test(command.option ?? '')) {
     return { ok: false, status: 400, code: 'home_action_unsupported', domain };
   }
   if (command.action === 'play_channel' && (!command.option || command.option.length > 60)) {
@@ -231,6 +238,24 @@ export async function executeCatalogHomeAction(input: {
       const min = typeof attrs.min_temp === 'number' ? attrs.min_temp : 5;
       const max = typeof attrs.max_temp === 'number' ? attrs.max_temp : 35;
       if (input.command.value === undefined || input.command.value < min || input.command.value > max) return { ok: false, status: 400, code: 'home_action_option_invalid', domain };
+    }
+    if (['set_brightness', 'set_color'].includes(input.command.action)) {
+      const entityId = resolved.call.target?.entity_id;
+      const targetState = typeof entityId === 'string' ? await input.ha.getState(entityId) : undefined;
+      const attrs = isHassState(targetState) && targetState.attributes && typeof targetState.attributes === 'object'
+        ? targetState.attributes as Record<string, unknown>
+        : {};
+      const supportedModes = Array.isArray(attrs.supported_color_modes)
+        ? attrs.supported_color_modes.filter((mode): mode is string => typeof mode === 'string')
+        : [];
+      const supportsBrightness = supportedModes.some((mode) => mode !== 'onoff');
+      const supportsColor = supportedModes.some((mode) => ['hs', 'rgb', 'rgbw', 'rgbww', 'xy'].includes(mode));
+      if (
+        (input.command.action === 'set_brightness' && !supportsBrightness)
+        || (input.command.action === 'set_color' && !supportsColor)
+      ) {
+        return { ok: false, status: 400, code: 'home_action_unsupported', domain };
+      }
     }
     if (input.command.action === 'set_away_mode') {
       const entityId = resolved.call.target?.entity_id;

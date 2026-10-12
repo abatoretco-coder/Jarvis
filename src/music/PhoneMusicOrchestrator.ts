@@ -1,9 +1,8 @@
-import type { SpotifyWebApiClient } from '../spotifyWebApi';
+import type { SpotifyDevice, SpotifyWebApiClient } from '../spotifyWebApi';
 
 export const PHONE_MUSIC_TARGET_ID = 'zone:phone';
 export const PHONE_LOCAL_ACTIVATION_HINT = 'local_spotify_opened';
 
-type SpotifyDevice = { id: string; name: string; type?: string; isActive: boolean };
 type Logger = { warn?: (payload: unknown, message?: string) => void; info?: (payload: unknown, message?: string) => void };
 
 export type PhoneMusicPreparation =

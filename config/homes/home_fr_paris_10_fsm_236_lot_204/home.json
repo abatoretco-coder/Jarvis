@@ -283,14 +283,18 @@
         },
         {
           "deviceId": "tapo-plug-1",
-          "name": "Prise 1",
+          "entityId": "switch.prise_lampe",
+          "name": "Lampe à lave",
           "presetId": "plug",
+          "icon": "floor-lamp",
           "placement": {"x": 6.7, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
         },
         {
           "deviceId": "tapo-plug-2",
-          "name": "Prise 2",
+          "entityId": "switch.prise_lampe_salon",
+          "name": "Lampe du salon",
           "presetId": "plug",
+          "icon": "lamp",
           "placement": {"x": 8.2, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
         },
         {
@@ -365,6 +369,25 @@
         "action": "return_to_base",
         "voicePhrases": ["renvoie le robot a sa base", "retourne le robot a sa base"],
         "sortOrder": 3
+      }
+    ],
+    "scenes": [
+      {
+        "sceneId": "film",
+        "name": "Film",
+        "icon": "media",
+        "steps": [
+          {
+            "deviceId": "tapo-plug-1",
+            "action": "turn_on"
+          },
+          {
+            "deviceId": "tapo-plug-2",
+            "action": "turn_off"
+          }
+        ],
+        "voicePhrases": ["mode film", "lance la scene film"],
+        "sortOrder": 0
       }
     ]
   },

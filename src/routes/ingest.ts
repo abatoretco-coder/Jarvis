@@ -1067,6 +1067,9 @@ function inferSimpleSpotifyControl(
   const hasMusicNoun = /\b(musique|spotify|piste|titre|morceau|chanson|track|lecture)\b/u.test(
     normalized
   );
+  const isGenericMusicStart = /^(?:(?:hey )?(?:jarvis|chatgpt) )?(?:s )?(?:allume|lance|demarre|mets|met)(?: moi)? (?:de la |de |la )musique(?: (?:stp|s il te plait))?$/u.test(
+    normalized
+  );
   if (
     options.voiceHub &&
     /^(la |le |titre |piste |morceau |chanson )?(suivante?|next|skip)$/u.test(normalized)
@@ -1094,7 +1097,7 @@ function inferSimpleSpotifyControl(
   if (/\b(pause|mets en pause|arrete|stop)\b/u.test(normalized) && hasMusicNoun) {
     return 'pause';
   }
-  if (/\b(reprends|relance|continue|play|lecture)\b/u.test(normalized) && hasMusicNoun) {
+  if (isGenericMusicStart || (/\b(reprends|relance|continue|play|lecture)\b/u.test(normalized) && hasMusicNoun)) {
     return 'play';
   }
   return null;

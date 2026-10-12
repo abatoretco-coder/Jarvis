@@ -12,7 +12,7 @@ import {
   HomeAssistantRegistrySyncService,
   HomeAssistantSyncError,
 } from '../home/HomeAssistantRegistrySyncService';
-import { HomeCatalog } from '../home/HomeCatalog';
+import { HOME_DEVICE_ICON_KEYS, HomeCatalog } from '../home/HomeCatalog';
 import {
   HomeHeatingPlanService,
   HomeHeatingPlanUpdateError,
@@ -47,6 +47,7 @@ const actionNameSchema = z.enum([
   'close',
   'stop',
   'set_brightness',
+  'set_color',
   'set_volume',
   'volume_up',
   'volume_down',
@@ -76,7 +77,7 @@ const actionSchema = z
   .strict()
   .superRefine((value, context) => {
     const needsValue = ['set_temperature', 'set_temperature_offset', 'set_brightness', 'set_volume'].includes(value.action);
-    const needsOption = ['select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
+    const needsOption = ['set_color', 'select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
     if (needsValue && value.value === undefined) {
       context.addIssue({ code: 'custom', message: 'value_required', path: ['value'] });
     }
@@ -91,6 +92,9 @@ const actionSchema = z
     }
     if (['set_child_lock', 'set_preheating', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action) && !['on', 'off'].includes(value.option ?? '')) {
       context.addIssue({ code: 'custom', message: 'switch_option_invalid', path: ['option'] });
+    }
+    if (value.action === 'set_color' && !/^#[0-9a-f]{6}$/iu.test(value.option ?? '')) {
+      context.addIssue({ code: 'custom', message: 'color_invalid', path: ['option'] });
     }
     if (!needsOption && value.option !== undefined) {
       context.addIssue({ code: 'custom', message: 'unexpected_option', path: ['option'] });
@@ -117,6 +121,7 @@ const deviceConfigurationSchema = z
       .optional(),
     name: z.string().trim().min(1).max(100),
     presetId: z.string().min(1).max(40),
+    icon: z.enum(HOME_DEVICE_ICON_KEYS).optional(),
     placement: placementSchema,
   })
   .strict();
@@ -137,7 +142,7 @@ const quickActionSchema = z
   .strict()
   .superRefine((value, context) => {
     const needsValue = ['set_temperature', 'set_temperature_offset', 'set_brightness', 'set_volume'].includes(value.action);
-    const needsOption = ['select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
+    const needsOption = ['set_color', 'select_source', 'select_sound_output', 'remote_key', 'set_suction_mode', 'set_mop_mode', 'play_channel', 'set_hvac_mode', 'set_preset_mode', 'set_child_lock', 'set_preheating', 'set_operation_mode', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action);
     if (needsValue && value.value === undefined) {
       context.addIssue({ code: 'custom', message: 'value_required', path: ['value'] });
     }
@@ -152,6 +157,9 @@ const quickActionSchema = z
     }
     if (['set_child_lock', 'set_preheating', 'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella'].includes(value.action) && !['on', 'off'].includes(value.option ?? '')) {
       context.addIssue({ code: 'custom', message: 'switch_option_invalid', path: ['option'] });
+    }
+    if (value.action === 'set_color' && !/^#[0-9a-f]{6}$/iu.test(value.option ?? '')) {
+      context.addIssue({ code: 'custom', message: 'color_invalid', path: ['option'] });
     }
     if (!needsOption && value.option !== undefined) {
       context.addIssue({ code: 'custom', message: 'unexpected_option', path: ['option'] });
@@ -1060,6 +1068,45 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         metadata: { stepCount: actions.length },
       });
       return reply.code(201).send({ revision: catalog.getRevision(), scene: catalog.getScene(sceneId) });
+    } catch (error) {
+      const mapped = mutationError(error);
+      return reply.code(mapped.status).send({ error: mapped.code });
+    }
+  });
+
+  app.put<{ Params: { sceneId: string }; Body: unknown }>('/v1/home/scenes/:sceneId', async (request, reply) => {
+    if (!catalog) return reply.code(503).send({ error: 'home_config_unavailable' });
+    if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    const id = deviceIdSchema.safeParse(request.params.sceneId);
+    const parsed = sceneSchema.safeParse(request.body);
+    if (!id.success || !parsed.success) return reply.code(400).send({ error: 'home_scene_invalid' });
+    if (!catalog.getScene(id.data)) return reply.code(404).send({ error: 'home_scene_not_found' });
+    const actions = parsed.data.quickActionIds.map((quickActionId) => catalog?.getQuickAction(quickActionId));
+    if (actions.some((action) => !action)) return reply.code(400).send({ error: 'home_scene_invalid' });
+    try {
+      catalog.upsertScene({
+        sceneId: id.data,
+        expectedRevision: parsed.data.expectedRevision,
+        name: parsed.data.name,
+        icon: parsed.data.icon,
+        voicePhrases: parsed.data.voicePhrases,
+        steps: actions.map((action) => ({
+          deviceId: action!.deviceId,
+          action: action!.action,
+          ...(action!.value === undefined ? {} : { value: action!.value }),
+          ...(action!.option === undefined ? {} : { option: action!.option }),
+        })),
+      });
+      recordHomeAudit(app, deps, request, {
+        action: 'home.scene.update',
+        targetType: 'home.scene',
+        targetId: id.data,
+        outcome: 'success',
+        metadata: { stepCount: actions.length },
+      });
+      return reply.send({ revision: catalog.getRevision(), scene: catalog.getScene(id.data) });
     } catch (error) {
       const mapped = mutationError(error);
       return reply.code(mapped.status).send({ error: mapped.code });

@@ -104,7 +104,7 @@ function setup(
     })
   );
   const getStates = jest.fn<() => Promise<unknown[]>>(async () => [
-    { entity_id: 'light.salon', state: 'on', attributes: { friendly_name: 'Salon' } },
+    { entity_id: 'light.salon', state: 'on', attributes: { friendly_name: 'Salon', supported_color_modes: ['brightness'] } },
     { entity_id: 'camera.salon', state: 'idle', attributes: { friendly_name: 'Caméra salon' } },
     { entity_id: 'sensor.living_temperature', state: '21.4', attributes: { friendly_name: 'Tapo température', device_class: 'temperature' } },
     { entity_id: 'sensor.living_humidity', state: '54', attributes: { device_class: 'humidity' } },
@@ -649,7 +649,12 @@ describe('home routes', () => {
   });
 
   test('maps rich light controls to deterministic Home Assistant service data', async () => {
-    const { app, callService } = setup('resident', ['home']);
+    const { app, callService, getState } = setup('resident', ['home']);
+    getState.mockResolvedValue({
+      entity_id: 'light.salon',
+      state: 'on',
+      attributes: { supported_color_modes: ['brightness'] },
+    });
     const response = await app.inject({
       method: 'POST',
       url: '/v1/home/actions',
@@ -662,6 +667,36 @@ describe('home routes', () => {
       target: { entity_id: 'light.salon' },
       serviceData: { brightness_pct: 35 },
     });
+    await app.close();
+  });
+
+  test('maps RGB light controls without exposing arbitrary Home Assistant service data', async () => {
+    const { app, callService, getState } = setup('resident', ['home']);
+    getState.mockResolvedValue({
+      entity_id: 'light.salon',
+      state: 'on',
+      attributes: { supported_color_modes: ['rgb'] },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-light', action: 'set_color', option: '#12A0ff' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(callService).toHaveBeenCalledWith({
+      domain: 'light',
+      service: 'turn_on',
+      target: { entity_id: 'light.salon' },
+      serviceData: { rgb_color: [18, 160, 255] },
+    });
+
+    const invalid = await app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-light', action: 'set_color', option: 'red' },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(callService).toHaveBeenCalledTimes(1);
     await app.close();
   });
 
@@ -1060,6 +1095,7 @@ describe('home routes', () => {
         roomId: 'living',
         name: 'Robot du salon',
         presetId: 'vacuum',
+        icon: 'robot',
         placement: { x: 2, y: 1.5, z: 0, rotationDeg: 0, scale: 1 },
       },
     });
@@ -1080,6 +1116,7 @@ describe('home routes', () => {
           mapped: false,
           state: 'not_configured',
           presetId: 'vacuum',
+          icon: 'robot',
         }),
       ])
     );
@@ -1314,6 +1351,26 @@ describe('home routes', () => {
     });
     expect(scene.statusCode).toBe(201);
     expect(scene.json().scene.steps).toHaveLength(2);
+    const updatedScene = await app.inject({
+      method: 'PUT',
+      url: `/v1/home/scenes/${scene.json().scene.sceneId}`,
+      payload: {
+        expectedRevision: scene.json().revision,
+        name: 'Départ immédiat',
+        icon: 'home',
+        quickActionIds: [
+          light.json().quickAction.quickActionId,
+          vacuum.json().quickAction.quickActionId,
+        ],
+        voicePhrases: ['départ immédiat'],
+      },
+    });
+    expect(updatedScene.statusCode).toBe(200);
+    expect(updatedScene.json().scene).toMatchObject({
+      sceneId: scene.json().scene.sceneId,
+      name: 'Départ immédiat',
+      voicePhrases: ['depart immediat'],
+    });
     const run = await app.inject({
       method: 'POST',
       url: `/v1/home/scenes/${scene.json().scene.sceneId}/run`,
@@ -1353,6 +1410,13 @@ describe('home routes', () => {
     );
     expect(recordActorAudit).toHaveBeenCalledWith(
       expect.objectContaining({
+        action: 'home.scene.update',
+        targetType: 'home.scene',
+        targetId: scene.json().scene.sceneId,
+      })
+    );
+    expect(recordActorAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
         action: 'home.automation.create',
         targetType: 'home.automation',
         targetId: automation.json().automationId,
@@ -1360,7 +1424,7 @@ describe('home routes', () => {
     );
     const snapshot = await app.inject({ method: 'GET', url: '/v1/home' });
     expect(snapshot.json()).toMatchObject({
-      scenes: [expect.objectContaining({ name: 'Départ' })],
+      scenes: [expect.objectContaining({ name: 'Départ immédiat' })],
       routines: [],
     });
     const deleted = await app.inject({

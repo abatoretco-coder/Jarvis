@@ -27,7 +27,7 @@ function buildMusicApp(overrides: Partial<SpotifyWebApiClient> = {}, clientId?: 
     }),
     listDevicesPublic: async () => ({
       ok: true as const,
-      devices: [{ id: 'tv-1', name: '[LG] webOS TV', type: 'TV', isActive: true }],
+      devices: [{ id: 'tv-1', name: '[LG] webOS TV', type: 'TV', isActive: true, volumePercent: 18, supportsVolume: true }],
     }),
     listUserPlaylistsPublic: async () => ({
       ok: true as const,
@@ -66,7 +66,7 @@ describe('music routes', () => {
         device: { id: 'tv-1', volumePercent: 18 },
       },
       devices: [
-        { id: 'zone:salon', name: 'TV · Salon', zone: 'salon', availability: 'ready', isActive: true },
+        { id: 'zone:salon', name: 'TV · Salon', zone: 'salon', availability: 'ready', isActive: true, volumePercent: 18, supportsVolume: true },
         { id: 'zone:pc', name: 'PC', zone: 'pc' },
         { id: 'zone:phone', name: 'Téléphone', zone: 'phone' },
       ],
@@ -234,6 +234,27 @@ describe('music routes', () => {
     await app.close();
   });
 
+  test('resolves the Stream Deck PC target before executing a physical control', async () => {
+    const setVolume = jest.fn(async () => ({ ok: true as const, status: 204 }));
+    const app = buildMusicApp({
+      listDevicesPublic: async () => ({
+        ok: true as const,
+        devices: [{ id: 'spotify-pc-id', name: 'Jarvis Desktop', type: 'Computer', isActive: false, volumePercent: 40 }],
+      }),
+      setVolume,
+    } as Partial<SpotifyWebApiClient>, 'jarvis-streamdeck');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'volume', volumePercent: 50, deviceId: 'zone:pc' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(setVolume).toHaveBeenCalledWith(50, 'spotify-pc-id');
+    await app.close();
+  });
+
   test('resolves the logical phone target before an advanced player command', async () => {
     const setVolume = jest.fn(async () => ({ ok: true as const, status: 204 }));
     const app = buildMusicApp({
@@ -278,6 +299,154 @@ describe('music routes', () => {
     expect((await app.inject({ method: 'GET', url: '/v1/music/history' })).json()).toMatchObject({ items: [{ track: { title: 'Voyage' } }] });
     expect((await app.inject({ method: 'GET', url: '/v1/music/search?q=Voyage&type=track' })).json()).toMatchObject({ items: [{ name: 'Voyage' }] });
     expect((await app.inject({ method: 'GET', url: '/v1/music/library/contains?uri=spotify%3Atrack%3Atrack1' })).json()).toEqual({ saved: true });
+    await app.close();
+  });
+
+  test('adds podcast episodes to the Spotify playback queue', async () => {
+    const addToQueueUri = jest.fn(async () => ({ ok: true as const, status: 204 }));
+    const app = buildMusicApp({ addToQueueUri } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'add_queue', uri: 'spotify:episode:episode123', deviceId: 'phone-1' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(addToQueueUri).toHaveBeenCalledWith('spotify:episode:episode123', 'phone-1');
+    await app.close();
+  });
+
+  test('replaces the editable track queue in one server operation', async () => {
+    const replaceQueueUris = jest.fn(async () => ({ ok: true as const, status: 204 }));
+    const app = buildMusicApp({ replaceQueueUris } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: {
+        action: 'replace_queue',
+        uris: ['spotify:track:second', 'spotify:track:first'],
+        deviceId: 'spotify-device-id-123',
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(replaceQueueUris).toHaveBeenCalledWith(
+      ['spotify:track:second', 'spotify:track:first'],
+      'spotify-device-id-123',
+    );
+    await app.close();
+  });
+
+  test('adds dragged tracks to a selected playlist', async () => {
+    const addUrisToPlaylist = jest.fn(async () => ({ ok: true as const, status: 201 }));
+    const app = buildMusicApp({ addUrisToPlaylist } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: {
+        action: 'add_to_playlist',
+        playlistId: 'abc123',
+        uris: ['spotify:track:first', 'spotify:track:second'],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ operationStatus: 'succeeded', message: 'Playlist Spotify modifiée.' });
+    expect(addUrisToPlaylist).toHaveBeenCalledWith(
+      'abc123',
+      ['spotify:track:first', 'spotify:track:second'],
+    );
+    await app.close();
+  });
+
+  test('rejects an incomplete playlist drop', async () => {
+    const addUrisToPlaylist = jest.fn();
+    const app = buildMusicApp({ addUrisToPlaylist } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'add_to_playlist', playlistId: 'abc123', uris: [] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(addUrisToPlaylist).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  test('removes selected tracks from a playlist', async () => {
+    const removeUrisFromPlaylist = jest.fn(async () => ({ ok: true as const, status: 200 }));
+    const app = buildMusicApp({ removeUrisFromPlaylist } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: {
+        action: 'remove_from_playlist',
+        playlistId: 'abc123',
+        uris: ['spotify:track:first'],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ operationStatus: 'succeeded', message: 'Playlist Spotify modifiée.' });
+    expect(removeUrisFromPlaylist).toHaveBeenCalledWith('abc123', ['spotify:track:first']);
+    await app.close();
+  });
+
+  test('reports a playlist mutation network failure as uncertain and never retries it', async () => {
+    const removeUrisFromPlaylist = jest.fn(async () => ({ ok: false as const, error: 'spotify_webapi_network_error' }));
+    const app = buildMusicApp({ removeUrisFromPlaylist } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'remove_from_playlist', playlistId: 'abc123', uris: ['spotify:track:first'] },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ operationStatus: 'uncertain', error: 'spotify_webapi_network_error' });
+    expect(removeUrisFromPlaylist).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  test('rejects incomplete playlist removal and keeps it forbidden to Stream Deck', async () => {
+    const removeUrisFromPlaylist = jest.fn();
+    const regularApp = buildMusicApp({ removeUrisFromPlaylist } as Partial<SpotifyWebApiClient>);
+    const invalid = await regularApp.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'remove_from_playlist', playlistId: 'abc123', uris: [] },
+    });
+    expect(invalid.statusCode).toBe(400);
+    await regularApp.close();
+
+    const streamDeckApp = buildMusicApp({ removeUrisFromPlaylist } as Partial<SpotifyWebApiClient>, 'jarvis-streamdeck');
+    const forbidden = await streamDeckApp.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'remove_from_playlist', playlistId: 'abc123', uris: ['spotify:track:first'] },
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect(removeUrisFromPlaylist).not.toHaveBeenCalled();
+    await streamDeckApp.close();
+  });
+
+  test('rejects unsupported items in a queue replacement', async () => {
+    const replaceQueueUris = jest.fn();
+    const app = buildMusicApp({ replaceQueueUris } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'replace_queue', uris: ['spotify:episode:episode123'] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(replaceQueueUris).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  test('keeps queue replacement forbidden to the Stream Deck client', async () => {
+    const replaceQueueUris = jest.fn();
+    const app = buildMusicApp({ replaceQueueUris } as Partial<SpotifyWebApiClient>, 'jarvis-streamdeck');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'replace_queue', uris: ['spotify:track:first'] },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(replaceQueueUris).not.toHaveBeenCalled();
     await app.close();
   });
 });
