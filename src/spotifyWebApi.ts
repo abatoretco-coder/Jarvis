@@ -194,6 +194,14 @@ export type SpotifyDevice = {
   isRestricted?: boolean;
 };
 
+type SpotifyDevicesResult =
+  | { ok: true; devices: SpotifyDevice[] }
+  | { ok: false; error: string; status?: number; details?: unknown };
+
+type SpotifyNowPlayingResult =
+  | { ok: true; data: Record<string, unknown> }
+  | { ok: false; error: string; status?: number; details?: unknown };
+
 type SpotifyPlaylist = {
   id: string;
   name: string;
@@ -229,6 +237,9 @@ export class SpotifyWebApiClient {
   private readonly refreshSkewMs = 120_000;
   private cachedDeviceList?: { result: Awaited<ReturnType<SpotifyWebApiClient['listDevices']>>; fetchedAtMs: number };
   private cachedNowPlaying?: { result: Awaited<ReturnType<SpotifyWebApiClient['getNowPlaying']>>; fetchedAtMs: number };
+  private deviceListInFlight?: Promise<SpotifyDevicesResult>;
+  private nowPlayingInFlight?: Promise<SpotifyNowPlayingResult>;
+  private situationCacheEpoch = 0;
   private cachedUserPlaylists?: { playlists: SpotifyPlaylist[]; fetchedAtMs: number };
   // Spotify Connect devices appear and disappear as their apps open and close.
   // Keep this shorter than the UI polling interval so a newly opened phone is
@@ -237,6 +248,7 @@ export class SpotifyWebApiClient {
   private readonly nowPlayingCacheTtlMs = 2_500;
   private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
+  private readonly situationRefreshTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly persistTokenFile: boolean;
   private readonly onRefreshToken?: (token: string) => Promise<void> | void;
 
@@ -244,7 +256,7 @@ export class SpotifyWebApiClient {
     this.env = env;
     this.logger = logger;
     this.tokenFilePath = env.SPOTIFY_WEBAPI_TOKEN_STORE_PATH;
-    this.persistTokenFile = credentialOptions.persistTokenFile ?? true;
+    this.persistTokenFile = (credentialOptions.persistTokenFile ?? true) && Boolean(this.tokenFilePath?.trim());
     this.onRefreshToken = credentialOptions.onRefreshToken;
     this.refreshTokenOverride = credentialOptions.refreshToken?.trim() || undefined;
     // Load persisted token on startup (non-blocking)
@@ -816,7 +828,7 @@ export class SpotifyWebApiClient {
     const delayMs = Math.max(100, this.env.SPOTIFY_WEBAPI_DEVICE_DISCOVERY_DELAY_MS);
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      const devicesRes = await this.listDevices();
+      const devicesRes = await this.listDevicesCoalesced();
       if (devicesRes.ok) {
         const found = this.findDeviceByPreferredName(devicesRes.devices, preferredName);
         if (found) {
@@ -858,8 +870,7 @@ export class SpotifyWebApiClient {
   }
 
   private async listDevices(): Promise<
-    | { ok: true; devices: SpotifyDevice[] }
-    | { ok: false; error: string; status?: number; details?: unknown }
+    SpotifyDevicesResult
   > {
     const r = await this.request('GET', '/v1/me/player/devices');
     if (!r.ok) return { ok: false, error: r.error, status: r.status, details: r.details };
@@ -884,6 +895,17 @@ export class SpotifyWebApiClient {
       });
     }
     return { ok: true, devices };
+  }
+
+  private async listDevicesCoalesced(): Promise<SpotifyDevicesResult> {
+    if (this.deviceListInFlight) return this.deviceListInFlight;
+    const request = this.listDevices();
+    this.deviceListInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (this.deviceListInFlight === request) this.deviceListInFlight = undefined;
+    }
   }
 
   private async resolveDeviceIdWithFallback(requestedDeviceId?: string): Promise<string> {
@@ -913,7 +935,7 @@ export class SpotifyWebApiClient {
       }
 
       if (requestedAlias === 'computer') {
-        const devicesRes = await this.listDevices();
+        const devicesRes = await this.listDevicesCoalesced();
         if (devicesRes.ok) {
           const typed = this.findDeviceByType(devicesRes.devices, ['computer']);
           if (typed) {
@@ -1023,7 +1045,7 @@ export class SpotifyWebApiClient {
     | { ok: true; device: SpotifyDevice }
     | { ok: false; result: SpotifyWebApiErrorResult }
   > {
-    const devicesRes = await this.listDevices();
+    const devicesRes = await this.listDevicesCoalesced();
     if (!devicesRes.ok) {
       return {
         ok: false,
@@ -1628,7 +1650,7 @@ export class SpotifyWebApiClient {
     }
 
     const did = await this.resolveDeviceIdWithFallback(deviceId);
-    const now = await this.fetchNowPlayingRaw();
+    const now = await this.fetchNowPlayingCoalesced();
     if (!now.ok) return now;
     const item = asRecord(now.data.item);
     const currentUri = typeof item?.uri === 'string' ? item.uri.trim() : '';
@@ -1718,8 +1740,13 @@ export class SpotifyWebApiClient {
   }
 
   invalidateSituationCache(): void {
+    this.situationCacheEpoch += 1;
     this.cachedDeviceList = undefined;
     this.cachedNowPlaying = undefined;
+    // Requests already on the wire cannot be cancelled. Stop sharing them
+    // with post-command reads and prevent stale completion from refilling cache.
+    this.deviceListInFlight = undefined;
+    this.nowPlayingInFlight = undefined;
   }
 
   scheduleSituationRefresh(delayMs = 600): void {
@@ -1727,23 +1754,30 @@ export class SpotifyWebApiClient {
     // immediately, then sample the situation more than once so a slow TV/app
     // activation cannot leave the previous track cached for a full TTL.
     this.invalidateSituationCache();
+    for (const timer of this.situationRefreshTimers) clearTimeout(timer);
+    this.situationRefreshTimers.clear();
     for (const offsetMs of [delayMs, delayMs + 1_200, delayMs + 4_000]) {
-      const timer = setTimeout(() => { void this.fetchAndCacheSituation(); }, offsetMs);
+      const timer = setTimeout(() => {
+        this.situationRefreshTimers.delete(timer);
+        void this.fetchAndCacheSituation();
+      }, offsetMs);
+      this.situationRefreshTimers.add(timer);
       timer.unref?.();
     }
   }
 
   private async fetchAndCacheSituation(): Promise<void> {
     try {
+      const cacheEpoch = this.situationCacheEpoch;
       const fetchedAtMs = Date.now();
       const [devicesResult, nowPlayingResult] = await Promise.all([
-        this.listDevices(),
-        this.fetchNowPlayingRaw(),
+        this.listDevicesCoalesced(),
+        this.fetchNowPlayingCoalesced(),
       ]);
-      if (!this.cachedDeviceList || fetchedAtMs >= this.cachedDeviceList.fetchedAtMs) {
+      if (cacheEpoch === this.situationCacheEpoch && (!this.cachedDeviceList || fetchedAtMs >= this.cachedDeviceList.fetchedAtMs)) {
         this.cachedDeviceList = { result: devicesResult, fetchedAtMs };
       }
-      if (!this.cachedNowPlaying || fetchedAtMs >= this.cachedNowPlaying.fetchedAtMs) {
+      if (cacheEpoch === this.situationCacheEpoch && (!this.cachedNowPlaying || fetchedAtMs >= this.cachedNowPlaying.fetchedAtMs)) {
         this.cachedNowPlaying = { result: nowPlayingResult, fetchedAtMs };
       }
     } catch {
@@ -1751,15 +1785,23 @@ export class SpotifyWebApiClient {
     }
   }
 
-  private async fetchNowPlayingRaw(): Promise<
-    | { ok: true; data: Record<string, unknown> }
-    | { ok: false; error: string; status?: number; details?: unknown }
-  > {
+  private async fetchNowPlayingRaw(): Promise<SpotifyNowPlayingResult> {
     const r = await this.request('GET', '/v1/me/player/currently-playing');
     if (!r.ok) return { ok: false, error: r.error, status: r.status, details: r.details };
     if (r.status === 204) return { ok: false, error: 'spotify_no_active_device', status: 204 };
     const data = asRecord(r.data);
     return { ok: true, data: data ?? {} };
+  }
+
+  private async fetchNowPlayingCoalesced(): Promise<SpotifyNowPlayingResult> {
+    if (this.nowPlayingInFlight) return this.nowPlayingInFlight;
+    const request = this.fetchNowPlayingRaw();
+    this.nowPlayingInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (this.nowPlayingInFlight === request) this.nowPlayingInFlight = undefined;
+    }
   }
 
   async listDevicesPublic(options?: { forceRefresh?: boolean }): Promise<
@@ -1770,8 +1812,9 @@ export class SpotifyWebApiClient {
     if (!options?.forceRefresh && this.cachedDeviceList && now - this.cachedDeviceList.fetchedAtMs < this.shortCacheTtlMs) {
       return this.cachedDeviceList.result;
     }
-    const result = await this.listDevices();
-    this.cachedDeviceList = { result, fetchedAtMs: now };
+    const cacheEpoch = this.situationCacheEpoch;
+    const result = await this.listDevicesCoalesced();
+    if (cacheEpoch === this.situationCacheEpoch) this.cachedDeviceList = { result, fetchedAtMs: now };
     return result;
   }
 
@@ -1783,8 +1826,9 @@ export class SpotifyWebApiClient {
     if (this.cachedNowPlaying && now - this.cachedNowPlaying.fetchedAtMs < this.nowPlayingCacheTtlMs) {
       return this.cachedNowPlaying.result;
     }
-    const result = await this.fetchNowPlayingRaw();
-    this.cachedNowPlaying = { result, fetchedAtMs: now };
+    const cacheEpoch = this.situationCacheEpoch;
+    const result = await this.fetchNowPlayingCoalesced();
+    if (cacheEpoch === this.situationCacheEpoch) this.cachedNowPlaying = { result, fetchedAtMs: now };
     return result;
   }
 

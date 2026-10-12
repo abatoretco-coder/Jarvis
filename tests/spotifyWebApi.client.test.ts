@@ -84,6 +84,70 @@ describe('spotify web api client integration mocks', () => {
     jest.useRealTimers();
   });
 
+  test('coalesces concurrent device and playback reads into one upstream request each', async () => {
+    let deviceReads = 0;
+    let playbackReads = 0;
+    (global as { fetch: typeof fetch }).fetch = (async (input: string | URL | Request) => {
+      const url = parseMockUrl(input);
+      if (url.hostname === 'accounts.spotify.local') {
+        return jsonResponse({ access_token: 'access-coalesced', token_type: 'Bearer', expires_in: 3600 });
+      }
+      if (url.pathname === '/v1/me/player/devices') {
+        deviceReads += 1;
+        await Promise.resolve();
+        return jsonResponse({ devices: [] });
+      }
+      if (url.pathname === '/v1/me/player/currently-playing') {
+        playbackReads += 1;
+        await Promise.resolve();
+        return jsonResponse({ is_playing: true, item: { id: 'track-coalesced' } });
+      }
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    const client = new SpotifyWebApiClient(makeEnv());
+    await Promise.all([
+      client.listDevicesPublic({ forceRefresh: true }),
+      client.listDevicesPublic({ forceRefresh: true }),
+      client.getNowPlaying(),
+      client.getNowPlaying(),
+    ]);
+
+    expect(deviceReads).toBe(1);
+    expect(playbackReads).toBe(1);
+  });
+
+  test('replaces pending post-command refresh timers when a newer action supersedes them', async () => {
+    jest.useFakeTimers();
+    let deviceReads = 0;
+    let playbackReads = 0;
+    (global as { fetch: typeof fetch }).fetch = (async (input: string | URL | Request) => {
+      const url = parseMockUrl(input);
+      if (url.hostname === 'accounts.spotify.local') {
+        return jsonResponse({ access_token: 'access-refresh', token_type: 'Bearer', expires_in: 3600 });
+      }
+      if (url.pathname === '/v1/me/player/devices') {
+        deviceReads += 1;
+        return jsonResponse({ devices: [] });
+      }
+      if (url.pathname === '/v1/me/player/currently-playing') {
+        playbackReads += 1;
+        return jsonResponse({ is_playing: true, item: { id: 'track-refresh' } });
+      }
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    const client = new SpotifyWebApiClient(makeEnv());
+    client.scheduleSituationRefresh(1_000);
+    client.scheduleSituationRefresh(1_000);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(deviceReads).toBe(1);
+    expect(playbackReads).toBe(1);
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
   test('searchTopTrackUri falls back from strict query to relaxed query and returns best uri', async () => {
     const env = makeEnv();
     const capturedQueries: string[] = [];
