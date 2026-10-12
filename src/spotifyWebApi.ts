@@ -184,6 +184,13 @@ function parseSpotifyUri(uri: string): { type: string; id: string } | undefined 
   };
 }
 
+function normalizePlaylistTrackUris(uris: string[]): string[] {
+  return [...new Set((Array.isArray(uris) ? uris : [])
+    .map((uri) => String(uri ?? '').trim())
+    .filter((uri) => /^spotify:track:[A-Za-z0-9]+$/u.test(uri)))]
+    .slice(0, 100);
+}
+
 export type SpotifyDevice = {
   id: string;
   name: string;
@@ -1951,10 +1958,7 @@ export class SpotifyWebApiClient {
       return { ok: false, error: 'spotify_playlist_id_invalid', status: 400 };
     }
 
-    const cleanUris = [...new Set((Array.isArray(uris) ? uris : [])
-      .map((uri) => String(uri ?? '').trim())
-      .filter((uri) => /^spotify:track:[A-Za-z0-9]+$/u.test(uri)))]
-      .slice(0, 100);
+    const cleanUris = normalizePlaylistTrackUris(uris);
 
     if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris', status: 400 };
 
@@ -1965,16 +1969,44 @@ export class SpotifyWebApiClient {
     return result;
   }
 
+  async createPlaylistWithUris(name: string, uris: string[]): Promise<SpotifyWebApiResult> {
+    const cleanName = String(name ?? '').trim();
+    const cleanUris = normalizePlaylistTrackUris(uris);
+    if (!cleanName) return { ok: false, error: 'spotify_playlist_name_missing', status: 400 };
+    if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris', status: 400 };
+
+    const created = await this.request('POST', '/v1/me/playlists', {
+      json: {
+        name: cleanName.slice(0, 100),
+        public: false,
+        description: 'Créée depuis Jarvis',
+      },
+      retryable: false,
+    });
+    if (!created.ok) return created;
+
+    const playlistId = asRecord(created.data)?.id;
+    if (typeof playlistId !== 'string' || !/^[A-Za-z0-9]+$/u.test(playlistId)) {
+      return { ok: false, error: 'spotify_playlist_create_invalid_response', status: 502 };
+    }
+    const added = await this.addUrisToPlaylist(playlistId, cleanUris);
+    if (!added.ok) {
+      return {
+        ...added,
+        details: { playlistId, playlistCreated: true, cause: added.details },
+      };
+    }
+    this.cachedUserPlaylists = undefined;
+    return { ok: true, status: 201, data: { playlistId } };
+  }
+
   async removeUrisFromPlaylist(playlistId: string, uris: string[]): Promise<SpotifyWebApiResult> {
     const cleanPlaylistId = String(playlistId ?? '').trim();
     if (!/^[A-Za-z0-9]+$/u.test(cleanPlaylistId)) {
       return { ok: false, error: 'spotify_playlist_id_invalid', status: 400 };
     }
 
-    const cleanUris = [...new Set((Array.isArray(uris) ? uris : [])
-      .map((uri) => String(uri ?? '').trim())
-      .filter((uri) => /^spotify:track:[A-Za-z0-9]+$/u.test(uri)))]
-      .slice(0, 100);
+    const cleanUris = normalizePlaylistTrackUris(uris);
 
     if (!cleanUris.length) return { ok: false, error: 'spotify_missing_playlist_uris', status: 400 };
 

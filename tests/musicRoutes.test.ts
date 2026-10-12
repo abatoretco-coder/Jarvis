@@ -356,6 +356,37 @@ describe('music routes', () => {
     await app.close();
   });
 
+  test('creates a playlist containing the selected title', async () => {
+    const createPlaylistWithUris = jest.fn(async () => ({ ok: true as const, status: 201, data: { playlistId: 'created123' } }));
+    const app = buildMusicApp({ createPlaylistWithUris } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: {
+        action: 'create_playlist',
+        name: 'Ithaca',
+        uris: ['spotify:track:first'],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ operationStatus: 'succeeded', message: 'Playlist Spotify créée.' });
+    expect(createPlaylistWithUris).toHaveBeenCalledWith('Ithaca', ['spotify:track:first']);
+    await app.close();
+  });
+
+  test('rejects playlist creation without a name or title', async () => {
+    const createPlaylistWithUris = jest.fn();
+    const app = buildMusicApp({ createPlaylistWithUris } as Partial<SpotifyWebApiClient>);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/music/actions',
+      payload: { action: 'create_playlist', name: '', uris: [] },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(createPlaylistWithUris).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   test('rejects an incomplete playlist drop', async () => {
     const addUrisToPlaylist = jest.fn();
     const app = buildMusicApp({ addUrisToPlaylist } as Partial<SpotifyWebApiClient>);

@@ -10,10 +10,11 @@ import type { AppDeps } from '../server';
 import { executeSpotifyCapability } from '../spotify/spotifyExecutor';
 
 const actionSchema = z.object({
-  action: z.enum(['play', 'pause', 'next', 'previous', 'transfer', 'play_playlist', 'play_context', 'play_item', 'play_artist_mix', 'seek', 'volume', 'shuffle', 'repeat', 'add_queue', 'replace_queue', 'add_to_playlist', 'remove_from_playlist', 'save_library', 'remove_library']),
+  action: z.enum(['play', 'pause', 'next', 'previous', 'transfer', 'play_playlist', 'play_context', 'play_item', 'play_artist_mix', 'seek', 'volume', 'shuffle', 'repeat', 'add_queue', 'replace_queue', 'add_to_playlist', 'create_playlist', 'remove_from_playlist', 'save_library', 'remove_library']),
   deviceId: z.string().trim().min(1).max(180).optional(),
   playlistUri: z.string().trim().regex(/^spotify:playlist:[A-Za-z0-9]+$/u).optional(),
   playlistId: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9]+$/u).optional(),
+  name: z.string().trim().min(1).max(100).optional(),
   uri: z.string().trim().regex(/^spotify:(?:track|album|artist|playlist|show|episode|audiobook|user):[A-Za-z0-9]+$/u).optional(),
   uris: z.array(z.string().trim().regex(/^spotify:track:[A-Za-z0-9]+$/u)).max(100).optional(),
   positionMs: z.number().int().min(0).max(86_400_000).optional(),
@@ -51,6 +52,9 @@ const actionSchema = z.object({
   }
   if (['add_to_playlist', 'remove_from_playlist'].includes(value.action) && (!value.playlistId || !value.uris?.length)) {
     context.addIssue({ code: 'custom', path: ['playlistId'], message: 'playlist_and_tracks_required' });
+  }
+  if (value.action === 'create_playlist' && (!value.name || !value.uris?.length)) {
+    context.addIssue({ code: 'custom', path: ['name'], message: 'playlist_name_and_tracks_required' });
   }
   if (value.action === 'seek' && value.positionMs === undefined) context.addIssue({ code: 'custom', path: ['positionMs'], message: 'position_required' });
   if (value.action === 'volume' && value.volumePercent === undefined) context.addIssue({ code: 'custom', path: ['volumePercent'], message: 'volume_required' });
@@ -341,7 +345,7 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(403).send({ error: 'client_scope_forbidden' });
     }
     const spotify = spotifyClientForRequest(request, deps);
-    const { action, playlistUri, playlistId, activationHint, uri, uris, positionMs, volumePercent, state, repeatMode } = parsed.data;
+    const { action, playlistUri, playlistId, name, activationHint, uri, uris, positionMs, volumePercent, state, repeatMode } = parsed.data;
     let { deviceId } = parsed.data;
     if (deviceId === SALON_MUSIC_TARGET_ID) {
       const prepared = await new SalonMusicOrchestrator({
@@ -407,6 +411,7 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
               : action === 'add_queue' ? await spotify.addToQueueUri(uri!, deviceId)
                 : action === 'replace_queue' ? await spotify.replaceQueueUris(uris!, deviceId)
                   : action === 'add_to_playlist' ? await spotify.addUrisToPlaylist(playlistId!, uris!)
+                    : action === 'create_playlist' ? await spotify.createPlaylistWithUris(name!, uris!)
                     : action === 'remove_from_playlist' ? await spotify.removeUrisFromPlaylist(playlistId!, uris!)
                 : action === 'save_library' ? await spotify.saveLibraryUri(uri!)
                   : action === 'remove_library' ? await spotify.removeLibraryUri(uri!)
@@ -432,11 +437,13 @@ export function registerMusicRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(409).send({ error: directResult.error, message: 'Commande Spotify indisponible.' });
       }
       spotify.scheduleSituationRefresh();
-      const playlistMutation = action === 'add_to_playlist' || action === 'remove_from_playlist';
+      const playlistMutation = ['add_to_playlist', 'create_playlist', 'remove_from_playlist'].includes(action);
       return reply.send({
         status: 'success',
         operationStatus: playlistMutation ? 'succeeded' : 'accepted',
-        message: playlistMutation ? 'Playlist Spotify modifiée.' : 'Commande Spotify acceptée. Vérification de la lecture en cours.',
+        message: action === 'create_playlist'
+          ? 'Playlist Spotify créée.'
+          : playlistMutation ? 'Playlist Spotify modifiée.' : 'Commande Spotify acceptée. Vérification de la lecture en cours.',
       });
     }
     const requestAction = action === 'play' || action === 'pause' || action === 'next' || action === 'previous' || action === 'transfer'

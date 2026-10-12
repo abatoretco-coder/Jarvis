@@ -523,6 +523,30 @@ describe('spotify web api client integration mocks', () => {
     ]);
   });
 
+  test('creates a private playlist with one title through the 2026 endpoints', async () => {
+    const client = new SpotifyWebApiClient(makeEnv());
+    const calls: Array<{ method: string; path: string; options?: { json?: unknown; retryable?: boolean } }> = [];
+    (client as unknown as { request: (method: string, path: string, options?: { json?: unknown; retryable?: boolean }) => Promise<unknown> }).request = async (method, path, options) => {
+      calls.push({ method, path, options });
+      if (path === '/v1/me/playlists') return { ok: true, status: 201, data: { id: 'created123' } };
+      return { ok: true, status: 201 };
+    };
+
+    await expect(client.createPlaylistWithUris('Ithaca', ['spotify:track:first'])).resolves.toEqual({
+      ok: true,
+      status: 201,
+      data: { playlistId: 'created123' },
+    });
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: '/v1/me/playlists',
+        options: { json: { name: 'Ithaca', public: false, description: 'Créée depuis Jarvis' }, retryable: false },
+      },
+      { method: 'POST', path: '/v1/playlists/created123/items', options: { json: { uris: ['spotify:track:first'] } } },
+    ]);
+  });
+
   test('invalidates cached playlist counts after a successful playlist mutation', async () => {
     const client = new SpotifyWebApiClient(makeEnv());
     let playlistReads = 0;
