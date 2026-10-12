@@ -61,6 +61,31 @@ export type RouterResult = {
   fallbackReason?: string;
 };
 
+/**
+ * Keep at most one target per executable agent. The model may occasionally
+ * repeat a destination; executing every copy would duplicate physical actions.
+ * Preserve the first target position, but retain the most confident payload.
+ */
+export function deduplicateRouterTargets(targets: RouterTarget[]): RouterTarget[] {
+  const indexByAgentId = new Map<string, number>();
+  const result: RouterTarget[] = [];
+
+  for (const target of targets) {
+    const existingIndex = indexByAgentId.get(target.agentId);
+    if (existingIndex === undefined) {
+      indexByAgentId.set(target.agentId, result.length);
+      result.push(target);
+      continue;
+    }
+
+    if (target.confidence > result[existingIndex]!.confidence) {
+      result[existingIndex] = target;
+    }
+  }
+
+  return result;
+}
+
 export type RouterOptions = {
   openAiApiKey: string;
   openAiBaseUrl: string;
@@ -217,24 +242,30 @@ async function routeWithOpenAi(params: {
     const reason = typeof result.reason === 'string' ? result.reason.trim() : '';
 
     const knownIds = new Set(routerIdToAgentId.keys());
-    const targets: RouterTarget[] = (rawTargets as unknown[])
-      .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-      .map((t) => {
-        const routerId = typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '';
-        const agentId = routerIdToAgentId.get(routerId) ?? '';
-        const confidence = typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0;
-        const entry: RouterTarget = { agentId, confidence };
-        if (agentId === SPOTIFY_AGENT_ID) {
-          if (typeof t['action'] === 'string' && t['action']) {
-            entry.action = (t['action'] as string).trim();
+    const targets = deduplicateRouterTargets(
+      (rawTargets as unknown[])
+        .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
+        .map((t) => {
+          const routerId = typeof t['agentId'] === 'string' ? (t['agentId'] as string).trim() : '';
+          const agentId = routerIdToAgentId.get(routerId) ?? '';
+          const confidence = typeof t['confidence'] === 'number' ? (t['confidence'] as number) : 0;
+          const entry: RouterTarget = { agentId, confidence };
+          if (agentId === SPOTIFY_AGENT_ID) {
+            if (typeof t['action'] === 'string' && t['action']) {
+              entry.action = (t['action'] as string).trim();
+            }
+            if (
+              typeof t['slots'] === 'object' &&
+              t['slots'] !== null &&
+              !Array.isArray(t['slots'])
+            ) {
+              entry.slots = t['slots'] as Record<string, unknown>;
+            }
           }
-          if (typeof t['slots'] === 'object' && t['slots'] !== null && !Array.isArray(t['slots'])) {
-            entry.slots = t['slots'] as Record<string, unknown>;
-          }
-        }
-        return entry;
-      })
-      .filter((t) => t.agentId);
+          return entry;
+        })
+        .filter((t) => t.agentId)
+    );
 
     if (targets.length === 0) {
       log?.warn(

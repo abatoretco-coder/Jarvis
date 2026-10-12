@@ -4,6 +4,7 @@ import type { HaAgentEntry, RouterOptions } from '../src/conversation/haAgentRou
 import { parseAgentMap, routeToHaAgent, SPOTIFY_AGENT_ID } from '../src/conversation/haAgentRouter';
 import {
   buildOrchestratorResponseFormat,
+  deduplicateRouterTargets,
   HOME_CONTROL_ROUTER_AGENT_ID,
   routeUserRequest,
 } from '../src/conversation/orchestratorRouter';
@@ -104,6 +105,22 @@ describe('parseAgentMap', () => {
     // hint empty
     const r2 = parseAgentMap('k:conversation.jarvis_search:');
     expect(r2).toHaveLength(0);
+  });
+});
+
+describe('deduplicateRouterTargets', () => {
+  test('keeps one target per agent and retains its highest-confidence payload', () => {
+    expect(
+      deduplicateRouterTargets([
+        { agentId: 'spotify', confidence: 0.72, action: 'pause' },
+        { agentId: 'conversation.jarvis_executors', confidence: 0.91 },
+        { agentId: 'spotify', confidence: 0.96, action: 'next' },
+        { agentId: 'conversation.jarvis_executors', confidence: 0.8 },
+      ])
+    ).toEqual([
+      { agentId: 'spotify', confidence: 0.96, action: 'next' },
+      { agentId: 'conversation.jarvis_executors', confidence: 0.91 },
+    ]);
   });
 });
 

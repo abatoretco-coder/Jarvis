@@ -640,6 +640,42 @@ describe('/v1/ingest integration', () => {
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(2);
   });
 
+  it('allows the general conversation target for a chat-scoped service principal', async () => {
+    const fetchMock = jest.fn(async () => haSpeechResponse('Bonjour depuis Jarvis.'));
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_conversation', confidence: 0.99 }],
+      reason: 'ordinary_conversation',
+    });
+
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: undefined,
+    });
+    app.addHook('preHandler', async (request) => {
+      setRequestPrincipal(request, {
+        kind: 'service',
+        serviceId: 'chat-only-general',
+        permissions: ['chat'],
+      });
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'allowed-general-chat',
+        text: 'Bonjour, comment vas-tu ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ responseText: 'Bonjour depuis Jarvis.' });
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
+  });
+
   it('does not recommend Spotify when the Home Assistant fallback fails for a home command', async () => {
     (global as { fetch: typeof fetch }).fetch = jest.fn(async () => {
       throw new Error('ha_unreachable');

@@ -4421,7 +4421,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const selectedPermissions = new Set(
         validTargets.map((target) => {
           if (target.agentId === SPOTIFY_AGENT_ID) return 'music' as const;
-          if (target.agentId === generalAgentId) return 'home' as const;
+          if (target.agentId === generalAgentId) return 'chat' as const;
           const key = permissionEntryByAgentId.get(target.agentId)?.key;
           if (key === 'weather') return 'home' as const;
           if (isSearchAgentKey(key)) return 'chat' as const;

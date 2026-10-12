@@ -112,6 +112,11 @@ describe('HomeVoicePlanner', () => {
         jsonSchema: expect.objectContaining({ name: 'jarvis_home_action_plan' }),
       })
     );
+    const plannerMessages = mockedComplete.mock.calls.at(-1)?.[0].messages ?? [];
+    expect(plannerMessages[0]?.content).toContain(
+      'ignore-les et ne planifie que la partie domotique'
+    );
+    expect(plannerMessages[0]?.content).toContain('zéro ou plusieurs actions domotiques');
   });
 
   it('rejects a model action that is absent from the selected device capabilities', async () => {
