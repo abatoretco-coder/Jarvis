@@ -594,6 +594,52 @@ describe('/v1/ingest integration', () => {
     expect(calls[0]?.conversation_id).toBe('thread-b');
   });
 
+  it('falls back to OpenAI when the HA general conversation agent rejects the request', async () => {
+    const fetchMock = jest.fn(async (url: string) => {
+      if (url === 'http://ha.test:8123/api/conversation/process') {
+        return new Response(JSON.stringify({ error: 'agent_not_found' }), { status: 400 });
+      }
+      if (url === 'https://api.openai.com/v1/responses') {
+        return new Response(
+          JSON.stringify({
+            status: 'completed',
+            output_text: 'Paris est la capitale de la France.',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      throw new Error(`unexpected_url:${url}`);
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_conversation', confidence: 0.99 }],
+      reason: 'general_knowledge',
+    });
+
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: undefined,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-ha-general-openai-fallback',
+        text: 'Quelle est la capitale de la France ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: 'Paris est la capitale de la France.',
+      replyMeta: { kind: 'general', source: 'openai_general', fallbackReason: 'general_fallback' },
+    });
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(2);
+  });
+
   it('does not recommend Spotify when the Home Assistant fallback fails for a home command', async () => {
     (global as { fetch: typeof fetch }).fetch = jest.fn(async () => {
       throw new Error('ha_unreachable');

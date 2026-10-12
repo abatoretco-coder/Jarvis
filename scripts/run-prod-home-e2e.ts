@@ -1,11 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
-type ServiceCredential = {
-  id: string;
-  token: string;
-  permissions?: string[];
-};
+import { liveBaseUrl, liveOwnerTokens, logoutLiveOwner } from './live-e2e-auth';
 
 type HomeDevice = {
   deviceId: string;
@@ -27,32 +22,7 @@ type IngestResponse = {
   replyMeta?: { kind?: string; source?: string; routeKey?: string; semanticDecision?: string };
 };
 
-const baseUrl = (process.env.E2E_LIVE_BASE_URL ?? 'https://jarvis-abato.duckdns.org').replace(
-  /\/$/u,
-  ''
-);
-const jarvisContainer = process.env.E2E_LIVE_JARVIS_CONTAINER ?? 'jarvis-pc-jarvis-1';
-
-function serviceCredential(): ServiceCredential {
-  const raw = execFileSync(
-    'docker',
-    ['exec', jarvisContainer, 'printenv', 'SERVICE_API_KEYS_JSON'],
-    {
-      encoding: 'utf8',
-      windowsHide: true,
-    }
-  ).trim();
-  const credentials = JSON.parse(raw) as ServiceCredential[];
-  const credential = credentials.find(
-    (item) =>
-      typeof item.token === 'string' &&
-      item.token.length >= 16 &&
-      item.permissions?.includes('chat') &&
-      item.permissions.includes('home')
-  );
-  if (!credential) throw new Error('live_home_service_credential_missing');
-  return credential;
-}
+const baseUrl = liveBaseUrl();
 
 async function responseBody<T>(response: Response): Promise<T> {
   const text = await response.text();
@@ -64,8 +34,8 @@ async function main(): Promise<void> {
   if (process.env.E2E_LIVE_CONFIRM !== 'production') {
     throw new Error('Set E2E_LIVE_CONFIRM=production to run reversible live home actions.');
   }
-  const credential = serviceCredential();
-  const headers = { 'x-api-key': credential.token };
+  const tokens = await liveOwnerTokens();
+  const headers = { authorization: `Bearer ${tokens.access_token}` };
   const getHome = async () =>
     responseBody<HomeSnapshot>(await fetch(`${baseUrl}/v1/home`, { headers }));
   const postJson = (path: string, body: unknown, extraHeaders: Record<string, string> = {}) =>
@@ -97,121 +67,125 @@ async function main(): Promise<void> {
     return device;
   };
 
-  const initial = await getHome();
-  if (initial.controlStatus !== 'ready') {
-    throw new Error(`home_control_not_ready:${initial.controlStatus}`);
-  }
-  const requiredDevices = [
-    { label: 'Nono', match: (device: HomeDevice) => /nono/iu.test(device.name) },
-    { label: 'TV', match: (device: HomeDevice) => device.domain === 'media_player' },
-  ];
-  const mappedRadiators = initial.devices.filter(
-    (device) => device.domain === 'climate' && device.mapped
-  );
-  if (mappedRadiators.length < 2) {
-    throw new Error(`required_device_missing:radiators:${mappedRadiators.length}`);
-  }
-  for (const required of requiredDevices) {
-    const device = initial.devices.find(required.match);
-    if (!device?.mapped) throw new Error(`required_device_missing:${required.label}`);
-  }
-
-  const lamp = initial.devices.find(
-    (device) =>
-      /lampe.*lave/iu.test(device.name) &&
-      device.mapped &&
-      device.available &&
-      device.capabilities.includes('turn_on') &&
-      device.capabilities.includes('turn_off')
-  );
-  if (!lamp || !['on', 'off'].includes(lamp.state)) {
-    throw new Error(`reversible_lamp_unavailable:${lamp?.state ?? 'missing'}`);
-  }
-  const originalState = lamp.state as 'on' | 'off';
-  const changedState = originalState === 'on' ? 'off' : 'on';
-  const changeAction = changedState === 'on' ? 'turn_on' : 'turn_off';
-  const restoreAction = originalState === 'on' ? 'turn_on' : 'turn_off';
-  const voiceText = changedState === 'on' ? 'Allume la lampe à lave.' : 'Éteins la lampe à lave.';
-  const results: Array<Record<string, unknown>> = [];
-
   try {
-    const invalid = await postJson(
-      '/v1/home/actions',
-      { deviceId: lamp.deviceId, action: 'set_volume' },
-      { 'idempotency-key': `home-e2e-invalid-${randomUUID()}` }
+    const initial = await getHome();
+    if (initial.controlStatus !== 'ready') {
+      throw new Error(`home_control_not_ready:${initial.controlStatus}`);
+    }
+    const requiredDevices = [
+      { label: 'Nono', match: (device: HomeDevice) => /nono/iu.test(device.name) },
+      { label: 'TV', match: (device: HomeDevice) => device.domain === 'media_player' },
+    ];
+    const mappedRadiators = initial.devices.filter(
+      (device) => device.domain === 'climate' && device.mapped
     );
-    results.push({
-      id: 'direct.invalid_action',
-      ok: invalid.status === 400,
-      status: invalid.status,
-    });
-    if (invalid.status !== 400) throw new Error(`invalid_action_status:${invalid.status}`);
+    if (mappedRadiators.length < 2) {
+      throw new Error(`required_device_missing:radiators:${mappedRadiators.length}`);
+    }
+    for (const required of requiredDevices) {
+      const device = initial.devices.find(required.match);
+      if (!device?.mapped) throw new Error(`required_device_missing:${required.label}`);
+    }
 
-    const direct = await runAction(lamp.deviceId, changeAction);
-    await waitForState(lamp.deviceId, changedState);
-    results.push({
-      id: 'direct.reversible_lamp',
-      ok: true,
-      operationStatus: direct.operationStatus,
-    });
-    await runAction(lamp.deviceId, restoreAction);
-    await waitForState(lamp.deviceId, originalState);
-
-    const ingest = await responseBody<IngestResponse>(
-      await postJson('/v1/ingest', {
-        threadId: `home-live-e2e-${randomUUID()}`,
-        text: voiceText,
-        clientContext: {
-          language: 'fr',
-          channel: 'desktop',
-          deviceType: 'desktop',
-          transport: 'prod-home-e2e',
-          supportsProgressiveResponse: 'false',
-        },
-      })
+    const lamp = initial.devices.find(
+      (device) =>
+        /lampe.*lave/iu.test(device.name) &&
+        device.mapped &&
+        device.available &&
+        device.capabilities.includes('turn_on') &&
+        device.capabilities.includes('turn_off')
     );
-    await waitForState(lamp.deviceId, changedState);
-    results.push({
-      id: 'text.reversible_lamp',
-      ok: true,
-      reply: ingest.responseText,
-      source: ingest.replyMeta?.source,
-      routeKey: ingest.replyMeta?.routeKey,
-      decision: ingest.replyMeta?.semanticDecision,
-    });
+    if (!lamp || !['on', 'off'].includes(lamp.state)) {
+      throw new Error(`reversible_lamp_unavailable:${lamp?.state ?? 'missing'}`);
+    }
+    const originalState = lamp.state as 'on' | 'off';
+    const changedState = originalState === 'on' ? 'off' : 'on';
+    const changeAction = changedState === 'on' ? 'turn_on' : 'turn_off';
+    const restoreAction = originalState === 'on' ? 'turn_on' : 'turn_off';
+    const voiceText = changedState === 'on' ? 'Allume la lampe à lave.' : 'Éteins la lampe à lave.';
+    const results: Array<Record<string, unknown>> = [];
 
-    const general = await responseBody<IngestResponse>(
-      await postJson('/v1/ingest', {
-        threadId: `text-live-e2e-${randomUUID()}`,
-        text: 'Réponds uniquement par le mot OK.',
-        clientContext: { language: 'fr', channel: 'desktop', transport: 'prod-home-e2e' },
-      })
-    );
-    const generalOk = general.responseText.trim().length > 0;
-    results.push({ id: 'text.general', ok: generalOk, reply: general.responseText });
-    if (!generalOk) throw new Error('general_text_reply_empty');
-  } finally {
-    const current = await getHome().catch(() => undefined);
-    const currentLamp = current?.devices.find((device) => device.deviceId === lamp.deviceId);
-    if (currentLamp?.state !== originalState) {
+    try {
+      const invalid = await postJson(
+        '/v1/home/actions',
+        { deviceId: lamp.deviceId, action: 'set_volume' },
+        { 'idempotency-key': `home-e2e-invalid-${randomUUID()}` }
+      );
+      results.push({
+        id: 'direct.invalid_action',
+        ok: invalid.status === 400,
+        status: invalid.status,
+      });
+      if (invalid.status !== 400) throw new Error(`invalid_action_status:${invalid.status}`);
+
+      const direct = await runAction(lamp.deviceId, changeAction);
+      await waitForState(lamp.deviceId, changedState);
+      results.push({
+        id: 'direct.reversible_lamp',
+        ok: true,
+        operationStatus: direct.operationStatus,
+      });
       await runAction(lamp.deviceId, restoreAction);
       await waitForState(lamp.deviceId, originalState);
-    }
-  }
 
-  const final = await getHome();
-  const restored = final.devices.find((device) => device.deviceId === lamp.deviceId)?.state;
-  results.push({ id: 'restore.physical_state', ok: restored === originalState, state: restored });
-  process.stdout.write(
-    `HOME_LIVE_SUMMARY ${JSON.stringify({
-      passed: results.filter((item) => item.ok === true).length,
-      total: results.length,
-      originalState,
-      restoredState: restored,
-      results,
-    })}\n`
-  );
-  if (results.some((item) => item.ok !== true)) process.exitCode = 1;
+      const ingest = await responseBody<IngestResponse>(
+        await postJson('/v1/ingest', {
+          threadId: `home-live-e2e-${randomUUID()}`,
+          text: voiceText,
+          clientContext: {
+            language: 'fr',
+            channel: 'desktop',
+            deviceType: 'desktop',
+            transport: 'prod-home-e2e',
+            supportsProgressiveResponse: 'false',
+          },
+        })
+      );
+      await waitForState(lamp.deviceId, changedState);
+      results.push({
+        id: 'text.reversible_lamp',
+        ok: true,
+        reply: ingest.responseText,
+        source: ingest.replyMeta?.source,
+        routeKey: ingest.replyMeta?.routeKey,
+        decision: ingest.replyMeta?.semanticDecision,
+      });
+
+      const general = await responseBody<IngestResponse>(
+        await postJson('/v1/ingest', {
+          threadId: `text-live-e2e-${randomUUID()}`,
+          text: 'Quelle est la capitale de la France ?',
+          clientContext: { language: 'fr', channel: 'desktop', transport: 'prod-home-e2e' },
+        })
+      );
+      const generalOk = /\bparis\b/iu.test(general.responseText);
+      results.push({ id: 'text.general', ok: generalOk, reply: general.responseText });
+      if (!generalOk) throw new Error('general_text_reply_incorrect');
+    } finally {
+      const current = await getHome().catch(() => undefined);
+      const currentLamp = current?.devices.find((device) => device.deviceId === lamp.deviceId);
+      if (currentLamp?.state !== originalState) {
+        await runAction(lamp.deviceId, restoreAction);
+        await waitForState(lamp.deviceId, originalState);
+      }
+    }
+
+    const final = await getHome();
+    const restored = final.devices.find((device) => device.deviceId === lamp.deviceId)?.state;
+    results.push({ id: 'restore.physical_state', ok: restored === originalState, state: restored });
+    process.stdout.write(
+      `HOME_LIVE_SUMMARY ${JSON.stringify({
+        passed: results.filter((item) => item.ok === true).length,
+        total: results.length,
+        originalState,
+        restoredState: restored,
+        results,
+      })}\n`
+    );
+    if (results.some((item) => item.ok !== true)) process.exitCode = 1;
+  } finally {
+    await logoutLiveOwner(tokens).catch(() => undefined);
+  }
 }
 
 void main().catch((error) => {

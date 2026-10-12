@@ -5034,7 +5034,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // ── General conversation fallback ────────────────────────────────────────
     if (assistantText === undefined) {
       if (deps.env.HA_BASE_URL && deps.env.HA_TOKEN) {
-        if (denyUnless('home')) return reply;
+        if (denyUnless('chat')) return reply;
         try {
           assistantText = await conversationService.callHomeAssistantConversation(
             applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
@@ -5043,8 +5043,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             generalAgentId
           );
           if (/^\s*OUT_OF_SCOPE\s*$/iu.test(assistantText)) {
-            assistantText = toDeterministicHaFailureMessage();
-            gracefulFallback = true;
+            throw new Error('home_assistant_general_out_of_scope');
           }
           generalResponseSource = 'ha_general';
           responseDomain = 'general';
@@ -5053,10 +5052,37 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             { threadId, requestId, correlation_id: correlationId || undefined, err },
             'ingest_home_assistant_call_failed'
           );
-          assistantText = toDeterministicHaFailureMessage();
-          generalResponseSource = 'ha_general';
           gracefulFallback = true;
           responseDomain = 'general';
+          if (deps.env.OPENAI_API_KEY) {
+            try {
+              assistantText = await callGeneralOpenAi({
+                apiKey: deps.env.OPENAI_API_KEY,
+                baseUrl: deps.env.OPENAI_BASE_URL,
+                model: deps.env.OPENAI_MODEL_AGENT,
+                maxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_AGENT,
+                timeoutMs: deps.env.OPENAI_TIMEOUT_MS,
+                userText: applyFrenchVoiceHubGuard(assistantInputText, clientChannel),
+                recentMessages: recentMessages_,
+              });
+              generalResponseSource = 'openai_general';
+            } catch (openAiError) {
+              app.log.warn(
+                {
+                  threadId,
+                  requestId,
+                  correlation_id: correlationId || undefined,
+                  err: openAiError,
+                },
+                'ingest_openai_general_fallback_failed'
+              );
+              assistantText = toDeterministicHaFailureMessage();
+              generalResponseSource = 'openai_general_error';
+            }
+          } else {
+            assistantText = toDeterministicHaFailureMessage();
+            generalResponseSource = 'ha_general';
+          }
         }
       } else {
         if (denyUnless('chat')) return reply;

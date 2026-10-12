@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-type Tokens = { access_token: string; refresh_token: string };
+import { liveBaseUrl, liveOwnerEmail, liveOwnerTokens, logoutLiveOwner } from './live-e2e-auth';
 type Playback = {
   isPlaying: boolean;
   progressMs: number;
@@ -50,26 +50,10 @@ type VoiceResult = {
   error?: string;
 };
 
-const baseUrl = (process.env.E2E_LIVE_BASE_URL ?? 'https://jarvis-abato.duckdns.org').replace(
-  /\/app\/?$/u,
-  ''
-);
-const ownerEmail = process.env.E2E_LIVE_OWNER_EMAIL ?? 'abatoretco@gmail.com';
-const keycloakUrl = process.env.E2E_LIVE_KEYCLOAK_URL ?? 'http://127.0.0.1:8180';
-const identityContainer = process.env.E2E_LIVE_IDENTITY_CONTAINER ?? 'jarvis-pc-identity-1';
+const baseUrl = liveBaseUrl();
+const ownerEmail = liveOwnerEmail();
 const useProductionTtsForInput = process.env.E2E_LIVE_USE_PRODUCTION_TTS_INPUT === '1';
 const results: VoiceResult[] = [];
-
-function dockerEnv(name: string): string {
-  return execFileSync('docker', ['exec', identityContainer, 'printenv', name], {
-    encoding: 'utf8',
-    windowsHide: true,
-  }).trim();
-}
-
-function base64Url(value: Buffer): string {
-  return value.toString('base64url');
-}
 
 function synthesizeLocalSpeech(text: string): Buffer {
   const directory = mkdtempSync(join(tmpdir(), 'jarvis-voice-e2e-'));
@@ -99,85 +83,6 @@ async function jsonResponse<T>(response: Response): Promise<T> {
   return JSON.parse(body) as T;
 }
 
-async function form<T>(
-  url: string,
-  body: Record<string, string>,
-  headers?: HeadersInit
-): Promise<T> {
-  return jsonResponse<T>(
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
-      body: new URLSearchParams(body),
-    })
-  );
-}
-
-async function ownerTokens(): Promise<Tokens> {
-  const admin = await form<{ access_token: string }>(
-    `${keycloakUrl}/realms/master/protocol/openid-connect/token`,
-    {
-      client_id: 'admin-cli',
-      grant_type: 'password',
-      username: dockerEnv('KC_BOOTSTRAP_ADMIN_USERNAME'),
-      password: dockerEnv('KC_BOOTSTRAP_ADMIN_PASSWORD'),
-    }
-  );
-  const ownerResponse = await fetch(
-    `${keycloakUrl}/admin/realms/jarvis/users?username=${encodeURIComponent(ownerEmail)}&exact=true`,
-    { headers: { authorization: `Bearer ${admin.access_token}` } }
-  );
-  const owners = await jsonResponse<Array<{ id: string }>>(ownerResponse);
-  if (owners.length !== 1) throw new Error('owner_keycloak_user_not_found');
-
-  const impersonation = await fetch(
-    `${keycloakUrl}/admin/realms/jarvis/users/${encodeURIComponent(owners[0].id)}/impersonation`,
-    { method: 'POST', headers: { authorization: `Bearer ${admin.access_token}` } }
-  );
-  if (!impersonation.ok) throw new Error(`owner_impersonation_failed:${impersonation.status}`);
-  const cookieHeaders = (
-    impersonation.headers as Headers & { getSetCookie?: () => string[] }
-  ).getSetCookie?.() ?? [impersonation.headers.get('set-cookie') ?? ''];
-  const cookie = cookieHeaders
-    .map((value) => value.split(';', 1)[0])
-    .filter(Boolean)
-    .join('; ');
-  if (!cookie) throw new Error('owner_impersonation_cookie_missing');
-
-  const verifier = base64Url(randomBytes(48));
-  const challenge = base64Url(createHash('sha256').update(verifier).digest());
-  const redirectUri = `${baseUrl}/app/`;
-  const state = randomUUID();
-  const authorization = new URL(`${keycloakUrl}/realms/jarvis/protocol/openid-connect/auth`);
-  authorization.search = new URLSearchParams({
-    client_id: 'jarvis-web',
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    scope: 'openid profile email offline_access',
-    state,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-  }).toString();
-  const callbackResponse = await fetch(authorization, {
-    headers: { cookie },
-    redirect: 'manual',
-  });
-  const location = callbackResponse.headers.get('location');
-  if (callbackResponse.status !== 302 || !location)
-    throw new Error('owner_impersonation_authorization_failed');
-  const callback = new URL(location);
-  if (callback.searchParams.get('state') !== state || !callback.searchParams.get('code')) {
-    throw new Error('owner_impersonation_callback_invalid');
-  }
-  return form<Tokens>(`${keycloakUrl}/realms/jarvis/protocol/openid-connect/token`, {
-    client_id: 'jarvis-web',
-    grant_type: 'authorization_code',
-    code: callback.searchParams.get('code')!,
-    redirect_uri: redirectUri,
-    code_verifier: verifier,
-  });
-}
-
 async function main(): Promise<void> {
   const readOnly = process.env.E2E_LIVE_READ_ONLY === '1';
   const playbackOverride = process.env.E2E_LIVE_PLAYBACK_OVERRIDE;
@@ -190,7 +95,7 @@ async function main(): Promise<void> {
       'Set E2E_LIVE_CONFIRM=production to run state-changing checks against the live Spotify account.'
     );
   }
-  const tokens = await ownerTokens();
+  const tokens = await liveOwnerTokens();
   const headers = { authorization: `Bearer ${tokens.access_token}` };
   let original: MusicSnapshot | undefined;
   let originalQueue: Queue | undefined;
@@ -581,10 +486,7 @@ async function main(): Promise<void> {
         `VOICE_RESTORE_ERROR ${error instanceof Error ? error.message : String(error)}\n`
       );
     }
-    await form(`${keycloakUrl}/realms/jarvis/protocol/openid-connect/logout`, {
-      client_id: 'jarvis-web',
-      refresh_token: tokens.refresh_token,
-    }).catch(() => undefined);
+    await logoutLiveOwner(tokens).catch(() => undefined);
   }
 
   const passed = results.filter((item) => item.ok).length;
