@@ -969,8 +969,11 @@ async function fetchMailItemsPageForAccount(
   };
 }
 
-export async function buildMailSection(env: AppDeps['env'], log: FastifyInstance['log']): Promise<DashboardSection> {
-  const accounts = buildMailAccounts(env);
+export async function buildMailSection(
+  env: AppDeps['env'],
+  log: FastifyInstance['log'],
+  accounts: MailAccount[] = buildMailAccounts(env),
+): Promise<DashboardSection> {
   if (accounts.length === 0) {
     return makeSection('Mail', 'jarvis-mail', 'La gestion des emails n est pas configuree (identifiants Gmail ou Outlook manquants).');
   }
@@ -1531,9 +1534,31 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         cache: { hit: true, fetchedAt: new Date(cached.fetchedAt).toISOString() },
       });
     }
-    const mailPromise = principal?.kind === 'user'
-      ? Promise.resolve(makeSection('Mail', 'jarvis-mail', 'Connecte Gmail dans tes services personnels pour activer les emails.'))
-      : buildMailSection(deps.env, app.log).catch((error) => {
+    const personalGmailToken = principal?.kind === 'user'
+      ? deps.integrations?.resolveRefreshToken(
+          principal.userId,
+          'gmail',
+          requestedConnectionId || undefined,
+        )
+      : undefined;
+    const mailEnv = principal?.kind === 'user'
+      ? {
+          ...deps.env,
+          OAUTH_REFRESH_TOKEN_STORE_PATH: '',
+        }
+      : deps.env;
+    const mailAccounts = principal?.kind === 'user'
+      ? personalGmailToken && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
+        ? [{
+            label: 'gmail',
+            provider: 'gmail' as const,
+            clientId: deps.env.GOOGLE_CLIENT_ID,
+            clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
+            refreshToken: personalGmailToken,
+          }]
+        : []
+      : undefined;
+    const mailPromise = buildMailSection(mailEnv, app.log, mailAccounts).catch((error) => {
       app.log.warn({ error }, 'dashboard_mail_failed');
       return makeSection('Mail', 'jarvis-mail', 'Impossible de recuperer les emails pour le moment.');
     });
