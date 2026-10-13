@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -198,6 +199,73 @@ describe('mutation idempotency', () => {
     const result = recovery.json();
     expect(result).toMatchObject({ state: 'completed', statusCode: 200 });
     expect(Buffer.from(result.payloadBase64, 'base64').toString('utf8')).toBe(response.body);
+    expect(mutation).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  test('keeps capturing an ingest stream after the SSE client disconnects', async () => {
+    const app = Fastify();
+    registerMutationIdempotencyHooks(app, new MutationIdempotencyCoordinator());
+    const gate = deferred<void>();
+    const mutation = jest.fn(() => {
+      let started = false;
+      return new Readable({
+        read() {
+          if (started) return;
+          started = true;
+          this.push('event: ack\ndata: {"text":"Je m’en occupe"}\n\n');
+          void gate.promise.then(() => {
+            this.push('event: response\ndata: {"threadId":"voice-2","responseText":"Terminé"}\n\n');
+            this.push(null);
+          });
+        },
+      });
+    });
+    app.post('/v1/ingest', async (_request, reply) => {
+      reply.type('text/event-stream');
+      return reply.send(mutation());
+    });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected_tcp_address');
+    const key = 'voice-turn-disconnect-0001';
+    const payload = JSON.stringify({ threadId: 'voice-2', text: 'Éteins le salon' });
+
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/v1/ingest?sse=1',
+        method: 'POST',
+        headers: {
+          accept: 'text/event-stream',
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+          'idempotency-key': key,
+        },
+      }, (response) => {
+        response.once('data', () => {
+          response.destroy();
+          resolve();
+        });
+      });
+      request.once('error', reject);
+      request.end(payload);
+    });
+
+    gate.resolve();
+    let recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    for (let attempt = 0; attempt < 20 && recovery.statusCode === 202; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+      recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    }
+
+    expect(recovery.statusCode).toBe(200);
+    const result = recovery.json();
+    expect(result).toMatchObject({ state: 'completed', statusCode: 200 });
+    const recoveredSse = Buffer.from(result.payloadBase64, 'base64').toString('utf8');
+    expect(recoveredSse.match(/event: ack/gu)).toHaveLength(1);
+    expect(recoveredSse.match(/event: response/gu)).toHaveLength(1);
     expect(mutation).toHaveBeenCalledTimes(1);
     await app.close();
   });

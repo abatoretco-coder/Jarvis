@@ -259,6 +259,70 @@ describe('HomeAssistantAutomationService', () => {
     expect(ha.callService).not.toHaveBeenCalled();
   });
 
+  test('reactivates a managed automation after catalog reconciliation', async () => {
+    let state = 'on';
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée',
+      sceneId: 'scene-evening',
+      at: '19:30',
+      weekdays: [1],
+      enabled: true,
+    });
+    const callService = jest.fn(async (input: { service: string }) => {
+      state = input.service === 'turn_on' ? 'on' : 'off';
+      return { status: 200, data: [] };
+    });
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree',
+        state,
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => config),
+      callService,
+    } as unknown as HomeAssistantClient;
+    const mutation = jest.fn(() => 'changed');
+
+    const result = await new HomeAssistantAutomationService(ha, catalog(), async () => undefined)
+      .reconcileCatalogMutation(mutation);
+
+    expect(result).toMatchObject({ value: 'changed', reconciliation: { operationStatus: 'succeeded' } });
+    expect(mutation).toHaveBeenCalledTimes(1);
+    expect(state).toBe('on');
+    expect(callService).toHaveBeenNthCalledWith(1, expect.objectContaining({ service: 'turn_off' }));
+    expect(callService).toHaveBeenNthCalledWith(2, expect.objectContaining({ service: 'turn_on' }));
+  });
+
+  test('reports an uncertain reconciliation when a suspended automation cannot be confirmed active', async () => {
+    let state = 'on';
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée',
+      sceneId: 'scene-evening',
+      at: '19:30',
+      weekdays: [1],
+      enabled: true,
+    });
+    const callService = jest.fn(async (input: { service: string }) => {
+      if (input.service === 'turn_off') state = 'off';
+      return { status: 200, data: [] };
+    });
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree',
+        state,
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => config),
+      callService,
+    } as unknown as HomeAssistantClient;
+
+    const result = await new HomeAssistantAutomationService(ha, catalog(), async () => undefined)
+      .reconcileCatalogMutation(() => 'changed');
+
+    expect(result.reconciliation.operationStatus).toBe('uncertain');
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({ service: 'turn_on' }));
+  });
+
   test('waits for a saved automation to reload and applies the requested state', async () => {
     let savedId = '';
     const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
