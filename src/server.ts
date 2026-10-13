@@ -3,9 +3,14 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { AdminControlPlaneRepository } from './admin/AdminControlPlaneRepository';
 import { ProactiveContextCache } from './context/ProactiveContextCache';
 import { createConversationDb } from './conversation/repositories/SqliteRepositories';
+import { DailyLifeRepository } from './dailyLife/DailyLifeRepository';
+import { HouseholdAgendaService } from './dailyLife/HouseholdAgendaService';
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
+import type { HomeAdaptiveLightingService } from './home/HomeAdaptiveLightingService';
 import type { HomeCatalog } from './home/HomeCatalog';
+import { MutationIdempotencyCoordinator } from './idempotency/MutationIdempotencyCoordinator';
+import { SqliteMutationIdempotencyStore } from './idempotency/SqliteMutationIdempotencyStore';
 import { IdentityRepository } from './identity/IdentityRepository';
 import { IdentityService } from './identity/IdentityService';
 import { OidcTokenVerifier } from './identity/OidcTokenVerifier';
@@ -19,6 +24,7 @@ import { registerApiKeyHook } from './routes/apiKeyHook';
 import { registerCapabilitiesRoute } from './routes/capabilities';
 import { registerContextCacheRoute } from './routes/contextCache';
 import { registerCultureProfileRoutes } from './routes/cultureProfile';
+import { registerDailyLifeRoutes } from './routes/dailyLife';
 import { registerDashboardRoute } from './routes/dashboard';
 import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
@@ -47,7 +53,9 @@ export type AppDeps = {
   integrations?: IntegrationService;
   adminAudit?: AdminControlPlaneRepository;
   homeCatalog?: HomeCatalog;
+  homeLightingService?: HomeAdaptiveLightingService;
   pcAgentBroker?: PcAgentCommandBroker;
+  identityRepository?: IdentityRepository;
 };
 
 export function buildApp(env: Env): FastifyInstance {
@@ -91,7 +99,7 @@ export function buildApp(env: Env): FastifyInstance {
   });
 
   const spotifyWebApi = new SpotifyWebApiClient(env, app.log);
-  const nasStatus = new NasStatusClient(env);
+  const nasStatus = env.NAS_STATUS_ENABLED ? new NasStatusClient(env) : undefined;
   spotifyWebApi.startSituationPrefetch();
 
   const contextCache = new ProactiveContextCache({
@@ -108,7 +116,8 @@ export function buildApp(env: Env): FastifyInstance {
   });
 
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
-  const identityDb = env.OIDC_ENABLED ? createConversationDb(env.CONVERSATION_DB_PATH) : undefined;
+  const runtimeDb = createConversationDb(env.CONVERSATION_DB_PATH);
+  const identityDb = env.OIDC_ENABLED ? runtimeDb : undefined;
   const issuer = env.OIDC_ISSUER_URL?.replace(/\/$/u, '');
   const identityService =
     identityDb && issuer && env.OIDC_AUDIENCE
@@ -127,14 +136,16 @@ export function buildApp(env: Env): FastifyInstance {
           env.OIDC_BOOTSTRAP_OWNER_SUBJECT
         )
       : undefined;
+  deps.identityRepository = identityService?.repository;
   const adminRepository = identityDb ? new AdminControlPlaneRepository(identityDb) : undefined;
+  const dailyLifeRepository = identityDb ? new DailyLifeRepository(identityDb) : undefined;
   deps.adminAudit = adminRepository;
   const integrations = identityDb
     ? new IntegrationService(new IntegrationRepository(identityDb), env)
     : undefined;
   deps.integrations = integrations;
   deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
-  if (identityDb) app.addHook('onClose', async () => identityDb.close());
+  app.addHook('onClose', async () => runtimeDb.close());
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();
@@ -164,7 +175,12 @@ export function buildApp(env: Env): FastifyInstance {
   registerSecurityHooks(app, env);
   registerApiKeyHook(app, env, identityService, adminRepository);
   registerPrincipalRateLimitHook(app, env);
-  registerMutationIdempotencyHooks(app);
+  registerMutationIdempotencyHooks(
+    app,
+    new MutationIdempotencyCoordinator({
+      store: new SqliteMutationIdempotencyStore(runtimeDb),
+    })
+  );
 
   // Hooks must be registered before routes so every route receives the same
   // edge, authentication and rate-limit policy.
@@ -175,18 +191,23 @@ export function buildApp(env: Env): FastifyInstance {
     registerIdentityRoutes(app, identityService, adminRepository);
     registerAdminRoutes(app, deps, adminRepository);
     if (integrations) registerIntegrationRoutes(app, integrations);
+    if (dailyLifeRepository) registerDailyLifeRoutes(
+      app,
+      dailyLifeRepository,
+      integrations ? new HouseholdAgendaService(dailyLifeRepository, integrations, env) : undefined,
+    );
   }
 
   registerCapabilitiesRoute(app, deps);
   registerContextCacheRoute(app, deps);
-  registerCultureProfileRoutes(app, deps);
+  if (env.CULTURE_ENABLED) registerCultureProfileRoutes(app, deps);
   registerDashboardRoute(app, deps);
   registerGoogleCalendarRoute(app, deps);
   registerHaIndexRoute(app, deps);
   registerNewsSummaryRoute(app, deps);
   registerPcAgentRoutes(app, deps);
   registerMusicRoutes(app, deps);
-  registerNasStatusRoute(app, deps);
+  if (env.NAS_STATUS_ENABLED) registerNasStatusRoute(app, deps);
   registerIngestRoute(app, deps);
 
   return app;

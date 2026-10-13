@@ -465,7 +465,7 @@ export async function planMailAgentAction(
   log?: MinLogger,
 ): Promise<MailAction | { clarification: string }> {
   const accounts = env.mailAccounts?.length ? env.mailAccounts : buildMailAccounts(env);
-  if (accounts.length === 0) return { clarification: 'La gestion des emails n est pas configuree.' };
+  if (accounts.length === 0) return { clarification: "La gestion des emails n'est pas configurée." };
   if (!env.OPENAI_API_KEY) return { clarification: 'Agent mail non disponible : cle OpenAI manquante.' };
   const preclassified = preclassifyMailAction(text);
   if (preclassified) {
@@ -510,7 +510,7 @@ export async function executeMailAgentAction(
   options?: { userText?: string; log?: MinLogger },
 ): Promise<string> {
   const accounts = env.mailAccounts?.length ? env.mailAccounts : buildMailAccounts(env);
-  if (accounts.length === 0) return 'La gestion des emails n est pas configuree.';
+  if (accounts.length === 0) return "La gestion des emails n'est pas configurée.";
   if (!env.OPENAI_API_KEY) return 'Agent mail non disponible : cle OpenAI manquante.';
 
   if ((action.action === 'list_inbox' || action.action === 'search_emails') && accounts.length > 1 && !action.account) {
@@ -994,6 +994,10 @@ export async function callMailAgent(
 
   const token = await getAccountTokenWithStore(target, env.OAUTH_REFRESH_TOKEN_STORE_PATH);
   const rawResult = await executeGmail(action, token);
+  if (action.action === 'get_email') {
+    log?.info({ action: action.action, account: target.label, result_len: rawResult.length }, 'mail_agent_done');
+    return rawResult;
+  }
   const synthesized = await synthesizeMailReplyWithOpenAi({
     openAiApiKey: env.OPENAI_API_KEY!,
     openAiBaseUrl: env.OPENAI_BASE_URL,

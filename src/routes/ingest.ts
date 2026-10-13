@@ -45,6 +45,7 @@ import { SummarizationService } from '../conversation/SummarizationService';
 import {
   buildLastMailSummaryFromState,
   extractMailStateFromReply,
+  formatQuickActionVoiceResponse,
   formatVoiceResponse,
   isLastMailSummaryRequest,
   isLikelyTruncatedVoiceUtterance,
@@ -84,7 +85,15 @@ import {
   getRequestPrincipal,
   hasRequestPermission,
   setCurrentIntegrationConnectionId,
+  setRequestPrincipal,
 } from '../identity/requestIdentity';
+import {
+  inferPersonalVoicePermission,
+  inferVoiceTodoScope,
+  PendingVoiceIdentityStore,
+  type PersonalVoicePermission,
+  resolveClaimedVoiceUser,
+} from '../identity/voiceIdentity';
 import {
   buildMailAccounts,
   callMailAgent,
@@ -1194,6 +1203,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     resultSetRepository,
     deps.env
   );
+  const pendingVoiceIdentityStore = new PendingVoiceIdentityStore();
 
   // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
   const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
@@ -1545,7 +1555,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       effect: input.effect,
       preview:
         input.preview ??
-        `Cette action ${input.agent}.${input.action} modifie des donnees et attend une confirmation.`,
+        `Cette action ${input.agent}.${input.action} modifie des données et attend une confirmation.`,
       payload: input.payload,
       proposalId,
       threadId: input.threadId,
@@ -2046,10 +2056,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
     setCurrentIntegrationConnectionId(parsed.data.integrationConnectionId);
 
-    const rawText = parsed.data.text ?? '';
-    const normalizedRawText = normalizeIntentText(rawText);
+    let rawText = parsed.data.text ?? '';
+    let normalizedRawText = normalizeIntentText(rawText);
     const threadId = parsed.data.threadId.trim();
-    const text = toSingleParagraphPlainText(parsed.data.text ?? '');
+    let text = toSingleParagraphPlainText(parsed.data.text ?? '');
     const contextNote = toSingleParagraphPlainText(parsed.data.contextNote ?? '');
     const clientContextChannel = normalizeClientChannel(parsed.data.clientContext?.['channel']);
     const headerChannel = normalizeClientChannel(req.headers['x-client-channel']);
@@ -2058,11 +2068,89 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       parsed.data.clientContext?.['supportsInlineVoiceAudio'] === true ||
       parsed.data.clientContext?.['supportsInlineVoiceAudio'] === 'true';
     const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
-    const assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
+    let assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
     const t0 = Date.now();
     let sendForbiddenStream: (() => void) | undefined;
+    let sendVoiceIdentityClarificationStream: ((payload: unknown) => void) | undefined;
+    let voiceIdentityKey = '';
+    let selectedVoiceUserId: string | undefined;
+    let selectedVoiceUserPermissions = new Set<PersonalVoicePermission>();
+    let trustedVoiceService = false;
+    const identityPrompt = "OK, oui bien sûr, de qui s'agit-il ?";
+    const sendVoiceClarification = (
+      responseText: string,
+      permission: PersonalVoicePermission,
+      stage: 'identity' | 'todo_scope',
+      remember = true
+    ): void => {
+      if (remember && voiceIdentityKey) {
+        pendingVoiceIdentityStore.put(voiceIdentityKey, {
+          originalText: text,
+          permission,
+          stage,
+        });
+      }
+      const payload = {
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'identity_clarification',
+          source: 'voice_account_selector',
+          semanticDecision: stage === 'identity' ? 'identity_required' : 'todo_scope_required',
+        },
+      };
+      if (sendVoiceIdentityClarificationStream) sendVoiceIdentityClarificationStream(payload);
+      else void reply.code(200).send(payload);
+    };
+    const selectVoiceUser = (permission: PersonalVoicePermission): boolean => {
+      if (!trustedVoiceService) return true;
+      if (selectedVoiceUserId) return selectedVoiceUserPermissions.has(permission);
+      const principal = getRequestPrincipal(req);
+      if (principal?.kind !== 'service' || !deps.identityRepository) return false;
+      const resolution = resolveClaimedVoiceUser(
+        text,
+        deps.identityRepository.listUsers(),
+        permission
+      );
+      if (resolution.status !== 'matched') return false;
+      selectedVoiceUserId = resolution.user.userId;
+      selectedVoiceUserPermissions = new Set(
+        resolution.user.permissions.filter(
+          (item): item is PersonalVoicePermission =>
+            item === 'mail' || item === 'calendar' || item === 'todo'
+        )
+      );
+      setRequestPrincipal(req, { ...principal, delegatedUserId: resolution.user.userId });
+      return true;
+    };
     const denyUnless = (permission: Parameters<typeof hasRequestPermission>[1]): boolean => {
+      if (trustedVoiceService && (permission === 'mail' || permission === 'calendar' || permission === 'todo')) {
+        if (permission === 'todo') {
+          const scope = inferVoiceTodoScope(assistantInputText);
+          if (scope === 'household') {
+            sendVoiceClarification(
+              "J'ai reconnu une tâche de vie quotidienne partagée. La commande vocale de cette liste n'est pas encore branchée, donc je n'ai rien modifié.",
+              'todo',
+              'todo_scope',
+              false
+            );
+            return true;
+          }
+          if (scope === 'ambiguous') {
+            sendVoiceClarification(
+              "Tu parles de ta Microsoft To Do personnelle ou des tâches de vie quotidienne de la maison ?",
+              'todo',
+              'todo_scope'
+            );
+            return true;
+          }
+        }
+        if (!selectVoiceUser(permission)) {
+          sendVoiceClarification(identityPrompt, permission, 'identity');
+          return true;
+        }
+      }
       if (hasRequestPermission(req, permission)) return false;
       app.log.warn({ requestId, permission }, 'ingest_permission_denied');
       if (sendForbiddenStream) sendForbiddenStream();
@@ -2088,6 +2176,108 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ? await threadRepository.getActiveConversationThread(clientChannel)
       : null;
     const effectiveThreadId = detectEffectiveThreadId(threadId, activeThread);
+    const initialPrincipal = getRequestPrincipal(req);
+    trustedVoiceService = Boolean(
+      voiceEnabled &&
+      initialPrincipal?.kind === 'service' &&
+      initialPrincipal.serviceId === 'home-assistant-pc' &&
+      deps.identityRepository
+    );
+    if (trustedVoiceService && initialPrincipal?.kind === 'service') {
+      const deviceReference = String(
+        parsed.data.clientContext?.['deviceId'] ?? parsed.data.clientContext?.['satelliteId'] ?? clientChannel ?? 'voice'
+      ).slice(0, 160);
+      voiceIdentityKey = `${initialPrincipal.serviceId}:${deviceReference}:${effectiveThreadId}`;
+      const pendingIdentity = pendingVoiceIdentityStore.get(voiceIdentityKey);
+      if (pendingIdentity) {
+        const users = deps.identityRepository!.listUsers();
+        const resolution = resolveClaimedVoiceUser(text, users, pendingIdentity.permission);
+        if (resolution.status === 'matched') {
+          pendingVoiceIdentityStore.consume(voiceIdentityKey);
+          selectedVoiceUserId = resolution.user.userId;
+          selectedVoiceUserPermissions = new Set(
+            resolution.user.permissions.filter(
+              (item): item is PersonalVoicePermission =>
+                item === 'mail' || item === 'calendar' || item === 'todo'
+            )
+          );
+          setRequestPrincipal(req, {
+            ...initialPrincipal,
+            delegatedUserId: resolution.user.userId,
+          });
+          rawText = pendingIdentity.originalText;
+          normalizedRawText = normalizeIntentText(rawText);
+          text = toSingleParagraphPlainText(rawText);
+          assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
+        } else if (pendingIdentity.stage === 'todo_scope') {
+          const scopeAnswer = normalizeIntentText(text);
+          if (/\b(personnel|personnelle|microsoft|to do|todo)\b/u.test(scopeAnswer)) {
+            pendingVoiceIdentityStore.put(voiceIdentityKey, {
+              ...pendingIdentity,
+              stage: 'identity',
+            });
+            return reply.code(200).send({
+              threadId: effectiveThreadId,
+              responseText: identityPrompt,
+              replyMeta: {
+                kind: 'identity_clarification',
+                source: 'voice_account_selector',
+                semanticDecision: 'identity_required',
+              },
+            });
+          }
+          if (/\b(maison|foyer|quotidienne|partagee|partage)\b/u.test(scopeAnswer)) {
+            pendingVoiceIdentityStore.consume(voiceIdentityKey);
+            return reply.code(200).send({
+              threadId: effectiveThreadId,
+              responseText: "D'accord, c'est une tâche de vie quotidienne partagée. Cette commande vocale n'est pas encore branchée, donc je n'ai rien modifié.",
+              replyMeta: {
+                kind: 'daily_life',
+                source: 'voice_scope_guard',
+                semanticDecision: 'household_todo_not_wired',
+              },
+            });
+          }
+          return reply.code(200).send({
+            threadId: effectiveThreadId,
+            responseText: "Tu parles de ta Microsoft To Do personnelle ou des tâches de vie quotidienne de la maison ?",
+            replyMeta: {
+              kind: 'identity_clarification',
+              source: 'voice_account_selector',
+              semanticDecision: 'todo_scope_required',
+            },
+          });
+        } else {
+          return reply.code(200).send({
+            threadId: effectiveThreadId,
+            responseText: identityPrompt,
+            replyMeta: {
+              kind: 'identity_clarification',
+              source: 'voice_account_selector',
+              semanticDecision: 'identity_required',
+            },
+          });
+        }
+      } else {
+        const inferredPermission = inferPersonalVoicePermission(assistantInputText);
+        if (inferredPermission && !selectVoiceUser(inferredPermission)) {
+          pendingVoiceIdentityStore.put(voiceIdentityKey, {
+            originalText: text,
+            permission: inferredPermission,
+            stage: 'identity',
+          });
+          return reply.code(200).send({
+            threadId: effectiveThreadId,
+            responseText: identityPrompt,
+            replyMeta: {
+              kind: 'identity_clarification',
+              source: 'voice_account_selector',
+              semanticDecision: 'identity_required',
+            },
+          });
+        }
+      }
+    }
     const defaultCultureProfileId = deps.env.CULTURE_DEFAULT_PROFILE_ID ?? 'local-default';
     const profileId = resolveRequestCultureProfileId(
       req,
@@ -2195,7 +2385,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: disambiguationText, domain: 'calendar', mode: voiceMode })
           : disambiguationText;
-        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await conversationService.persistMessages(effectiveThreadId, text, disambiguationText, {
+          ...(voiceEnabled ? { spokenText: responseText } : {}),
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const finalProposal = await pendingMutationRepository.findActiveByThread(effectiveThreadId);
         const payload = {
@@ -2225,7 +2417,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     ) {
       if (denyUnless(permissionForCapabilityAgent(activePendingMutation.agent))) return reply;
       const confirmed = isClearMutationConfirmation(text, activePendingMutation);
-      let mutationText = 'Ok, je n execute pas cette action.';
+      let mutationText = "OK, je n'exécute pas cette action.";
       if (confirmed) {
         const started = await pendingMutationRepository.tryStartExecution(
           activePendingMutation.proposalId
@@ -2236,7 +2428,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             await pendingMutationRepository.markExecuted(activePendingMutation.proposalId);
           } catch (err) {
             mutationText =
-              'La mutation a echoue pendant l execution. Elle est conservee en etat failed.';
+              "L'action a échoué et n'a pas été exécutée.";
             await pendingMutationRepository.markFailed(
               activePendingMutation.proposalId,
               'execution_failed'
@@ -2253,11 +2445,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             );
           }
         } else if (started === 'executed') {
-          mutationText = 'Cette proposition a deja ete executee.';
+          mutationText = 'Cette proposition a déjà été exécutée.';
         } else if (started === 'executing') {
-          mutationText = 'Cette proposition est deja en cours d execution.';
+          mutationText = "Cette proposition est déjà en cours d'exécution.";
         } else {
-          mutationText = 'Cette proposition n est plus disponible.';
+          mutationText = "Cette proposition n'est plus disponible.";
         }
       } else {
         await pendingMutationRepository.cancel(activePendingMutation.proposalId, 'voice_rejected');
@@ -2267,7 +2459,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: mutationText, domain: responseDomain, mode: voiceMode })
         : mutationText;
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await conversationService.persistMessages(effectiveThreadId, text, mutationText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       const payload = {
         threadId: effectiveThreadId,
@@ -2298,8 +2492,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     ) {
       const clarification =
         activePendingMutation.action === 'disambiguate_event'
-          ? 'Je dois d abord savoir quel evenement choisir. Dis par exemple "le premier" ou "celui de 18h".'
-          : 'Je n ai pas bien compris la confirmation. Dis simplement "je confirme", ou utilise le bouton de confirmation.';
+          ? 'Je dois d’abord savoir quel événement choisir. Dis par exemple « le premier » ou « celui de 18 h ».'
+          : 'Je n’ai pas bien compris la confirmation. Dis simplement « je confirme », ou utilise le bouton de confirmation.';
       await conversationService.persistMessages(effectiveThreadId, text, clarification);
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
@@ -2334,7 +2528,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
-    const voiceScene = deps.homeCatalog?.findSceneByVoicePhrase(text);
+    const roomLightingMode = deps.homeCatalog?.inferDeterministicRoomLightingMode?.(text);
+    const voiceScene = deps.homeCatalog?.findSceneByVoicePhrase(text)
+      ?? (roomLightingMode ? undefined : deps.homeCatalog?.inferDeterministicVoiceScene?.(text));
     if (voiceScene) {
       if (denyUnless('home')) return reply;
       const result = await executeCatalogHomeScene({
@@ -2343,7 +2539,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         ha: deps.ha,
         principal: getRequestPrincipal(req),
       });
-      const responseText =
+      await deps.homeLightingService?.reconcileActions(
+        result.steps
+          .filter((step) => step.status === 'success')
+          .map((step) => ({ deviceId: step.deviceId, action: step.action }))
+      );
+      const detailedResponseText =
         result.outcome === 'confirmed'
           ? `${voiceScene.name}, c'est fait.`
           : result.outcome === 'accepted'
@@ -2353,7 +2554,18 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               : result.outcome === 'partial'
                 ? `${voiceScene.name} n'a été exécutée qu'en partie.`
                 : `Je n'ai pas pu lancer ${voiceScene.name}.`;
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      const responseText = voiceEnabled
+        ? formatQuickActionVoiceResponse(
+            result.outcome === 'failed'
+              ? 'failure'
+              : result.outcome === 'partial'
+                ? 'partial'
+                : 'success'
+          )
+        : detailedResponseText;
+      await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
         threadId: effectiveThreadId,
@@ -2376,7 +2588,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         principal: getRequestPrincipal(req),
         command: voiceQuickAction,
       });
-      const responseText = result.ok
+      if (result.ok) {
+        await deps.homeLightingService?.reconcileActions([voiceQuickAction]);
+      }
+      const detailedResponseText = result.ok
         ? result.operationStatus === 'succeeded'
           ? `${voiceQuickAction.name}, c'est fait.`
           : result.operationStatus === 'accepted'
@@ -2387,7 +2602,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           : result.code === 'home_device_state_timeout'
             ? "La télé ne s'est pas déclarée prête après la commande d'allumage."
             : "Je n'ai pas pu exécuter cette action. Vérifie l'équipement et sa connexion.";
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      const responseText = voiceEnabled
+        ? formatQuickActionVoiceResponse(result.ok ? 'success' : 'failure')
+        : detailedResponseText;
+      await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       try {
         const principal = getRequestPrincipal(req);
@@ -2426,6 +2646,43 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     }
 
+    if (roomLightingMode) {
+      if (denyUnless('home')) return reply;
+      if (!deps.homeLightingService) {
+        return reply.code(503).send({ error: 'room_lighting_unavailable' });
+      }
+      const result = await deps.homeLightingService.setRoomMode(
+        roomLightingMode.roomId,
+        roomLightingMode.mode
+      );
+      if (!result) return reply.code(404).send({ error: 'lighting_room_not_found' });
+      const modeLabel = roomLightingMode.mode === 'dimmed'
+        ? 'tamisé'
+        : roomLightingMode.mode === 'on'
+          ? 'allumé'
+          : 'éteint';
+      const detailedResponseText = result.operationStatus === 'failed'
+        ? `Je n’ai pas pu régler l’éclairage de ${roomLightingMode.roomName}.`
+        : `${roomLightingMode.roomName} : mode « ${modeLabel} » appliqué.`;
+      const responseText = voiceEnabled
+        ? formatQuickActionVoiceResponse(result.operationStatus === 'failed' ? 'failure' : 'success')
+        : detailedResponseText;
+      await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'home',
+          source: 'direct',
+          routeKey: 'home.lighting.room_mode',
+          semanticDecision: result.operationStatus,
+        },
+      });
+    }
+
     const deterministicHomeAction = deps.homeCatalog?.inferDeterministicVoiceAction?.(text);
     if (deterministicHomeAction) {
       if (denyUnless('home')) return reply;
@@ -2435,16 +2692,42 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         principal: getRequestPrincipal(req),
         command: deterministicHomeAction,
       });
-      const responseText = result.ok
-        ? result.operationStatus === 'succeeded'
-          ? `Volume de la télé réglé à ${deterministicHomeAction.value} %.`
-          : result.operationStatus === 'accepted'
-            ? `Réglage du volume accepté, sans confirmation de la télé.`
-            : `Réglage du volume envoyé, mais son résultat reste incertain.`
-        : result.code === 'guest_action_forbidden'
-          ? "Ce compte n'est pas autorisé à piloter la télévision."
-          : "Je n'ai pas pu régler le volume de la télévision. Vérifie sa connexion.";
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      if (result.ok) {
+        await deps.homeLightingService?.reconcileActions([deterministicHomeAction]);
+      }
+      const isTelevisionVolume = deterministicHomeAction.action === 'set_volume';
+      const actionLabel = deterministicHomeAction.action === 'set_brightness'
+        ? `${deterministicHomeAction.name} réglé à ${deterministicHomeAction.value} %`
+        : deterministicHomeAction.action === 'turn_on'
+          ? `${deterministicHomeAction.name} allumé`
+          : deterministicHomeAction.action === 'turn_off'
+            ? `${deterministicHomeAction.name} éteint`
+            : `Volume de la télé réglé à ${deterministicHomeAction.value} %`;
+      const detailedResponseText = isTelevisionVolume
+        ? result.ok
+          ? result.operationStatus === 'succeeded'
+            ? `Volume de la télé réglé à ${deterministicHomeAction.value} %.`
+            : result.operationStatus === 'accepted'
+              ? 'Réglage du volume accepté, sans confirmation de la télé.'
+              : 'Réglage du volume envoyé, mais son résultat reste incertain.'
+          : result.code === 'guest_action_forbidden'
+            ? "Ce compte n'est pas autorisé à piloter la télévision."
+            : "Je n'ai pas pu régler le volume de la télévision. Vérifie sa connexion."
+        : result.ok
+          ? result.operationStatus === 'succeeded'
+            ? `${actionLabel}.`
+            : result.operationStatus === 'accepted'
+              ? `${actionLabel}, commande acceptée sans confirmation de l'équipement.`
+              : `${actionLabel}, mais le résultat reste incertain.`
+          : result.code === 'guest_action_forbidden'
+            ? "Ce compte n'est pas autorisé à piloter cet équipement."
+            : `Je n'ai pas pu commander ${deterministicHomeAction.name}. Vérifie sa connexion.`;
+      const responseText = voiceEnabled
+        ? formatQuickActionVoiceResponse(result.ok ? 'success' : 'failure')
+        : detailedResponseText;
+      await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       try {
         const principal = getRequestPrincipal(req);
@@ -2456,16 +2739,21 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               : principal?.kind === 'service'
                 ? principal.serviceId
                 : 'legacy-local',
-          action: 'home.television.volume.voice_set',
+          action: isTelevisionVolume ? 'home.television.volume.voice_set' : 'home.device.voice_action',
           targetType: 'home.device',
           targetId: deterministicHomeAction.deviceId,
           outcome: result.ok ? 'success' : result.status === 403 ? 'denied' : 'failed',
           correlationId: req.id,
           metadata: result.ok
-            ? { domain: result.domain, value: deterministicHomeAction.value }
+            ? {
+                domain: result.domain,
+                homeAction: deterministicHomeAction.action,
+                ...(deterministicHomeAction.value === undefined ? {} : { value: deterministicHomeAction.value }),
+              }
             : {
                 errorCode: result.code,
-                value: deterministicHomeAction.value,
+                homeAction: deterministicHomeAction.action,
+                ...(deterministicHomeAction.value === undefined ? {} : { value: deterministicHomeAction.value }),
                 ...(result.domain ? { domain: result.domain } : {}),
               },
         });
@@ -2481,7 +2769,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         replyMeta: {
           kind: 'home',
           source: 'deterministic_home_action',
-          routeKey: 'home.television.set_volume',
+          routeKey: isTelevisionVolume
+            ? 'home.television.set_volume'
+            : `home.light.${deterministicHomeAction.action}`,
           semanticDecision: result.ok ? result.operationStatus : 'execution_failed',
         },
       });
@@ -2513,6 +2803,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     if (
       preparedContextMatch &&
       deps.contextCache &&
+      (preparedContextMatch.domain !== 'nas' || deps.env.NAS_STATUS_ENABLED) &&
       !(getCurrentOwnerUserId() && personalContextDomain)
     ) {
       if (denyUnless(permissionForRouteKey(`${preparedContextMatch.domain}.read`))) return reply;
@@ -2547,7 +2838,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           const responseText = voiceEnabled
             ? formatPreparedContextVoiceResponse(preparedContextMatch, answerText, voiceMode)
             : answerText;
-          await conversationService.persistMessages(effectiveThreadId, text, responseText);
+          await conversationService.persistMessages(effectiveThreadId, text, answerText, {
+            ...(voiceEnabled ? { spokenText: responseText } : {}),
+          });
           await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
           const payload = {
             threadId: effectiveThreadId,
@@ -2597,7 +2890,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               mode: voiceMode,
             })
           : unavailableText;
-        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await conversationService.persistMessages(effectiveThreadId, text, unavailableText, {
+          ...(voiceEnabled ? { spokenText: responseText } : {}),
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         recordPerf('ingest', Date.now() - t0);
         const payload = {
@@ -2686,7 +2981,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           mode: voiceMode,
         });
 
-        await conversationService.persistMessages(effectiveThreadId, text, refreshedVoice);
+        await conversationService.persistMessages(effectiveThreadId, text, refreshedMailText, {
+          spokenText: refreshedVoice,
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
 
         const followupPayload = {
@@ -2720,7 +3017,26 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     const inferredCulture = inferCultureRequest(assistantInputText);
     const cultureMemoryCommand = inferCultureMemoryCommand(assistantInputText);
-    const foundActiveResultSet = resultSetRepository.findActive(effectiveThreadId);
+    if (
+      !deps.env.CULTURE_ENABLED &&
+      (parsed.data.domain === 'culture' || inferredCulture || cultureMemoryCommand)
+    ) {
+      const responseText = 'La fonction Culture est désactivée pour le moment.';
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'culture',
+          source: 'runtime_config',
+          semanticDecision: 'disabled',
+        },
+      });
+    }
+    const foundActiveResultSet = deps.env.CULTURE_ENABLED
+      ? resultSetRepository.findActive(effectiveThreadId)
+      : null;
     const activeResultSetBelongsToProfile = resultSetBelongsToCultureProfile(
       foundActiveResultSet,
       profileId,
@@ -2899,7 +3215,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         await conversationService.persistMessages(
           effectiveThreadId,
           text || `culture.${requestedAction}`,
-          responseText
+          culture.text,
+          { ...(voiceEnabled ? { spokenText: responseText } : {}) }
         );
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         return reply.code(200).send({
@@ -2971,7 +3288,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         : spotifyResp.tts;
       const persistedUserText = text || `spotify.${explicitSpotifyPayload.data.action}`;
       void conversationService
-        .persistMessages(effectiveThreadId, persistedUserText, spotifyVoiceText)
+        .persistMessages(effectiveThreadId, persistedUserText, spotifyResp.tts, {
+          ...(voiceEnabled ? { spokenText: spotifyVoiceText } : {}),
+        })
         .then(async () => {
           if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
             summarizationService.startPresummarize(effectiveThreadId);
@@ -3068,6 +3387,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`);
       sseStream?.push(null);
     };
+    sendVoiceIdentityClarificationStream = pushSseResponse;
     sendForbiddenStream =
       sseStream === null
         ? undefined
@@ -3084,7 +3404,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: localTimeText, domain: 'general', mode: voiceMode })
         : localTimeText;
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await conversationService.persistMessages(effectiveThreadId, text, localTimeText, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
@@ -3139,7 +3461,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   mode: voiceMode,
                 })
               : deterministicWeatherText;
-            await conversationService.persistMessages(effectiveThreadId, text, responseText);
+            await conversationService.persistMessages(effectiveThreadId, text, deterministicWeatherText, {
+              ...(voiceEnabled ? { spokenText: responseText } : {}),
+            });
             await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
             recordPerf('ingest', Date.now() - t0);
             app.log.info(
@@ -3259,7 +3583,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: spotifyResp.tts, domain: 'spotify', mode: voiceMode })
         : spotifyResp.tts;
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await conversationService.persistMessages(effectiveThreadId, text, spotifyResp.tts, {
+        ...(voiceEnabled ? { spokenText: responseText } : {}),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
@@ -3292,19 +3618,41 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(200).send(payload);
     }
 
-    if (deps.nasStatus?.isConfigured() && isNasStatusQuery(assistantInputText)) {
+    if (!deps.env.NAS_STATUS_ENABLED && isNasStatusQuery(assistantInputText)) {
+      const responseText = 'Le suivi du NAS est désactivé pour le moment.';
+      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
+      return reply.code(200).send({
+        threadId: effectiveThreadId,
+        responseText,
+        replyMeta: {
+          kind: 'nas_status',
+          source: 'runtime_config',
+          semanticDecision: 'disabled',
+        },
+      });
+    }
+
+    if (
+      deps.env.NAS_STATUS_ENABLED &&
+      deps.nasStatus?.isConfigured() &&
+      isNasStatusQuery(assistantInputText)
+    ) {
       if (denyUnless('nas.operations')) return reply;
       pushSseAck(getContextualFallbackAck(assistantInputText));
       try {
         const nasStatus = await deps.nasStatus.getStatus();
         const responseText = voiceEnabled
           ? formatVoiceResponse({
-              text: formatNasStatus(nasStatus),
+              text: formatNasStatus(nasStatus, assistantInputText),
               domain: 'general',
               mode: voiceMode,
             })
-          : formatNasStatus(nasStatus);
-        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+          : formatNasStatus(nasStatus, assistantInputText);
+        const nasText = formatNasStatus(nasStatus, assistantInputText);
+        await conversationService.persistMessages(effectiveThreadId, text, nasText, {
+          ...(voiceEnabled ? { spokenText: responseText } : {}),
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
@@ -3352,7 +3700,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
-        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await conversationService.persistMessages(effectiveThreadId, text, calendarText, {
+          ...(voiceEnabled ? { spokenText: responseText } : {}),
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
@@ -3383,11 +3733,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           { threadId: effectiveThreadId, requestId, route: routeKey, err },
           'calendar_intent_fast_path_failed'
         );
-        const fallbackText = 'Je n arrive pas a acceder a ton agenda pour le moment.';
+        const fallbackText = "Je n'arrive pas à accéder à ton agenda pour le moment.";
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: fallbackText, domain: 'calendar', mode: voiceMode })
           : fallbackText;
-        await conversationService.persistMessages(effectiveThreadId, text, responseText);
+        await conversationService.persistMessages(effectiveThreadId, text, fallbackText, {
+          ...(voiceEnabled ? { spokenText: responseText } : {}),
+        });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
@@ -4658,6 +5010,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                       ha: deps.ha,
                       principal: homePrincipal,
                     });
+                    await deps.homeLightingService?.reconcileActions(
+                      execution.steps
+                        .filter((step) => step.status === 'success')
+                        .map((step) => ({ deviceId: step.deviceId, action: step.action }))
+                    );
                     try {
                       deps.adminAudit?.recordActorAudit({
                         actorKind,
@@ -4713,6 +5070,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                     principal: homePrincipal,
                     command,
                   });
+                  if (execution.ok) {
+                    await deps.homeLightingService?.reconcileActions([command]);
+                  }
                   try {
                     deps.adminAudit?.recordActorAudit({
                       actorKind,
@@ -5029,7 +5389,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                 })
               : spotifyText;
             void conversationService
-              .persistMessages(effectiveThreadId, text, spotifyVoiceText)
+              .persistMessages(effectiveThreadId, text, spotifyText, {
+                ...(voiceEnabled ? { spokenText: spotifyVoiceText } : {}),
+              })
               .then(async () => {
                 if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
                   summarizationService.startPresummarize(effectiveThreadId);
@@ -5205,7 +5567,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     void conversationService
-      .persistMessages(effectiveThreadId, text, assistantTextVoice)
+      .persistMessages(effectiveThreadId, text, assistantTextForClient, {
+        ...(voiceEnabled ? { spokenText: assistantTextVoice } : {}),
+      })
       .then(async () => {
         if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
           summarizationService.startPresummarize(effectiveThreadId);

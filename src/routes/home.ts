@@ -4,10 +4,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import type { AuditOutcome } from '../admin/AdminControlPlaneRepository';
+import { HomeAssistantRequestError } from '../haClient';
 import { isHassState } from '../hass';
 import { HOME_PRESETS } from '../home/devicePresets';
 import { executeCatalogHomeAction, executeCatalogHomeScene } from '../home/HomeActionExecutor';
 import { canStartRobotRoomCleaning } from '../home/HomeActionPolicy';
+import { HomeAdaptiveLightingService } from '../home/HomeAdaptiveLightingService';
 import { HomeAssistantAutomationService } from '../home/HomeAssistantAutomationService';
 import {
   HomeAssistantRegistrySyncService,
@@ -115,6 +117,29 @@ const heatingPlanUpdateSchema = z
       || value.ecoTemperature < value.comfortTemperature,
     { message: 'eco_temperature_must_be_lower_than_comfort' }
   );
+const lightingRoomParamsSchema = z.object({ roomId: z.string().min(1).max(80) }).strict();
+const lightingRoomModeSchema = z.object({
+  mode: z.enum(['on', 'dimmed', 'off', 'adaptive', 'maximum']),
+}).strict();
+const lightingLevelSchema = z.object({
+  brightnessPercent: z.number().int().min(0).max(100),
+  colorTemperatureKelvin: z.number().int().min(2_000).max(6_500),
+}).strict();
+const lightingRoomProfileSchema = z.object({
+  expectedRevision: revisionSchema,
+  phases: z.object({
+    dawn: lightingLevelSchema,
+    day: lightingLevelSchema,
+    dusk: lightingLevelSchema,
+    night: lightingLevelSchema,
+  }).strict(),
+  dimmedPhases: z.object({
+    dawn: lightingLevelSchema,
+    day: lightingLevelSchema,
+    dusk: lightingLevelSchema,
+    night: lightingLevelSchema,
+  }).strict(),
+}).strict();
 const robotParamsSchema = z.object({ deviceId: deviceIdSchema });
 const robotQuerySchema = z.object({ days: z.coerce.number().int().min(1).max(30).default(14) });
 const robotCleanSchema = z.object({
@@ -269,6 +294,30 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
   const registrySyncService = catalog && deps.ha
     ? new HomeAssistantRegistrySyncService(deps.ha, catalog)
     : null;
+  const adaptiveLightingService = catalog && deps.ha
+    ? new HomeAdaptiveLightingService(catalog, deps.ha, app.log)
+    : null;
+  deps.homeLightingService = adaptiveLightingService ?? undefined;
+  adaptiveLightingService?.start();
+  if (adaptiveLightingService) {
+    app.addHook('onClose', async () => adaptiveLightingService.stop());
+  }
+  const reconcileManagedAutomations = async (reason: string) => {
+    if (!automationService) return null;
+    try {
+      const result = await automationService.reconcile();
+      if (result.operationStatus !== 'succeeded' || result.updated.length > 0 || result.skipped.length > 0) {
+        app.log.info({ reason, ...result }, 'managed home automations reconciled');
+      }
+      return result;
+    } catch (error) {
+      app.log.warn(
+        { reason, errorCode: error instanceof Error ? error.message : 'home_automation_reconcile_failed' },
+        'managed home automation reconciliation failed'
+      );
+      return { operationStatus: 'uncertain' as const, updated: [], skipped: [], failed: [] };
+    }
+  };
 
   app.get('/v1/home/configuration/home-assistant-sync', async (request, reply) => {
     if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
@@ -389,6 +438,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         error: updateError?.message ?? 'home_assistant_unavailable',
         operationStatus,
         appliedFields: updateError?.appliedFields ?? [],
+        ...(updateError?.observedPlan ? { observedPlan: updateError.observedPlan } : {}),
       });
     }
   });
@@ -431,6 +481,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       });
       return reply.code(result.status).send({ error: result.code });
     }
+    await adaptiveLightingService?.reconcileActions([{ deviceId: input.deviceId, action: input.action }]);
     recordHomeAudit(app, deps, request, {
       action: `home.action.${input.action}`,
       targetType: auditTargetType,
@@ -445,6 +496,112 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       ...(result.observedState ? { observedState: result.observedState } : {}),
     });
   }
+
+  app.get('/v1/home/lighting/rooms', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home')) return reply.code(403).send({ error: 'forbidden' });
+    if (!adaptiveLightingService) {
+      return reply.code(503).send({ error: 'adaptive_lighting_not_configured' });
+    }
+    try {
+      reply.header('cache-control', 'no-store');
+      return reply.code(200).send({ rooms: await adaptiveLightingService.getRoomStates() });
+    } catch {
+      return reply.code(502).send({ error: 'home_assistant_unavailable' });
+    }
+  });
+
+  app.get('/v1/home/lighting/profiles', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home')) return reply.code(403).send({ error: 'forbidden' });
+    const config = catalog?.getAdaptiveLightingConfig();
+    if (!catalog || !config?.enabled) {
+      return reply.code(503).send({ error: 'adaptive_lighting_not_configured' });
+    }
+    reply.header('cache-control', 'no-store');
+    return reply.code(200).send({
+      revision: catalog.getRevision(),
+      canEdit: canEditHome(request) && catalog.isWritable(),
+      weather: config.weather,
+      rooms: config.rooms.map(({ roomId, phases, dimmedPhases }) => ({ roomId, phases, dimmedPhases })),
+    });
+  });
+
+  app.put('/v1/home/lighting/rooms/:roomId/profile', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!catalog?.isWritable()) return reply.code(503).send({ error: 'home_config_read_only' });
+    const params = lightingRoomParamsSchema.safeParse(request.params);
+    const body = lightingRoomProfileSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: 'lighting_room_profile_invalid' });
+    }
+    try {
+      catalog.updateAdaptiveLightingRoomProfile({
+        expectedRevision: body.data.expectedRevision,
+        roomId: params.data.roomId,
+        phases: body.data.phases,
+        dimmedPhases: body.data.dimmedPhases,
+      });
+      await adaptiveLightingService?.tick();
+      recordHomeAudit(app, deps, request, {
+        action: 'home.lighting.room_profile',
+        targetType: 'home.configuration',
+        targetId: params.data.roomId,
+        outcome: 'success',
+        metadata: { phaseCount: Object.keys(body.data.phases).length },
+      });
+      const config = catalog.getAdaptiveLightingConfig();
+      const room = config?.rooms.find((candidate) => candidate.roomId === params.data.roomId);
+      return reply.code(200).send({
+        revision: catalog.getRevision(),
+        canEdit: true,
+        weather: config?.weather,
+        rooms: config?.rooms.map(({ roomId, phases, dimmedPhases }) => ({ roomId, phases, dimmedPhases })) ?? [],
+        room: room ? { roomId: room.roomId, phases: room.phases, dimmedPhases: room.dimmedPhases } : undefined,
+      });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'lighting_room_profile_update_failed';
+      if (code === 'home_config_conflict') return reply.code(409).send({ error: code });
+      if (code === 'lighting_room_not_found') return reply.code(404).send({ error: code });
+      return reply.code(400).send({ error: code });
+    }
+  });
+
+  app.put('/v1/home/lighting/rooms/:roomId/mode', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home')) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    if (!adaptiveLightingService) {
+      return reply.code(503).send({ error: 'adaptive_lighting_not_configured' });
+    }
+    const params = lightingRoomParamsSchema.safeParse(request.params);
+    const body = lightingRoomModeSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.code(400).send({ error: 'lighting_room_mode_invalid' });
+    }
+    try {
+      const requestedMode = body.data.mode === 'adaptive' || body.data.mode === 'maximum'
+        ? 'on'
+        : body.data.mode;
+      const result = await adaptiveLightingService.setRoomMode(params.data.roomId, requestedMode);
+      if (!result) return reply.code(404).send({ error: 'lighting_room_not_found' });
+      recordHomeAudit(app, deps, request, {
+        action: 'home.lighting.room_mode',
+        targetType: 'home.configuration',
+        targetId: params.data.roomId,
+        outcome: result.operationStatus === 'failed' ? 'failed' : 'success',
+        metadata: {
+          mode: result.mode,
+          operationStatus: result.operationStatus,
+          failedDeviceCount: result.failedDeviceIds.length,
+        },
+      });
+      return reply.code(result.operationStatus === 'failed' ? 502 : 200).send(result);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'home_control_unavailable';
+      return reply.code(502).send({ error: code });
+    }
+  });
 
   app.get('/v1/home', async (request, reply) => {
     if (!hasRequestPermission(request, 'home')) return reply.code(403).send({ error: 'forbidden' });
@@ -575,8 +732,25 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         serviceData: body.data,
         returnResponse: true,
       });
-      return reply.send({ status: 'ok', operationStatus: 'accepted' });
+      let readable = false;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 500));
+        try {
+          const observed = await deps.ha.getState(mapping.entityId);
+          if (!isHassState(observed)) continue;
+          readable = true;
+          if (observed.state === 'cleaning') {
+            return reply.send({ status: 'ok', operationStatus: 'succeeded', observedState: observed.state });
+          }
+        } catch {
+          return reply.send({ status: 'ok', operationStatus: 'accepted' });
+        }
+      }
+      return reply.send({ status: 'ok', operationStatus: readable ? 'uncertain' : 'accepted' });
     } catch (error) {
+      if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) {
+        return reply.send({ status: 'ok', operationStatus: 'uncertain' });
+      }
       app.log.warn({ errorCode: error instanceof Error ? error.message : 'robot_connector_failed' }, 'robot room clean failed');
       return reply.code(502).send({ error: 'robot_connector_failed' });
     }
@@ -649,7 +823,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(400).send({ error: 'home_automation_invalid' });
       }
       try {
-        await automationService.update(id.data, body.data);
+        const operationStatus = await automationService.update(id.data, body.data);
         recordHomeAudit(app, deps, request, {
           action: 'home.automation.update',
           targetType: 'home.automation',
@@ -657,7 +831,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
           outcome: 'success',
           metadata: { sceneId: body.data.sceneId },
         });
-        return reply.code(200).send({ status: 'ok' });
+        return reply.code(200).send({ status: 'ok', operationStatus });
       } catch (error) {
         const mapped = mutationError(error);
         return reply
@@ -682,14 +856,14 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(400).send({ error: 'home_automation_invalid' });
       }
       try {
-        await automationService.setEnabled(id.data, body.data.enabled);
+        const operationStatus = await automationService.setEnabled(id.data, body.data.enabled);
         recordHomeAudit(app, deps, request, {
           action: body.data.enabled ? 'home.automation.enable' : 'home.automation.disable',
           targetType: 'home.automation',
           targetId: id.data,
           outcome: 'success',
         });
-        return reply.code(200).send({ status: 'ok' });
+        return reply.code(200).send({ status: 'ok', operationStatus });
       } catch (error) {
         const mapped = mutationError(error);
         return reply
@@ -711,14 +885,14 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       const id = automationIdSchema.safeParse(request.params.automationId);
       if (!id.success) return reply.code(400).send({ error: 'home_automation_invalid' });
       try {
-        await automationService.run(id.data);
+        const operationStatus = await automationService.run(id.data);
         recordHomeAudit(app, deps, request, {
           action: 'home.automation.run',
           targetType: 'home.automation',
           targetId: id.data,
           outcome: 'success',
         });
-        return reply.code(200).send({ status: 'ok' });
+        return reply.code(200).send({ status: 'ok', operationStatus });
       } catch (error) {
         const mapped = mutationError(error);
         return reply
@@ -740,13 +914,22 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       const id = automationIdSchema.safeParse(request.params.automationId);
       if (!id.success) return reply.code(400).send({ error: 'home_automation_invalid' });
       try {
-        await automationService.delete(id.data);
+        const operationStatus = await automationService.delete(id.data);
         recordHomeAudit(app, deps, request, {
           action: 'home.automation.delete',
           targetType: 'home.automation',
           targetId: id.data,
           outcome: 'success',
         });
+        if (operationStatus === 'uncertain') {
+          return reply.code(503).send({
+            error: 'home_automation_result_unknown',
+            operationStatus,
+          });
+        }
+        if (operationStatus === 'accepted') {
+          return reply.code(202).send({ status: 'ok', operationStatus });
+        }
         return reply.code(204).send();
       } catch (error) {
         const mapped = mutationError(error);
@@ -813,6 +996,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       }
       try {
         catalog.upsertDevice({ deviceId: deviceId.data, ...body.data });
+        await reconcileManagedAutomations('device_mapping_changed');
         recordHomeAudit(app, deps, request, {
           action: 'home.device.upsert',
           targetId: deviceId.data,
@@ -851,6 +1035,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       }
       try {
         catalog.deleteDevice(deviceId.data, body.data.expectedRevision);
+        await reconcileManagedAutomations('device_mapping_deleted');
         recordHomeAudit(app, deps, request, {
           action: 'home.device.delete',
           targetId: deviceId.data,
@@ -990,6 +1175,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
           ...(action!.option === undefined ? {} : { option: action!.option }),
         })),
       });
+      const automationReconciliation = await reconcileManagedAutomations('scene_created');
       recordHomeAudit(app, deps, request, {
         action: 'home.scene.create',
         targetType: 'home.scene',
@@ -997,7 +1183,11 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         outcome: 'success',
         metadata: { stepCount: actions.length },
       });
-      return reply.code(201).send({ revision: catalog.getRevision(), scene: catalog.getScene(sceneId) });
+      return reply.code(201).send({
+        revision: catalog.getRevision(),
+        scene: catalog.getScene(sceneId),
+        ...(automationReconciliation ? { automationReconciliation } : {}),
+      });
     } catch (error) {
       const mapped = mutationError(error);
       return reply.code(mapped.status).send({ error: mapped.code });
@@ -1029,6 +1219,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
           ...(action!.option === undefined ? {} : { option: action!.option }),
         })),
       });
+      const automationReconciliation = await reconcileManagedAutomations('scene_changed');
       recordHomeAudit(app, deps, request, {
         action: 'home.scene.update',
         targetType: 'home.scene',
@@ -1036,7 +1227,11 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         outcome: 'success',
         metadata: { stepCount: actions.length },
       });
-      return reply.send({ revision: catalog.getRevision(), scene: catalog.getScene(id.data) });
+      return reply.send({
+        revision: catalog.getRevision(),
+        scene: catalog.getScene(id.data),
+        ...(automationReconciliation ? { automationReconciliation } : {}),
+      });
     } catch (error) {
       const mapped = mutationError(error);
       return reply.code(mapped.status).send({ error: mapped.code });
@@ -1055,6 +1250,11 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       ha: deps.ha,
       principal: getRequestPrincipal(request),
     });
+    await adaptiveLightingService?.reconcileActions(
+      result.steps
+        .filter((step) => step.status === 'success')
+        .map((step) => ({ deviceId: step.deviceId, action: step.action }))
+    );
     recordHomeAudit(app, deps, request, {
       action: 'home.scene.run',
       targetType: 'home.scene',
@@ -1087,6 +1287,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       if (!id.success || !body.success) return reply.code(400).send({ error: 'home_scene_invalid' });
       try {
         catalog.deleteScene(id.data, body.data.expectedRevision);
+        await reconcileManagedAutomations('scene_deleted');
         recordHomeAudit(app, deps, request, {
           action: 'home.scene.delete',
           targetType: 'home.scene',

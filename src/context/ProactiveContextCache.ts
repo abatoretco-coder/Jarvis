@@ -573,7 +573,7 @@ export class ProactiveContextCache {
     this.addProvider('spotify', this.deps.env.PROACTIVE_CONTEXT_CACHE_SPOTIFY_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_SPOTIFY_STALE_MS, () => this.buildSpotifySnapshot(), () => this.deps.spotifyWebApi.isConfigured());
     this.addProvider('weather', this.deps.env.PROACTIVE_CONTEXT_CACHE_WEATHER_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_WEATHER_STALE_MS, () => this.buildWeatherSnapshot(), () => Boolean(this.deps.ha));
     this.addProvider('home', this.deps.env.PROACTIVE_CONTEXT_CACHE_HOME_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_HOME_STALE_MS, () => this.buildHomeSnapshot(), () => Boolean(this.deps.ha));
-    this.addProvider('nas', this.deps.env.PROACTIVE_CONTEXT_CACHE_NAS_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_NAS_STALE_MS, () => this.buildNasSnapshot(), () => Boolean(this.deps.nasStatus?.isConfigured()));
+    this.addProvider('nas', this.deps.env.PROACTIVE_CONTEXT_CACHE_NAS_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_NAS_STALE_MS, () => this.buildNasSnapshot(), () => Boolean(this.deps.env.NAS_STATUS_ENABLED && this.deps.nasStatus?.isConfigured()));
     this.addProvider('mail', this.deps.env.PROACTIVE_CONTEXT_CACHE_MAIL_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_MAIL_STALE_MS, () => this.buildMailSnapshot(), () => true);
     this.addProvider('todo', this.deps.env.PROACTIVE_CONTEXT_CACHE_TODO_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_TODO_STALE_MS, () => this.buildTodoSnapshot(), () => true);
     this.addProvider('calendar', this.deps.env.PROACTIVE_CONTEXT_CACHE_CALENDAR_TTL_MS, this.deps.env.PROACTIVE_CONTEXT_CACHE_CALENDAR_STALE_MS, () => this.buildCalendarSnapshot(), () => true);

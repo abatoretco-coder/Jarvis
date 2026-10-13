@@ -103,8 +103,8 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
     if (!body.success) return reply.code(400).send({ error: 'invalid_body', issues: body.error.issues });
     const profileId = profileIdFrom(req, body.data.user_id);
     const profile = profiles.getProfile(profileId);
-    if (!deps.env.CULTURE_PROACTIVE_ENABLED || !profile.proactiveEnabled) {
-      return reply.send({ shouldNotify: false, reason: deps.env.CULTURE_PROACTIVE_ENABLED ? 'profile_opt_out' : 'runtime_disabled', candidates: [] });
+    if (!deps.env.CULTURE_ENABLED || !deps.env.CULTURE_PROACTIVE_ENABLED || !profile.proactiveEnabled) {
+      return reply.send({ shouldNotify: false, reason: deps.env.CULTURE_ENABLED && deps.env.CULTURE_PROACTIVE_ENABLED ? 'profile_opt_out' : 'runtime_disabled', candidates: [] });
     }
     if (!deps.env.AGORA_BASE_URL || !deps.env.AGORA_API_TOKEN) return reply.code(503).send({ error: 'agora_not_configured' });
     const lat = body.data.latitude ?? deps.env.CULTURE_HOME_LATITUDE ?? deps.env.AGORA_HOME_LAT;
@@ -133,7 +133,7 @@ export function registerCultureProfileRoutes(app: FastifyInstance, deps: AppDeps
       return reply.send(service.evaluate({
         profileId,
         candidates: facts.data,
-        runtimeEnabled: deps.env.CULTURE_PROACTIVE_ENABLED,
+        runtimeEnabled: deps.env.CULTURE_ENABLED && deps.env.CULTURE_PROACTIVE_ENABLED,
         responseStale: facts.meta.stale,
         threshold: deps.env.CULTURE_PROACTIVE_THRESHOLD,
         cooldownMs: deps.env.CULTURE_PROACTIVE_COOLDOWN_MS,

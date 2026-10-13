@@ -19,10 +19,12 @@ function isProtectedV1Route(url?: string): boolean {
 
 function isOAuthRoute(url?: string): boolean {
   if (!url) return false;
-  return url === '/v1/integrations/oauth/callback'
-    || url.startsWith('/v1/integrations/oauth/callback?')
-    || url === '/v1/integrations/oauth/google/callback'
-    || url.startsWith('/v1/integrations/oauth/google/callback?');
+  return (
+    url === '/v1/integrations/oauth/callback' ||
+    url.startsWith('/v1/integrations/oauth/callback?') ||
+    url === '/v1/integrations/oauth/google/callback' ||
+    url.startsWith('/v1/integrations/oauth/google/callback?')
+  );
 }
 
 function isIngestRoute(url?: string): boolean {
@@ -60,6 +62,7 @@ function requiredPermissions(url: string): PermissionKey[] {
   if (url.startsWith('/v1/threads')) return ['history'];
   if (url.startsWith('/v1/mail/')) return ['mail'];
   if (url.startsWith('/v1/todo/')) return ['todo'];
+  if (url.startsWith('/v1/daily-life')) return ['todo'];
   if (url.startsWith('/v1/calendar/')) return ['calendar'];
   if (url.startsWith('/v1/dashboard')) return ['mail', 'calendar', 'todo'];
   if (url.startsWith('/v1/ha/')) return ['home'];
@@ -69,16 +72,25 @@ function requiredPermissions(url: string): PermissionKey[] {
   return ['chat'];
 }
 
-function isDedicatedServiceRouteAllowed(serviceId: string | undefined, method: string, url: string): boolean {
+function isDedicatedServiceRouteAllowed(
+  serviceId: string | undefined,
+  method: string,
+  url: string
+): boolean {
   const path = url.split('?', 1)[0] ?? url;
   const normalizedMethod = method.toUpperCase();
 
   if (serviceId === 'pc-agent') {
-    return normalizedMethod === 'POST'
-      && (path === '/v1/pc-agent/poll' || path === '/v1/pc-agent/commands/complete');
+    return (
+      normalizedMethod === 'POST' &&
+      (path === '/v1/pc-agent/poll' || path === '/v1/pc-agent/commands/complete')
+    );
   }
   if (serviceId === 'home-assistant-pc') {
-    return normalizedMethod === 'POST' && path === '/v1/ingest';
+    return (
+      normalizedMethod === 'POST' &&
+      (path === '/v1/ingest' || path === '/v1/stt/default' || path === '/v1/tts')
+    );
   }
   if (serviceId === 'desktop-local') {
     return false;

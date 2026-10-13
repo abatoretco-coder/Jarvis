@@ -82,6 +82,7 @@ function env(dbPath: string, proactiveEnabled = false): Env {
     CONVERSATION_DB_PATH: dbPath,
     CONVERSATION_RECENT_MESSAGES: 10,
     CONVERSATION_RESULT_SET_TTL_MS: 86_400_000,
+    CULTURE_ENABLED: true,
     AGORA_BASE_URL: 'http://agora:8092',
     AGORA_API_TOKEN: 'a'.repeat(32),
     AGORA_TIMEOUT_MS: 500,

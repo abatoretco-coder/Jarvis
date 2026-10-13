@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 8;
+export const CONVERSATION_SCHEMA_VERSION = 13;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -18,6 +18,41 @@ const PERSONAL_INTEGRATIONS_CHECKSUM =
   'sha256:519d0ae7d780d40411279378294a4ef42acdc5bc55e805469313a38592760faa';
 const SIMPLE_HOME_ROLES_CHECKSUM =
   'sha256:f4429f57d6a0dce5a2fcd7536df971596e4cc14a60fa16d6c98910970b9ec4c2';
+const DAILY_LIFE_CHECKSUM =
+  'sha256:5b1479c96dd369b1d9c52b53f97f2dcb93b0fa2e933c2a78189a611978f311ac';
+const DAILY_LIFE_SCHEDULING_CHECKSUM =
+  'sha256:873b63ce41583405439279c6df7d3c6c28dc9d4667817fa5e586ad03733692d5';
+const HOUSEHOLD_AGENDA_SHARING_CHECKSUM =
+  'sha256:5f8d82e7294363d8845c3ad5902343d37cb088b3a857b4910a95f207ea1451ba';
+const SPOKEN_RESPONSE_AUDIT_CHECKSUM =
+  'sha256:fd1cbb4d9f93304a565ba347d3b9d7a3e9af6a177e83c586ebdfc3b6bd06d0c7';
+const MUTATION_IDEMPOTENCY_CHECKSUM =
+  'sha256:27a69258706ff7a2730f120f30abf92046eaa9fe0f89e99c414e9052edc78f85';
+
+function ensureMutationIdempotencySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mutation_idempotency_results (
+      identity TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending','completed')),
+      status_code INTEGER,
+      content_type TEXT,
+      payload BLOB,
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(identity,idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mutation_idempotency_expiry
+      ON mutation_idempotency_results(expires_at_ms);
+  `);
+}
+
+function ensureSpokenResponseAuditSchema(db: Database.Database): void {
+  if (!hasColumn(db, 'conversation_messages', 'spoken_content')) {
+    db.exec('ALTER TABLE conversation_messages ADD COLUMN spoken_content TEXT;');
+  }
+}
 
 function ensureAuthorizationPolicy(db: Database.Database): void {
   const grants: Record<string, readonly string[]> = {
@@ -137,6 +172,103 @@ function ensureSimpleHomeRoles(db: Database.Database): void {
     UPDATE household_memberships SET role_key='owner' WHERE role_key='admin';
     DELETE FROM role_permissions WHERE role_key='admin';
     DELETE FROM roles WHERE role_key='admin';
+  `);
+}
+
+function ensureDailyLifeSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_life_lists (
+      list_id TEXT PRIMARY KEY,
+      household_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('shopping','todo')),
+      name TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_by_user_id TEXT NOT NULL,
+      archived_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      FOREIGN KEY(household_id) REFERENCES households(household_id) ON DELETE CASCADE,
+      FOREIGN KEY(created_by_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_life_lists_household
+      ON daily_life_lists(household_id, kind, archived_at_ms, position, created_at_ms);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_life_lists_active_name
+      ON daily_life_lists(household_id, kind, name) WHERE archived_at_ms IS NULL;
+
+    CREATE TABLE IF NOT EXISTS daily_life_items (
+      item_id TEXT PRIMARY KEY,
+      list_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      details TEXT NOT NULL DEFAULT '',
+      quantity TEXT,
+      category TEXT,
+      due_at_ms INTEGER,
+      recurrence TEXT NOT NULL DEFAULT 'none' CHECK (recurrence IN ('none','weekly','monthly')),
+      recurrence_interval INTEGER NOT NULL DEFAULT 1 CHECK (recurrence_interval BETWEEN 1 AND 52),
+      next_occurrence_at_ms INTEGER,
+      completed_at_ms INTEGER,
+      position INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_by_user_id TEXT NOT NULL,
+      updated_by_user_id TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      FOREIGN KEY(list_id) REFERENCES daily_life_lists(list_id) ON DELETE CASCADE,
+      FOREIGN KEY(created_by_user_id) REFERENCES users(user_id) ON DELETE RESTRICT,
+      FOREIGN KEY(updated_by_user_id) REFERENCES users(user_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_life_items_list
+      ON daily_life_items(list_id, completed_at_ms, position, created_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_daily_life_items_recurrence
+      ON daily_life_items(next_occurrence_at_ms) WHERE next_occurrence_at_ms IS NOT NULL;
+  `);
+}
+
+function ensureDailyLifeSchedulingSchema(db: Database.Database): void {
+  if (!hasColumn(db, 'daily_life_items', 'recurrence_unit')) {
+    db.exec("ALTER TABLE daily_life_items ADD COLUMN recurrence_unit TEXT NOT NULL DEFAULT 'none';");
+  }
+  if (!hasColumn(db, 'daily_life_items', 'recurrence_anchor_at_ms')) {
+    db.exec('ALTER TABLE daily_life_items ADD COLUMN recurrence_anchor_at_ms INTEGER;');
+  }
+  if (!hasColumn(db, 'daily_life_items', 'assigned_to_user_id')) {
+    db.exec('ALTER TABLE daily_life_items ADD COLUMN assigned_to_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL;');
+  }
+  if (!hasColumn(db, 'daily_life_items', 'recurrence_every')) {
+    db.exec('ALTER TABLE daily_life_items ADD COLUMN recurrence_every INTEGER NOT NULL DEFAULT 1 CHECK (recurrence_every BETWEEN 1 AND 999);');
+  }
+  db.exec(`
+    UPDATE daily_life_items
+      SET recurrence_unit=CASE recurrence
+        WHEN 'weekly' THEN 'week'
+        WHEN 'monthly' THEN 'month'
+        ELSE 'none'
+      END
+      WHERE recurrence_unit='none' AND recurrence!='none';
+    UPDATE daily_life_items
+      SET recurrence_anchor_at_ms=due_at_ms
+      WHERE recurrence_unit!='none' AND recurrence_anchor_at_ms IS NULL;
+    UPDATE daily_life_items
+      SET recurrence_every=recurrence_interval
+      WHERE recurrence_every=1 AND recurrence_interval!=1;
+    CREATE INDEX IF NOT EXISTS idx_daily_life_items_assignee
+      ON daily_life_items(assigned_to_user_id, completed_at_ms);
+  `);
+}
+
+function ensureHouseholdAgendaSharingSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_life_calendar_shares (
+      household_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      enabled_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(household_id, user_id),
+      FOREIGN KEY(household_id, user_id)
+        REFERENCES household_memberships(household_id, user_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_life_calendar_shares_household
+      ON daily_life_calendar_shares(household_id, enabled_at_ms);
   `);
 }
 
@@ -496,6 +628,7 @@ function ensureInitialSchema(db: Database.Database): void {
       seq INTEGER NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('user','assistant')),
       content TEXT NOT NULL,
+      spoken_content TEXT,
       created_at_ms INTEGER NOT NULL,
       PRIMARY KEY (thread_id, seq),
       FOREIGN KEY(thread_id) REFERENCES conversation_threads(thread_id) ON DELETE CASCADE
@@ -693,6 +826,16 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:7');
   if (applied.get(8) && applied.get(8) !== SIMPLE_HOME_ROLES_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:8');
+  if (applied.get(9) && applied.get(9) !== DAILY_LIFE_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:9');
+  if (applied.get(10) && applied.get(10) !== DAILY_LIFE_SCHEDULING_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:10');
+  if (applied.get(11) && applied.get(11) !== HOUSEHOLD_AGENDA_SHARING_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:11');
+  if (applied.get(12) && applied.get(12) !== SPOKEN_RESPONSE_AUDIT_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:12');
+  if (applied.get(13) && applied.get(13) !== MUTATION_IDEMPOTENCY_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:13');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -741,6 +884,36 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (8, ?, ?, ?)'
       ).run('simple_home_roles', SIMPLE_HOME_ROLES_CHECKSUM, Date.now());
+    }
+    ensureDailyLifeSchema(db);
+    if (!applied.has(9)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (9, ?, ?, ?)'
+      ).run('daily_life_shared_lists', DAILY_LIFE_CHECKSUM, Date.now());
+    }
+    ensureDailyLifeSchedulingSchema(db);
+    if (!applied.has(10)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (10, ?, ?, ?)'
+      ).run('daily_life_scheduling_and_assignment', DAILY_LIFE_SCHEDULING_CHECKSUM, Date.now());
+    }
+    ensureHouseholdAgendaSharingSchema(db);
+    if (!applied.has(11)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (11, ?, ?, ?)'
+      ).run('household_agenda_sharing', HOUSEHOLD_AGENDA_SHARING_CHECKSUM, Date.now());
+    }
+    ensureSpokenResponseAuditSchema(db);
+    if (!applied.has(12)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (12, ?, ?, ?)'
+      ).run('spoken_response_audit', SPOKEN_RESPONSE_AUDIT_CHECKSUM, Date.now());
+    }
+    ensureMutationIdempotencySchema(db);
+    if (!applied.has(13)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (13, ?, ?, ?)'
+      ).run('durable_mutation_idempotency', MUTATION_IDEMPOTENCY_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();

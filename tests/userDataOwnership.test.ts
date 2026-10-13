@@ -7,15 +7,25 @@ import {
   SqliteThreadRepository,
 } from '../src/conversation/repositories/SqliteRepositories';
 import { IdentityRepository } from '../src/identity/IdentityRepository';
-import { runWithRequestIdentityContext, setRequestPrincipal } from '../src/identity/requestIdentity';
+import {
+  getCurrentOwnerUserId,
+  runWithRequestIdentityContext,
+  setRequestPrincipal,
+} from '../src/identity/requestIdentity';
 import { PendingMutationRepository } from '../src/pendingMutations/PendingMutationRepository';
 import { ConversationResultSetRepository } from '../src/resultSets/ConversationResultSetRepository';
 
 function asUser<T>(userId: string, callback: () => T): T {
   return runWithRequestIdentityContext(() => {
     setRequestPrincipal({} as FastifyRequest, {
-      kind: 'user', userId, email: `${userId}@example.test`, displayName: userId,
-      status: 'active', roles: ['resident'], permissions: ['chat', 'history'], sessionId: `session-${userId}`,
+      kind: 'user',
+      userId,
+      email: `${userId}@example.test`,
+      displayName: userId,
+      status: 'active',
+      roles: ['resident'],
+      permissions: ['chat', 'history'],
+      sessionId: `session-${userId}`,
     });
     return callback();
   });
@@ -23,7 +33,11 @@ function asUser<T>(userId: string, callback: () => T): T {
 
 function asService<T>(serviceId: string, callback: () => T): T {
   return runWithRequestIdentityContext(() => {
-    setRequestPrincipal({} as FastifyRequest, { kind: 'service', serviceId, permissions: ['chat', 'history'] });
+    setRequestPrincipal({} as FastifyRequest, {
+      kind: 'service',
+      serviceId,
+      permissions: ['chat', 'history'],
+    });
     return callback();
   });
 }
@@ -32,12 +46,24 @@ describe('user data ownership', () => {
   test('isolates threads, messages, pending mutations and result sets between users', async () => {
     const db = createConversationDb(':memory:');
     const identities = new IdentityRepository(db);
-    const userA = identities.provisionOidcIdentity({
-      issuer: 'https://id.example.test', subject: 'a', email: 'a@example.test', emailVerified: true,
-    }, 1);
-    const userB = identities.provisionOidcIdentity({
-      issuer: 'https://id.example.test', subject: 'b', email: 'b@example.test', emailVerified: true,
-    }, 1);
+    const userA = identities.provisionOidcIdentity(
+      {
+        issuer: 'https://id.example.test',
+        subject: 'a',
+        email: 'a@example.test',
+        emailVerified: true,
+      },
+      1
+    );
+    const userB = identities.provisionOidcIdentity(
+      {
+        issuer: 'https://id.example.test',
+        subject: 'b',
+        email: 'b@example.test',
+        emailVerified: true,
+      },
+      1
+    );
     const threads = new SqliteThreadRepository(db);
     const messages = new SqliteMessageRepository(db);
     const mutations = new PendingMutationRepository(db);
@@ -45,13 +71,25 @@ describe('user data ownership', () => {
 
     await asUser(userA.userId, async () => {
       await threads.getOrCreate('private-thread');
-      await messages.appendMessage({ threadId: 'private-thread', role: 'user', content: 'secret A' });
+      await messages.appendMessage({
+        threadId: 'private-thread',
+        role: 'user',
+        content: 'secret A',
+      });
       await mutations.create({
-        proposalId: 'private-proposal', threadId: 'private-thread', agent: 'todo', action: 'add',
-        effect: 'write', preview: 'Ajouter', payload: {}, expiresAtMs: Date.now() + 60_000,
+        proposalId: 'private-proposal',
+        threadId: 'private-thread',
+        agent: 'todo',
+        action: 'add',
+        effect: 'write',
+        preview: 'Ajouter',
+        payload: {},
+        expiresAtMs: Date.now() + 60_000,
       });
       resultSets.create({
-        threadId: 'private-thread', sourceAgent: 'search', sourceAction: 'query',
+        threadId: 'private-thread',
+        sourceAgent: 'search',
+        sourceAction: 'query',
         items: [{ entityType: 'search.result', entityId: 'private-result', displayLabel: 'Privé' }],
       });
     });
@@ -63,7 +101,9 @@ describe('user data ownership', () => {
       await expect(mutations.findByProposalId('private-proposal')).resolves.toBeNull();
       expect(resultSets.findActive('private-thread')).toBeNull();
       await expect(threads.deleteThread('private-thread')).resolves.toBe(false);
-      await expect(threads.getOrCreate('private-thread')).rejects.toThrow('conversation_thread_not_found');
+      await expect(threads.getOrCreate('private-thread')).rejects.toThrow(
+        'conversation_thread_not_found'
+      );
     });
 
     await asUser(userA.userId, async () => {
@@ -81,9 +121,15 @@ describe('user data ownership', () => {
   test('keeps the compatibility partition separate from authenticated users', async () => {
     const db = createConversationDb(':memory:');
     const identities = new IdentityRepository(db);
-    const user = identities.provisionOidcIdentity({
-      issuer: 'https://id.example.test', subject: 'human', email: 'human@example.test', emailVerified: true,
-    }, 1);
+    const user = identities.provisionOidcIdentity(
+      {
+        issuer: 'https://id.example.test',
+        subject: 'human',
+        email: 'human@example.test',
+        emailVerified: true,
+      },
+      1
+    );
     const threads = new SqliteThreadRepository(db);
     await threads.getOrCreate('legacy-service-thread');
 
@@ -92,7 +138,9 @@ describe('user data ownership', () => {
       await threads.getOrCreate('human-thread');
     });
     await expect(threads.findById('human-thread')).resolves.toBeNull();
-    await expect(threads.findById('legacy-service-thread')).resolves.toMatchObject({ threadId: 'legacy-service-thread' });
+    await expect(threads.findById('legacy-service-thread')).resolves.toMatchObject({
+      threadId: 'legacy-service-thread',
+    });
     db.close();
   });
 
@@ -103,15 +151,43 @@ describe('user data ownership', () => {
 
     await asService('automation-worker', async () => {
       await expect(threads.findById('service-thread')).resolves.toBeNull();
-      await expect(threads.getOrCreate('service-thread')).rejects.toThrow('conversation_thread_not_found');
+      await expect(threads.getOrCreate('service-thread')).rejects.toThrow(
+        'conversation_thread_not_found'
+      );
     });
     await expect(threads.findById('service-thread')).resolves.toBeNull();
     await asService('home-assistant', async () => {
-      await expect(threads.findById('service-thread')).resolves.toMatchObject({ threadId: 'service-thread' });
+      await expect(threads.findById('service-thread')).resolves.toMatchObject({
+        threadId: 'service-thread',
+      });
     });
-    expect(db.prepare('SELECT owner_user_id,owner_service_id FROM conversation_threads').get()).toEqual({
-      owner_user_id: null, owner_service_id: 'home-assistant',
+    expect(
+      db.prepare('SELECT owner_user_id,owner_service_id FROM conversation_threads').get()
+    ).toEqual({
+      owner_user_id: null,
+      owner_service_id: 'home-assistant',
     });
+    db.close();
+  });
+
+  test('delegates connected-provider ownership without merging conversation ownership', async () => {
+    const db = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(db);
+
+    await runWithRequestIdentityContext(async () => {
+      setRequestPrincipal({} as FastifyRequest, {
+        kind: 'service',
+        serviceId: 'home-assistant',
+        permissions: ['chat', 'history'],
+        delegatedUserId: '00000000-0000-4000-8000-000000000001',
+      });
+      expect(getCurrentOwnerUserId()).toBe('00000000-0000-4000-8000-000000000001');
+      await threads.getOrCreate('delegated-service-thread');
+    });
+
+    expect(
+      db.prepare('SELECT owner_user_id,owner_service_id FROM conversation_threads').get()
+    ).toEqual({ owner_user_id: null, owner_service_id: 'home-assistant' });
     db.close();
   });
 });

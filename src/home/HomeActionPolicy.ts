@@ -56,6 +56,16 @@ export function homeActionStateConflict(input: HomeActionState): string | null {
   return null;
 }
 
+export function homeActionStateAlreadySatisfied(input: HomeActionState): boolean {
+  const state = input.state.toLowerCase();
+  if (input.domain !== 'media_player' || televisionTransitionStates.has(state) || unavailableStates.has(state)) {
+    return false;
+  }
+  if (input.action === 'turn_off') return televisionOffStates.has(state);
+  if (input.action === 'turn_on') return !televisionOffStates.has(state);
+  return false;
+}
+
 export function canStartRobotRoomCleaning(state: string, dryingTimeRemainingMinutes?: number): boolean {
   return robotStationaryStates.has(state.toLowerCase()) && (dryingTimeRemainingMinutes ?? 0) <= 0;
 }

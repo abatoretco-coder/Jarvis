@@ -35,6 +35,8 @@ export interface GoogleCalendarEvent {
   summary?: string;
   description?: string;
   location?: string;
+  transparency?: 'opaque' | 'transparent';
+  visibility?: 'default' | 'public' | 'private' | 'confidential';
   start?: GoogleCalendarEventDateTime;
   end?: GoogleCalendarEventDateTime;
   recurrence?: string[];
@@ -69,6 +71,8 @@ const _keepaliveScheduled = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;           // refresh 60 s before expiry
 const KEEPALIVE_DAYS = 30;
 const KEEPALIVE_TICK_MS = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
+const TOKEN_REFRESH_MAX_ATTEMPTS = 2;
+const TOKEN_REFRESH_RETRY_DELAY_MS = 250;
 
 const GOOGLE_CAL_BASE = 'https://www.googleapis.com/calendar/v3';
 const RFC3339_ZONE_SUFFIX_RE = /(?:Z|[+-]\d{2}:\d{2})$/u;
@@ -87,17 +91,28 @@ export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<strin
   const cached = _tokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
 
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id:     credentials.clientId,
-      client_secret: credentials.clientSecret,
-      refresh_token: credentials.refreshToken,
-      grant_type:    'refresh_token',
-    }),
-    signal: AbortSignal.timeout(8_000),
-  });
+  let resp: Response | undefined;
+  for (let attempt = 1; attempt <= TOKEN_REFRESH_MAX_ATTEMPTS; attempt += 1) {
+    resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id:     credentials.clientId,
+        client_secret: credentials.clientSecret,
+        refresh_token: credentials.refreshToken,
+        grant_type:    'refresh_token',
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (resp.ok) break;
+    const transient = resp.status === 429 || resp.status >= 500;
+    if (!transient || attempt === TOKEN_REFRESH_MAX_ATTEMPTS) break;
+    await resp.arrayBuffer().catch(() => undefined);
+    await new Promise<void>((resolve) => setTimeout(resolve, TOKEN_REFRESH_RETRY_DELAY_MS));
+  }
+
+  if (!resp) throw new Error('calendar_token_refresh_no_response');
 
   if (!resp.ok) {
     _tokenCache.delete(cacheKey);

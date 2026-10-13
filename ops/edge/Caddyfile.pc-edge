@@ -41,3 +41,15 @@
 		}
 	}
 }
+
+https://homeassistant.jarvis-abato.duckdns.org {
+	tls {$CADDY_TLS_MODE}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	reverse_proxy homeassistant-edge-origin:8123
+}

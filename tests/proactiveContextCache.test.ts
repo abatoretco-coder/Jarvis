@@ -259,7 +259,10 @@ describe('ProactiveContextCache', () => {
   });
 
   it('exposes provider status and domain snapshots through the route', async () => {
-    const env = makeEnv({ PROACTIVE_CONTEXT_CACHE_AGENTS: 'nas' });
+    const env = makeEnv({
+      NAS_STATUS_ENABLED: 'true',
+      PROACTIVE_CONTEXT_CACHE_AGENTS: 'nas',
+    });
     const contextCache = new ProactiveContextCache({
       env,
       spotifyWebApi: makeSpotifyStub(),

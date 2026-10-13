@@ -226,7 +226,7 @@ describe('calendar ingest confirmation', () => {
 
     expect(second.statusCode).toBe(200);
     const payload = second.json() as { responseText: string; replyMeta?: Record<string, unknown> };
-    expect(payload.responseText).toContain('C\'est ajoute');
+    expect(payload.responseText).toContain('C\'est ajouté');
     expect(payload.replyMeta).toMatchObject({
       kind: 'calendar',
       routeKey: 'calendar.create_event',
@@ -704,7 +704,7 @@ describe('calendar ingest confirmation', () => {
       },
     });
     expect(second.statusCode).toBe(200);
-    expect((second.json() as { responseText: string }).responseText).toContain('pas trouve');
+    expect((second.json() as { responseText: string }).responseText).toContain('pas trouvé');
     await app.close();
   });
 

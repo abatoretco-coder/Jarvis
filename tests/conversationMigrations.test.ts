@@ -37,12 +37,17 @@ describe('conversation database migrations', () => {
       { version: 6, name: 'admin_control_plane' },
       { version: 7, name: 'personal_integrations' },
       { version: 8, name: 'simple_home_roles' },
+      { version: 9, name: 'daily_life_shared_lists' },
+      { version: 10, name: 'daily_life_scheduling_and_assignment' },
+      { version: 11, name: 'household_agenda_sharing' },
+      { version: 12, name: 'spoken_response_audit' },
+      { version: 13, name: 'durable_mutation_idempotency' },
     ]);
     first.close();
 
     const reopened = createConversationDb(databasePath);
     expect(reopened.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({
-      count: 8,
+      count: 13,
     });
     reopened.close();
   });

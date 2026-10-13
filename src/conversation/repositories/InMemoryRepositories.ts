@@ -139,7 +139,7 @@ export class InMemoryThreadRepository implements ThreadRepository {
 export class InMemoryMessageRepository implements MessageRepository {
   private readonly messagesByThread = new Map<string, MessageRecord[]>();
 
-  async appendMessage(input: { threadId: string; role: MessageRole; content: string; createdAtMs?: number }): Promise<number> {
+  async appendMessage(input: { threadId: string; role: MessageRole; content: string; spokenContent?: string; createdAtMs?: number }): Promise<number> {
     const list = this.messagesByThread.get(input.threadId) ?? [];
     const seq = (list.at(-1)?.seq ?? 0) + 1;
     const row: MessageRecord = {
@@ -147,6 +147,7 @@ export class InMemoryMessageRepository implements MessageRepository {
       seq,
       role: input.role,
       content: input.content,
+      ...(input.spokenContent ? { spokenContent: input.spokenContent } : {}),
       createdAtMs: input.createdAtMs ?? Date.now(),
     };
     list.push(row);

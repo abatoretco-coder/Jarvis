@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
+import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
 import type { Env } from '../src/env';
 import type { HomeCatalog } from '../src/home/HomeCatalog';
 import { planHomeActionFromTextWithOpenAi } from '../src/home/HomeVoicePlanner';
+import { IdentityRepository } from '../src/identity/IdentityRepository';
 import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { callMailAgent } from '../src/mail/mailAgent';
 import { resetOpenAiResilienceForTests } from '../src/openai/resilience';
@@ -177,10 +179,99 @@ describe('/v1/ingest integration', () => {
     (global as { fetch?: unknown }).fetch = undefined;
   });
 
+  it('keeps a personal voice request pending until a household member names themself', async () => {
+    mockedTrySemanticRouter.mockResolvedValue({
+      accepted: true,
+      decision: 'accepted_e1',
+      matchedRoute: {
+        key: 'todo.list_tasks.today',
+        level: 'E1',
+        targetAgentId: 'todo',
+        plannerRequired: true,
+        directRequest: { domain: 'todo', action: 'list_tasks.today' },
+        examples: ['ma Microsoft To Do'],
+      },
+      top1Score: 0.95,
+      top2Score: 0.7,
+      margin: 0.25,
+      top1Intent: 'todo.list_tasks.today',
+      top2Intent: 'todo.list_tasks',
+      confidence: 0.95,
+    });
+    mockedRouteUserRequest.mockRejectedValue(new Error('llm_router_should_not_be_called'));
+    mockedCallTodoAgent.mockResolvedValue('Tu as deux tâches personnelles.');
+
+    const dbPath = join(tempDir, 'voice-identity.sqlite');
+    const identityDb = createConversationDb(':memory:');
+    identityDb.prepare(
+      `INSERT INTO users(user_id,email_normalized,display_name,status,created_at_ms,updated_at_ms)
+       VALUES ('loic','loic@example.test','Loïc Bourguignon','active',1,1),
+              ('chloe','chloe@example.test','Chloé Guichard','active',1,1)`
+    ).run();
+    identityDb.prepare(
+      `INSERT INTO user_roles(user_id,role_key,granted_at_ms)
+       VALUES ('loic','owner',1),('chloe','resident',1)`
+    ).run();
+    const identityRepository = new IdentityRepository(identityDb);
+    const env = makeEnv(dbPath, {
+      OPENAI_API_KEY: 'test-openai-key',
+      SEMANTIC_ROUTER_ENABLED: true,
+      SEMANTIC_ROUTER_SHADOW_MODE: false,
+      SEMANTIC_ROUTER_E1_ACTIVATION_ENABLED: true,
+      SEMANTIC_ROUTER_ACTIVATED_E1_ROUTES: 'todo.list_tasks.today',
+      OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
+      OPENAI_TTS_VOICE: 'marin',
+    });
+    const deps = makeDeps(env, []);
+    deps.identityRepository = identityRepository;
+    app.addHook('preHandler', async (request) => {
+      setRequestPrincipal(request, {
+        kind: 'service',
+        serviceId: 'home-assistant-pc',
+        permissions: ['chat', 'todo'],
+        delegatedUserId: 'loic',
+      });
+    });
+    registerIngestRoute(app, deps);
+
+    const initial = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-voice-turn-id': 'voice-identity-1' },
+      payload: {
+        threadId: 'thread-voice-identity',
+        text: "Montre mes tâches personnelles d'aujourd'hui",
+        clientContext: { channel: 'home-assistant-pc', deviceId: 'salon' },
+      },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      responseText: "OK, oui bien sûr, de qui s'agit-il ?",
+      replyMeta: { semanticDecision: 'identity_required' },
+    });
+    expect(mockedCallTodoAgent).not.toHaveBeenCalled();
+
+    const resumed = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-voice-turn-id': 'voice-identity-2' },
+      payload: {
+        threadId: 'thread-voice-identity',
+        text: 'Chloé',
+        clientContext: { channel: 'home-assistant-pc', deviceId: 'salon' },
+      },
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json().responseText).toContain('deux tâches personnelles');
+    expect(mockedCallTodoAgent).toHaveBeenCalledTimes(1);
+    identityDb.close();
+  });
+
   it('answers simple read-only status questions from proactive context cache', async () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
       HA_AGENT_MAP: 'nas:nas:NAS',
+      NAS_STATUS_ENABLED: true,
     });
     const deps = makeDeps(env);
     deps.contextCache = {
@@ -239,6 +330,57 @@ describe('/v1/ingest integration', () => {
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
+  it('keeps Culture disabled without calling an external agent', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { CULTURE_ENABLED: false });
+    registerIngestRoute(app, makeDeps(env));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-culture-disabled',
+        text: 'Trouve-moi un film au cinéma ce soir',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: 'La fonction Culture est désactivée pour le moment.',
+      replyMeta: { kind: 'culture', semanticDecision: 'disabled' },
+    });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it('keeps NAS monitoring disabled even when a collector dependency is present', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), { NAS_STATUS_ENABLED: false });
+    const deps = makeDeps(env);
+    const getStatus = jest.fn();
+    deps.nasStatus = {
+      isConfigured: () => true,
+      getStatus,
+    } as unknown as AppDeps['nasStatus'];
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-nas-disabled',
+        text: 'Quel est l’état du NAS ?',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: 'Le suivi du NAS est désactivé pour le moment.',
+      replyMeta: { kind: 'nas_status', semanticDecision: 'disabled' },
+    });
+    expect(getStatus).not.toHaveBeenCalled();
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
   it('executes an exact custom voice phrase without sending it to an AI router', async () => {
     const env = makeEnv(join(tempDir, 'conversation.sqlite'));
     const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
@@ -273,6 +415,7 @@ describe('/v1/ingest integration', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/ingest',
+      headers: { 'x-voice-turn-id': 'quick-action-voice-turn' },
       payload: {
         threadId: 'thread-quick-action',
         text: 'Éclaire le salon',
@@ -282,7 +425,7 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      responseText: "Lumière salon a été acceptée, sans confirmation de l'équipement.",
+      responseText: "C'est fait.",
       replyMeta: { source: 'quick_action', semanticDecision: 'accepted' },
     });
     expect(callService).toHaveBeenCalledWith({
@@ -291,6 +434,55 @@ describe('/v1/ingest integration', () => {
       target: { entity_id: 'light.salon' },
       serviceData: undefined,
     });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Jarvis, tamise le salon', 'dimmed', 'Salon : mode « tamisé » appliqué.'],
+    ['Jarvis, allume la cuisine', 'on', 'Cuisine : mode « allumé » appliqué.'],
+    ['Jarvis, éteins la chambre', 'off', 'Chambre : mode « éteint » appliqué.'],
+  ] as const)('routes a room lighting command through the shared room-mode service: %s', async (text, mode, expected) => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const deps = makeDeps(env);
+    const roomName = mode === 'dimmed' ? 'Salon' : mode === 'on' ? 'Cuisine' : 'Chambre';
+    const roomId = mode === 'dimmed' ? 'living' : mode === 'on' ? 'kitchen' : 'bedroom';
+    const setRoomMode = jest.fn(async (_roomId: string, _mode: string) => ({
+      roomId,
+      mode,
+      available: true,
+      deviceIds: [`${roomId}-light`],
+      operationStatus: 'succeeded' as const,
+      failedDeviceIds: [],
+    }));
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      inferDeterministicVoiceScene: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicRoomLightingMode: () => ({ roomId, roomName, mode }),
+    } as unknown as HomeCatalog;
+    deps.homeLightingService = { setRoomMode } as unknown as AppDeps['homeLightingService'];
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: `thread-room-mode-${mode}`,
+        text,
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: expected,
+      replyMeta: {
+        source: 'direct',
+        routeKey: 'home.lighting.room_mode',
+        semanticDecision: 'succeeded',
+      },
+    });
+    expect(setRoomMode).toHaveBeenCalledWith(roomId, mode);
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -354,10 +546,122 @@ describe('/v1/ingest integration', () => {
     }
   );
 
+  it('executes a deterministic multi-light command through the shared scene executor', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      getState: async (entityId: string) => ({
+        entity_id: entityId,
+        state: 'on',
+        attributes: { supported_color_modes: ['brightness'] },
+      }),
+      callService,
+    } as unknown as AppDeps['ha'];
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      inferDeterministicVoiceScene: () => ({
+        sceneId: 'voice-light-test',
+        name: 'Lumière',
+        icon: 'light',
+        steps: [
+          { deviceId: 'hue-living-ceiling-1', action: 'set_brightness', value: 18 },
+          { deviceId: 'hue-living-ceiling-2', action: 'set_brightness', value: 18 },
+        ],
+        voicePhrases: [],
+        sortOrder: 999,
+      }),
+      getMapping: (deviceId: string) => ({
+        deviceId,
+        entityId: deviceId.endsWith('-1') ? 'light.plafonnier_salon_1' : 'light.plafonnier_salon_2',
+        presetId: 'light',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      }),
+    } as unknown as HomeCatalog;
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-voice-turn-id': 'scene-voice-turn' },
+      payload: {
+        threadId: 'thread-light-scene',
+        text: 'Mets les plafonniers du salon à 18 %',
+        clientContext: { channel: 'android-voice' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: "C'est fait.",
+      replyMeta: { source: 'scene', semanticDecision: 'accepted' },
+    });
+    expect(callService).toHaveBeenCalledTimes(2);
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+  });
+
+  it('executes a deterministic single ceiling-light command without the AI router', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      getState: async (entityId: string) => ({ entity_id: entityId, state: 'off', attributes: {} }),
+      callService,
+    } as unknown as AppDeps['ha'];
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => ({
+        name: 'Plafonnier cuisine',
+        deviceId: 'hue-kitchen-ceiling',
+        action: 'turn_off',
+      }),
+      getMapping: () => ({
+        deviceId: 'hue-kitchen-ceiling',
+        entityId: 'light.plafonnier_cuisine',
+        presetId: 'light',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      }),
+    } as unknown as HomeCatalog;
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-light-action',
+        text: 'Éteins le plafonnier de la cuisine',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      responseText: 'Plafonnier cuisine éteint.',
+      replyMeta: {
+        source: 'deterministic_home_action',
+        routeKey: 'home.light.turn_off',
+        semanticDecision: 'succeeded',
+      },
+    });
+    expect(callService).toHaveBeenCalledWith({
+      domain: 'light',
+      service: 'turn_off',
+      target: { entity_id: 'light.plafonnier_cuisine' },
+      serviceData: undefined,
+    });
+    expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+    expect(mockedTrySemanticRouter).not.toHaveBeenCalled();
+  });
+
   it('refreshes stale proactive context before answering from cache', async () => {
     const dbPath = join(tempDir, 'conversation.sqlite');
     const env = makeEnv(dbPath, {
       HA_AGENT_MAP: 'nas:nas:NAS',
+      NAS_STATUS_ENABLED: true,
     });
     const deps = makeDeps(env);
     const staleSnapshot = {
@@ -842,7 +1146,7 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json().responseText).toBe(
-      'TV et TV chambre, commandes envoyées sans confirmation immédiate.'
+      'TV et TV chambre, commandes envoyées mais résultat incertain.'
     );
     expect(callService).toHaveBeenCalledTimes(2);
     expect(callService).toHaveBeenCalledWith(expect.objectContaining({
@@ -895,7 +1199,7 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().responseText).toBe('Film, commandes envoyées sans confirmation immédiate.');
+    expect(response.json().responseText).toBe('Film, commandes envoyées mais résultat incertain.');
     expect(callService).toHaveBeenCalledWith(expect.objectContaining({
       domain: 'media_player', service: 'turn_off', target: { entity_id: 'media_player.living_tv' },
     }));
@@ -2039,7 +2343,7 @@ describe('/v1/ingest integration', () => {
     expect(ackPos).toBeGreaterThanOrEqual(0);
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
-    expect(body).toContain('Je cherche ca, une seconde.');
+    expect(body).toContain('Je cherche ça, un instant.');
     expect(body).toContain('zone a trafic limite');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
@@ -2696,7 +3000,7 @@ describe('/v1/ingest integration', () => {
     expect(ackPos).toBeGreaterThanOrEqual(0);
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
-    expect(body).toContain('Deux secondes, je consulte tes emails.');
+    expect(body).toContain('Je consulte tes emails, un instant.');
     expect(body).toContain('2 emails');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -2746,7 +3050,7 @@ describe('/v1/ingest integration', () => {
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { threadId: string; responseText: string };
     expect(payload.threadId).toBe('thread-semantic-e1-todo-add-live');
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
 
@@ -2758,7 +3062,7 @@ describe('/v1/ingest integration', () => {
     const historyPayload = history.json() as { messages: Array<{ role: string; text: string }> };
     expect(
       historyPayload.messages.some(
-        (m) => m.role === 'assistant' && m.text.includes('modifie des donnees')
+        (m) => m.role === 'assistant' && m.text.includes('modifie des données')
       )
     ).toBe(true);
 
@@ -2837,7 +3141,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(payload.responseText).toContain('Tu confirmes');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
@@ -2887,7 +3191,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -2936,7 +3240,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3051,7 +3355,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3109,8 +3413,8 @@ describe('/v1/ingest integration', () => {
     expect(ackPos).toBeGreaterThanOrEqual(0);
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
-    expect(body).toContain('Deux secondes, je regarde tes taches.');
-    expect(body).toContain('modifie des donnees');
+    expect(body).toContain('Je regarde tes tâches, un instant.');
+    expect(body).toContain('modifie des données');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -3158,7 +3462,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3207,7 +3511,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3256,7 +3560,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3305,7 +3609,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallTodoAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3354,7 +3658,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
@@ -3468,8 +3772,8 @@ describe('/v1/ingest integration', () => {
     expect(ackPos).toBeGreaterThanOrEqual(0);
     expect(responsePos).toBeGreaterThanOrEqual(0);
     expect(ackPos).toBeLessThan(responsePos);
-    expect(body).toContain('Deux secondes, je consulte tes emails.');
-    expect(body).toContain('modifie des donnees');
+    expect(body).toContain('Je consulte tes emails, un instant.');
+    expect(body).toContain('modifie des données');
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });
 
@@ -3644,7 +3948,7 @@ describe('/v1/ingest integration', () => {
 
     expect(res.statusCode).toBe(200);
     const payload = res.json() as { responseText: string };
-    expect(payload.responseText).toContain('modifie des donnees');
+    expect(payload.responseText).toContain('modifie des données');
     expect(mockedCallMailAgent).not.toHaveBeenCalled();
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
   });

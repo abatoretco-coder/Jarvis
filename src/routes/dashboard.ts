@@ -1661,6 +1661,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
     ]);
     let weather: Record<string, unknown> | null = null;
     let weatherError: string | null = null;
+    let weatherStale = false;
     try {
       if (deviceLocation) {
         weather = await buildWeatherPayloadFromCoordinates(deviceLocation);
@@ -1670,7 +1671,15 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       }
     } catch (error) {
       weatherError = 'weather_unavailable';
-      app.log.warn({ error }, 'dashboard_weather_failed');
+      const staleWeather = cached?.payload.weather;
+      if (staleWeather && typeof staleWeather === 'object') {
+        weather = staleWeather as Record<string, unknown>;
+        weatherStale = true;
+      }
+      app.log.warn(
+        { errorCode: error instanceof Error ? error.message : String(error), usingStaleWeather: weatherStale },
+        'dashboard_weather_failed'
+      );
     }
     const agenda = googleAgenda;
 
@@ -1679,7 +1688,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       generatedAt: new Date().toISOString(),
       weather,
       weatherStatus: weather
-        ? 'ok'
+        ? weatherStale ? 'stale' : 'ok'
         : weatherError
           ? 'error'
           : 'not_requested',

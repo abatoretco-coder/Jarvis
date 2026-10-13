@@ -46,6 +46,13 @@ export type OAuthTransaction = {
 };
 
 export type ManagedHousehold = { householdId: string; name: string };
+export type HouseholdCredential = {
+  userId: string;
+  displayName: string;
+  connectionId: string;
+  credentialId: string;
+  encrypted: EncryptedCredential;
+};
 
 function stateHash(state: string): string {
   return createHash('sha256').update(state, 'utf8').digest('hex');
@@ -399,6 +406,43 @@ export class IntegrationRepository {
         keyVersion: row.key_version,
       },
     } : null;
+  }
+
+  getSharedHouseholdCredentials(requesterUserId: string, provider: string): HouseholdCredential[] {
+    const rows = this.db.prepare(
+      `SELECT owner.user_id userId,
+        COALESCE(NULLIF(owner.display_name,''),owner.email_normalized) displayName,
+        c.connection_id connectionId,c.credential_reference credentialId,
+        secret.ciphertext,secret.iv,secret.auth_tag authTag,secret.key_version keyVersion
+       FROM household_memberships requester
+       JOIN household_memberships member
+         ON member.household_id=requester.household_id AND member.status='active'
+       JOIN users owner ON owner.user_id=member.user_id AND owner.status='active'
+       JOIN daily_life_calendar_shares sharing
+         ON sharing.household_id=member.household_id AND sharing.user_id=member.user_id
+       JOIN integration_connections c
+         ON c.owner_user_id=member.user_id AND c.provider=?
+        AND c.connection_kind='personal' AND c.status='active'
+       JOIN integration_credentials secret ON secret.credential_id=c.credential_reference
+       WHERE requester.user_id=? AND requester.status='active'
+       ORDER BY CASE member.role_key WHEN 'owner' THEN 0 WHEN 'resident' THEN 1 ELSE 2 END,
+         owner.display_name,c.updated_at_ms DESC`
+    ).all(provider, requesterUserId) as Array<{
+      userId: string; displayName: string; connectionId: string; credentialId: string;
+      ciphertext: string; iv: string; authTag: string; keyVersion: number;
+    }>;
+    const firstPerUser = new Map<string, HouseholdCredential>();
+    for (const row of rows) {
+      if (firstPerUser.has(row.userId)) continue;
+      firstPerUser.set(row.userId, {
+        userId: row.userId,
+        displayName: row.displayName,
+        connectionId: row.connectionId,
+        credentialId: row.credentialId,
+        encrypted: { ciphertext: row.ciphertext, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion },
+      });
+    }
+    return [...firstPerUser.values()];
   }
 
   updateCredential(

@@ -5,11 +5,11 @@
   "weatherPrefixes": ["weather."],
   "searchPrefix": "search",
   "responses": {
-    "mailOnly": "Deux secondes, je consulte tes emails.",
-    "todoOnly": "Deux secondes, je regarde tes taches.",
-    "calendarOnly": "Je regarde ton agenda, une seconde.",
-    "weatherOnly": "Je regarde la meteo, une seconde.",
-    "searchOnly": "Je cherche ca, une seconde.",
-    "default": "Deux secondes, je traite ta demande."
+    "mailOnly": "Je consulte tes emails, un instant.",
+    "todoOnly": "Je regarde tes tâches, un instant.",
+    "calendarOnly": "Je regarde ton agenda, un instant.",
+    "weatherOnly": "Je regarde la météo, un instant.",
+    "searchOnly": "Je cherche ça, un instant.",
+    "default": "Je traite ta demande, un instant."
   }
 }

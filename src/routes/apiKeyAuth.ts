@@ -18,7 +18,9 @@ export function normalizeHeaderValue(value: string | string[] | undefined): stri
   return undefined;
 }
 
-export function parseAuthorizationBearer(authorizationHeader: string | undefined): string | undefined {
+export function parseAuthorizationBearer(
+  authorizationHeader: string | undefined
+): string | undefined {
   if (!authorizationHeader) return undefined;
   const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
   if (!match) return undefined;
@@ -36,7 +38,10 @@ export function isAuthorizedApiKey(req: FastifyRequest, env: Env): boolean {
   return Boolean(getAuthorizedServicePrincipal(req, env));
 }
 
-export function getAuthorizedServicePrincipal(req: FastifyRequest, env: Env): ServicePrincipal | undefined {
+export function getAuthorizedServicePrincipal(
+  req: FastifyRequest,
+  env: Env
+): ServicePrincipal | undefined {
   const providedApiKey = normalizeHeaderValue(req.headers['x-api-key']);
   const providedBearer = parseAuthorizationBearer(normalizeHeaderValue(req.headers.authorization));
   const provided = [providedApiKey, providedBearer].filter((item): item is string => Boolean(item));
@@ -48,9 +53,19 @@ export function getAuthorizedServicePrincipal(req: FastifyRequest, env: Env): Se
       token: string;
       permissions: PermissionKey[];
     }>;
+    let delegatedUsers: Record<string, string> = {};
+    if (env.SERVICE_DELEGATED_USERS_JSON) {
+      delegatedUsers = JSON.parse(env.SERVICE_DELEGATED_USERS_JSON) as Record<string, string>;
+    }
     for (const service of services) {
       if (provided.some((token) => safeTokenEquals(service.token, token))) {
-        return { kind: 'service', serviceId: service.id, permissions: [...new Set(service.permissions)] };
+        const delegatedUserId = delegatedUsers[service.id];
+        return {
+          kind: 'service',
+          serviceId: service.id,
+          permissions: [...new Set(service.permissions)],
+          ...(delegatedUserId ? { delegatedUserId } : {}),
+        };
       }
     }
   }

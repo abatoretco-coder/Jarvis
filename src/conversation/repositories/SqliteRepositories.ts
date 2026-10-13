@@ -400,7 +400,7 @@ export class SqliteThreadRepository implements ThreadRepository {
 export class SqliteMessageRepository implements MessageRepository {
   constructor(private readonly db: Database.Database) {}
 
-  async appendMessage(input: { threadId: string; role: MessageRole; content: string; createdAtMs?: number }): Promise<number> {
+  async appendMessage(input: { threadId: string; role: MessageRole; content: string; spokenContent?: string; createdAtMs?: number }): Promise<number> {
     const normalized = normalizeContent(input.content);
     if (!normalized) {
       return 0;
@@ -418,10 +418,10 @@ export class SqliteMessageRepository implements MessageRepository {
       const nextSeq = Number(row.max_seq) + 1;
       this.db
         .prepare(
-          `INSERT INTO conversation_messages (thread_id, seq, role, content, created_at_ms)
-           VALUES (?, ?, ?, ?, ?)`
+          `INSERT INTO conversation_messages (thread_id, seq, role, content, spoken_content, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?)`
         )
-        .run(input.threadId, nextSeq, input.role, normalized, now);
+        .run(input.threadId, nextSeq, input.role, normalized, input.spokenContent ? normalizeContent(input.spokenContent) : null, now);
       if (input.role === 'user') {
         this.db
           .prepare(
@@ -441,7 +441,7 @@ export class SqliteMessageRepository implements MessageRepository {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql}
@@ -453,6 +453,7 @@ export class SqliteMessageRepository implements MessageRepository {
       seq: number;
       role: MessageRole;
       content: string;
+      spoken_content: string | null;
       created_at_ms: number;
     }>;
 
@@ -463,6 +464,7 @@ export class SqliteMessageRepository implements MessageRepository {
         seq: Number(row.seq),
         role: row.role,
         content: row.content,
+        ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
         createdAtMs: Number(row.created_at_ms),
       }));
   }
@@ -471,7 +473,7 @@ export class SqliteMessageRepository implements MessageRepository {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql} AND m.seq > ?
@@ -483,6 +485,7 @@ export class SqliteMessageRepository implements MessageRepository {
       seq: number;
       role: MessageRole;
       content: string;
+      spoken_content: string | null;
       created_at_ms: number;
     }>;
 
@@ -491,6 +494,7 @@ export class SqliteMessageRepository implements MessageRepository {
       seq: Number(row.seq),
       role: row.role,
       content: row.content,
+      ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
       createdAtMs: Number(row.created_at_ms),
     }));
   }
@@ -499,7 +503,7 @@ export class SqliteMessageRepository implements MessageRepository {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql} AND m.seq > ? AND m.seq <= ?
@@ -510,6 +514,7 @@ export class SqliteMessageRepository implements MessageRepository {
       seq: number;
       role: MessageRole;
       content: string;
+      spoken_content: string | null;
       created_at_ms: number;
     }>;
 
@@ -518,6 +523,7 @@ export class SqliteMessageRepository implements MessageRepository {
       seq: Number(row.seq),
       role: row.role,
       content: row.content,
+      ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
       createdAtMs: Number(row.created_at_ms),
     }));
   }

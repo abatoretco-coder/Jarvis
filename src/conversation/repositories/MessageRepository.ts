@@ -5,11 +5,12 @@ export type MessageRecord = {
   seq: number;
   role: MessageRole;
   content: string;
+  spokenContent?: string;
   createdAtMs: number;
 };
 
 export interface MessageRepository {
-  appendMessage(input: { threadId: string; role: MessageRole; content: string; createdAtMs?: number }): Promise<number>;
+  appendMessage(input: { threadId: string; role: MessageRole; content: string; spokenContent?: string; createdAtMs?: number }): Promise<number>;
   getRecentMessages(threadId: string, limit: number): Promise<MessageRecord[]>;
   getMessagesAfterSeq(threadId: string, afterExclusiveSeq: number, limit: number): Promise<MessageRecord[]>;
   getMessagesRange(threadId: string, fromExclusiveSeq: number, toInclusiveSeq: number): Promise<MessageRecord[]>;

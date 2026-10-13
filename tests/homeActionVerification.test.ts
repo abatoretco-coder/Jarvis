@@ -81,6 +81,47 @@ describe('home action state verification', () => {
     expect(getState).toHaveBeenCalledTimes(4);
   });
 
+  test('confirms light brightness from the observed attribute instead of the HTTP acknowledgement', async () => {
+    const getState = jest.fn<HomeAssistantClient['getState']>()
+      .mockResolvedValueOnce({ entity_id: 'light.salon', state: 'on', attributes: { supported_color_modes: ['brightness'], brightness: 50 } })
+      .mockResolvedValueOnce({ entity_id: 'light.salon', state: 'on', attributes: { supported_color_modes: ['brightness'], brightness: 128 } });
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+
+    await expect(executeCatalogHomeAction({
+      catalog: catalog('light.salon'),
+      ha: { getState, callService } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'set_brightness', value: 50 },
+      statePollAttempts: 1,
+    })).resolves.toMatchObject({ operationStatus: 'succeeded', observedState: 'on' });
+    expect(callService).toHaveBeenCalledTimes(1);
+  });
+
+  test('confirms climate targets and reports unavailable equipment as uncertain', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    const confirmed = executeCatalogHomeAction({
+      catalog: catalog('climate.office'),
+      ha: {
+        callService,
+        getState: jest.fn<HomeAssistantClient['getState']>()
+          .mockResolvedValueOnce({ entity_id: 'climate.office', state: 'heat', attributes: { min_temp: 5, max_temp: 30, temperature: 19 } })
+          .mockResolvedValueOnce({ entity_id: 'climate.office', state: 'heat', attributes: { temperature: 21 } }),
+      } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'set_temperature', value: 21 },
+      statePollAttempts: 1,
+    });
+    await expect(confirmed).resolves.toMatchObject({ operationStatus: 'succeeded' });
+
+    await expect(executeCatalogHomeAction({
+      catalog: catalog('switch.water_heater'),
+      ha: {
+        callService,
+        getState: jest.fn(async () => ({ entity_id: 'switch.water_heater', state: 'unavailable', attributes: {} })),
+      } as unknown as HomeAssistantClient,
+      command: { deviceId: 'device-1', action: 'turn_on' },
+      statePollAttempts: 1,
+    })).resolves.toEqual({ ok: true, domain: 'switch', operationStatus: 'uncertain' });
+  });
+
   test('rejects robot commands that contradict the live state before mutation', async () => {
     const getState = jest.fn<HomeAssistantClient['getState']>(async () => ({
       entity_id: 'vacuum.robot', state: 'cleaning', attributes: {},
@@ -147,6 +188,40 @@ describe('home action state verification', () => {
     expect(callService).toHaveBeenCalledTimes(1);
   });
 
+  test('rejects a second command for the same device while the first one is still in flight', async () => {
+    let releaseFirstCommand!: () => void;
+    const firstCommandPending = new Promise<void>((resolve) => {
+      releaseFirstCommand = resolve;
+    });
+    const sharedCatalog = catalog('light.salon');
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => {
+      await firstCommandPending;
+      return { status: 200, data: [] };
+    });
+    const getState = jest.fn<HomeAssistantClient['getState']>(async () => ({
+      entity_id: 'light.salon', state: 'off', attributes: {},
+    }));
+    const ha = { getState, callService } as unknown as HomeAssistantClient;
+
+    const first = executeCatalogHomeAction({
+      catalog: sharedCatalog,
+      ha,
+      command: { deviceId: 'device-1', action: 'turn_on' },
+      statePollAttempts: 1,
+    });
+    await Promise.resolve();
+
+    await expect(executeCatalogHomeAction({
+      catalog: sharedCatalog,
+      ha,
+      command: { deviceId: 'device-1', action: 'turn_off' },
+    })).resolves.toEqual({ ok: false, status: 409, code: 'home_action_in_progress' });
+
+    releaseFirstCommand();
+    await first;
+    expect(callService).toHaveBeenCalledTimes(1);
+  });
+
   test('aggregates confirmed, accepted, partial, failed and uncertain scene outcomes', () => {
     const step = (outcome: 'confirmed' | 'accepted' | 'failed' | 'uncertain') => ({
       deviceId: outcome,
@@ -204,5 +279,43 @@ describe('home action state verification', () => {
       errorCode: 'client_scope_forbidden',
     });
     expect(callService).not.toHaveBeenCalled();
+  });
+
+  test('keeps an all-off scene successful when the television is already off', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    const getState = jest.fn<HomeAssistantClient['getState']>(async (entityId) => ({
+      entity_id: entityId,
+      state: 'off',
+      attributes: {},
+    }));
+    const mappings = {
+      light: { deviceId: 'light', entityId: 'light.salon' },
+      tv: { deviceId: 'tv', entityId: 'media_player.tv', presetId: 'television' },
+    };
+
+    const result = await executeCatalogHomeScene({
+      catalog: {
+        getMapping: (deviceId: keyof typeof mappings) => mappings[deviceId],
+      } as unknown as HomeCatalog,
+      ha: { callService, getState } as unknown as HomeAssistantClient,
+      scene: {
+        sceneId: 'leave-home',
+        name: 'Tout couper',
+        icon: 'home',
+        steps: [
+          { deviceId: 'light', action: 'turn_off' },
+          { deviceId: 'tv', action: 'turn_off' },
+        ],
+        voicePhrases: ['je suis parti'],
+        sortOrder: 0,
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'success', outcome: 'confirmed' });
+    expect(callService).toHaveBeenCalledTimes(1);
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'light',
+      service: 'turn_off',
+    }));
   });
 });

@@ -21,6 +21,12 @@ export type HomeAssistantSyncPreview = {
   changes: HomeAssistantSyncChange[];
   unchanged: number;
   skipped: Array<{ deviceId: string; reason: 'entity_not_registered' | 'entity_without_device' }>;
+  conflicts: Array<{
+    deviceIds: string[];
+    reason: 'duplicate_mapping' | 'name_changed_in_home_assistant' | 'area_changed_in_home_assistant';
+    current?: string;
+    desired?: string;
+  }>;
 };
 
 export type HomeAssistantSyncResult = HomeAssistantSyncPreview & {
@@ -84,6 +90,7 @@ export class HomeAssistantRegistrySyncService {
     const devicesById = new Map(state.devices.map((device) => [device.id, device]));
     const desiredByHaDevice = new Map<string, { roomId: string; deviceId: string }>();
     const skipped: HomeAssistantSyncPreview['skipped'] = [];
+    const conflicts: HomeAssistantSyncPreview['conflicts'] = [];
     let unchanged = 0;
 
     for (const device of projection.devices) {
@@ -97,7 +104,14 @@ export class HomeAssistantRegistrySyncService {
         continue;
       }
       const duplicate = desiredByHaDevice.get(entity.device_id);
-      if (duplicate && duplicate.roomId !== device.roomId) throw new Error('home_assistant_sync_conflict');
+      if (duplicate) {
+        conflicts.push({
+          deviceIds: [duplicate.deviceId, device.deviceId],
+          reason: 'duplicate_mapping',
+          current: entity.device_id,
+        });
+        continue;
+      }
       desiredByHaDevice.set(entity.device_id, { roomId: device.roomId, deviceId: device.deviceId });
       const registryDevice = devicesById.get(entity.device_id);
       if (!registryDevice) {
@@ -106,6 +120,24 @@ export class HomeAssistantRegistrySyncService {
       }
       const room = projection.rooms.find((candidate) => candidate.roomId === device.roomId);
       const area = targetAreaByRoom.get(device.roomId);
+      if (registryDevice.name_by_user && registryDevice.name_by_user !== device.name) {
+        conflicts.push({
+          deviceIds: [device.deviceId],
+          reason: 'name_changed_in_home_assistant',
+          current: registryDevice.name_by_user,
+          desired: device.name,
+        });
+        continue;
+      }
+      if (registryDevice.area_id && (!area || registryDevice.area_id !== area.area_id)) {
+        conflicts.push({
+          deviceIds: [device.deviceId],
+          reason: 'area_changed_in_home_assistant',
+          current: registryDevice.area_id,
+          desired: area?.area_id ?? room?.name ?? device.roomId,
+        });
+        continue;
+      }
       const needsArea = !area || registryDevice.area_id !== area.area_id;
       const needsName = registryDevice.name_by_user !== device.name;
       if (needsArea || needsName) {
@@ -117,7 +149,21 @@ export class HomeAssistantRegistrySyncService {
         });
       } else unchanged += 1;
     }
-    return { changes, unchanged, skipped };
+    const conflictedDeviceIds = new Set(conflicts.flatMap((conflict) => conflict.deviceIds));
+    const skippedDeviceIds = new Set(skipped.map((item) => item.deviceId));
+    const actionableRoomIds = new Set(
+      projection.devices
+        .filter((device) => !conflictedDeviceIds.has(device.deviceId) && !skippedDeviceIds.has(device.deviceId))
+        .map((device) => device.roomId)
+    );
+    return {
+      changes: changes.filter((change) => change.kind === 'create_area'
+        ? actionableRoomIds.has(change.roomId)
+        : !conflictedDeviceIds.has(change.deviceId)),
+      unchanged,
+      skipped,
+      conflicts,
+    };
   }
 
   async preview(): Promise<HomeAssistantSyncPreview> {
@@ -145,8 +191,10 @@ export class HomeAssistantRegistrySyncService {
       const entitiesById = new Map(current.entities.map((entity) => [entity.entity_id, entity]));
       const devicesById = new Map(current.devices.map((device) => [device.id, device]));
       const roomsById = new Map(projection.rooms.map((room) => [room.roomId, room]));
+      const conflictedDeviceIds = new Set(preview.conflicts.flatMap((conflict) => conflict.deviceIds));
 
       for (const mapping of projection.devices) {
+        if (conflictedDeviceIds.has(mapping.deviceId)) continue;
         const entity = entitiesById.get(mapping.entityId);
         if (!entity?.device_id) continue;
         const registryDevice = devicesById.get(entity.device_id);

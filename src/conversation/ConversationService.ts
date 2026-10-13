@@ -145,7 +145,12 @@ export class ConversationService {
     throw new Error('home_assistant_conversation_failed:exhausted_retries');
   }
 
-  async persistMessages(threadId: string, userText: string, assistantText: string): Promise<void> {
+  async persistMessages(
+    threadId: string,
+    userText: string,
+    assistantText: string,
+    options: { spokenText?: string } = {}
+  ): Promise<void> {
     const now = Date.now();
     await this.threadRepository.getOrCreate(threadId);
     await this.messageRepository.appendMessage({
@@ -158,6 +163,9 @@ export class ConversationService {
       threadId,
       role: 'assistant',
       content: toSingleParagraphPlainText(assistantText),
+      ...(options.spokenText
+        ? { spokenContent: toSingleParagraphPlainText(options.spokenText) }
+        : {}),
       createdAtMs: now + 1,
     });
     const interactionCount = await this.threadRepository.incrementInteractionCount(threadId);

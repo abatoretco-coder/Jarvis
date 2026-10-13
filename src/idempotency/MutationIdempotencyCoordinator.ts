@@ -6,7 +6,23 @@ export type CachedMutationResponse = {
   payload: string | Buffer;
 };
 
+export type PersistedMutationEntry = {
+  fingerprint: string;
+  state: 'pending' | 'completed';
+  response?: CachedMutationResponse;
+  expiresAt: number;
+};
+
+export interface MutationIdempotencyStore {
+  get(identity: string, idempotencyKey: string, now: number): PersistedMutationEntry | undefined;
+  reserve(identity: string, idempotencyKey: string, fingerprint: string, createdAt: number, expiresAt: number): 'created' | 'exists';
+  complete(identity: string, idempotencyKey: string, response: CachedMutationResponse): void;
+  prune(now: number): void;
+}
+
 type Entry = {
+  identity: string;
+  idempotencyKey: string;
   fingerprint: string;
   createdAt: number;
   expiresAt: number;
@@ -46,6 +62,7 @@ export class MutationIdempotencyCoordinator {
       maxEntries?: number;
       pendingTimeoutMs?: number;
       now?: () => number;
+      store?: MutationIdempotencyStore;
     } = {}
   ) {}
 
@@ -59,6 +76,25 @@ export class MutationIdempotencyCoordinator {
       return { kind: 'replay', response: existing.promise };
     }
 
+    const persisted = this.options.store?.get(identity, idempotencyKey, now);
+    if (persisted) {
+      if (persisted.fingerprint !== fingerprint) return { kind: 'conflict' };
+      if (persisted.state === 'completed' && persisted.response) {
+        return { kind: 'replay', response: Promise.resolve(persisted.response) };
+      }
+      return {
+        kind: 'replay',
+        response: Promise.resolve({
+          statusCode: 503,
+          contentType: 'application/json; charset=utf-8',
+          payload: JSON.stringify({
+            error: 'mutation_result_unknown',
+            operationStatus: 'uncertain',
+          }),
+        }),
+      };
+    }
+
     const maxEntries = this.options.maxEntries ?? 2_048;
     if (this.entries.size >= maxEntries) return { kind: 'capacity' };
 
@@ -69,6 +105,8 @@ export class MutationIdempotencyCoordinator {
     const ttlMs = this.options.ttlMs ?? 5 * 60_000;
     const pendingTimeoutMs = this.options.pendingTimeoutMs ?? 65_000;
     const entry: Entry = {
+      identity,
+      idempotencyKey,
       fingerprint,
       createdAt: now,
       expiresAt: now + ttlMs,
@@ -78,13 +116,27 @@ export class MutationIdempotencyCoordinator {
       pendingTimer: setTimeout(() => {
         if (entry.settled) return;
         entry.settled = true;
-        entry.resolve({
+        const response: CachedMutationResponse = {
           statusCode: 503,
           contentType: 'application/json; charset=utf-8',
-          payload: JSON.stringify({ error: 'mutation_result_unknown' }),
-        });
+          payload: JSON.stringify({
+            error: 'mutation_result_unknown',
+            operationStatus: 'uncertain',
+          }),
+        };
+        try {
+          this.options.store?.complete(entry.identity, entry.idempotencyKey, response);
+        } catch {
+          // The in-memory waiter must still be released if persistence is no
+          // longer available during shutdown.
+        }
+        entry.resolve(response);
       }, pendingTimeoutMs),
     };
+    if (this.options.store?.reserve(identity, idempotencyKey, fingerprint, now, entry.expiresAt) === 'exists') {
+      clearTimeout(entry.pendingTimer);
+      return this.reserve(identity, idempotencyKey, fingerprint);
+    }
     entry.pendingTimer.unref?.();
     this.entries.set(cacheKey, entry);
     return { kind: 'owner', cacheKey };
@@ -95,10 +147,12 @@ export class MutationIdempotencyCoordinator {
     if (!entry || entry.settled) return;
     entry.settled = true;
     clearTimeout(entry.pendingTimer);
+    this.options.store?.complete(entry.identity, entry.idempotencyKey, response);
     entry.resolve(response);
   }
 
   private prune(now: number): void {
+    this.options.store?.prune(now);
     for (const [key, entry] of this.entries) {
       if (entry.expiresAt <= now && entry.settled) {
         clearTimeout(entry.pendingTimer);

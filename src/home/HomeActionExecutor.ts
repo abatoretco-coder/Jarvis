@@ -7,7 +7,7 @@ import { isHassState } from '../hass';
 import { isStreamDeckHomeActionAllowed, isStreamDeckPrincipal } from '../identity/oidcClientPolicy';
 import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
-import { homeActionStateConflict } from './HomeActionPolicy';
+import { homeActionStateAlreadySatisfied, homeActionStateConflict } from './HomeActionPolicy';
 import { homeActionTiming } from './HomeActionTiming';
 import { type HomeActionName, type HomeCatalog, type HomeScene, isHomeActionValueValid, TV_REMOTE_KEYS } from './HomeCatalog';
 import { ensureTelevisionReady } from './TelevisionReadiness';
@@ -17,6 +17,13 @@ export type ExecutableHomeAction = {
   action: HomeActionName;
   value?: number;
   option?: string;
+};
+
+export type ExecutableLightProfile = {
+  deviceId: string;
+  brightnessPercent: number;
+  colorTemperatureKelvin?: number;
+  transitionSeconds?: number;
 };
 
 export type HomeActionExecution =
@@ -35,6 +42,7 @@ export type HomeActionExecution =
         | 'home_action_unsupported'
         | 'home_action_option_invalid'
         | 'home_action_state_conflict'
+        | 'home_action_in_progress'
         | 'client_scope_forbidden'
         | 'guest_action_forbidden'
         | 'home_device_state_timeout'
@@ -85,6 +93,96 @@ function serviceDataFor(command: ExecutableHomeAction): Record<string, unknown> 
   if (command.action === 'play_channel') return { media_content_id: command.option, media_content_type: 'channel' };
   if (['set_suction_mode', 'set_mop_mode'].includes(command.action)) return { option: command.option };
   return undefined;
+}
+
+function numericAttribute(state: unknown, key: string): number | null {
+  if (!isHassState(state) || !state.attributes || typeof state.attributes !== 'object') return null;
+  const value = Number((state.attributes as Record<string, unknown>)[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function attribute(state: unknown, key: string): unknown {
+  return isHassState(state) && state.attributes && typeof state.attributes === 'object'
+    ? (state.attributes as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function expectedActionState(
+  state: unknown,
+  domain: string,
+  command: ExecutableHomeAction
+): boolean | null {
+  if (!isHassState(state)) return null;
+  if (state.state === 'unknown' || state.state === 'unavailable') return false;
+  if (command.action === 'turn_off') return state.state === 'off';
+  if (command.action === 'turn_on') {
+    return ['media_player', 'climate', 'water_heater'].includes(domain)
+      ? state.state !== 'off'
+      : state.state === 'on';
+  }
+  if (command.action === 'set_brightness') {
+    const brightness = numericAttribute(state, 'brightness');
+    return brightness === null || command.value === undefined
+      ? null
+      : Math.abs((brightness / 255) * 100 - command.value) <= 2;
+  }
+  if (command.action === 'set_color') {
+    const rgb = attribute(state, 'rgb_color');
+    const expected = command.option?.match(/[0-9a-f]{2}/giu)?.map((part) => Number.parseInt(part, 16));
+    return !Array.isArray(rgb) || !expected || expected.length !== 3
+      ? null
+      : expected.every((value, index) => Math.abs(Number(rgb[index]) - value) <= 5);
+  }
+  if (command.action === 'set_temperature') {
+    const target = numericAttribute(state, 'temperature');
+    return target === null || command.value === undefined ? null : Math.abs(target - command.value) <= 0.2;
+  }
+  if (command.action === 'set_temperature_offset') {
+    const observed = Number(state.state);
+    return !Number.isFinite(observed) || command.value === undefined ? null : Math.abs(observed - command.value) <= 0.1;
+  }
+  if (command.action === 'set_hvac_mode') return state.state === command.option;
+  if (command.action === 'set_preset_mode') return attribute(state, 'preset_mode') === command.option;
+  if (command.action === 'set_operation_mode') {
+    return state.state === command.option
+      || attribute(state, 'operation_mode') === command.option
+      || attribute(state, 'current_operation') === command.option;
+  }
+  if (command.action === 'set_away_mode') return attribute(state, 'away_mode') === (command.option === 'on');
+  if (['set_eco_mode', 'set_boost_mode', 'set_antilegionella', 'set_child_lock', 'set_preheating'].includes(command.action)) {
+    return state.state === command.option;
+  }
+  if (command.action === 'set_volume') {
+    const volume = numericAttribute(state, 'volume_level');
+    return volume === null || command.value === undefined ? null : Math.abs(volume * 100 - command.value) <= 2;
+  }
+  if (command.action === 'mute' || command.action === 'unmute') {
+    return attribute(state, 'is_volume_muted') === (command.action === 'mute');
+  }
+  if (command.action === 'select_source') return attribute(state, 'source') === command.option;
+  if (command.action === 'set_suction_mode' || command.action === 'set_mop_mode') return state.state === command.option;
+  if (domain === 'vacuum' && command.action === 'start') return state.state === 'cleaning';
+  if (domain === 'vacuum' && command.action === 'stop') return ['idle', 'paused', 'docked'].includes(state.state);
+  if (domain === 'vacuum' && command.action === 'return_to_base') return ['returning', 'docked'].includes(state.state);
+  if (domain === 'media_player' && command.action === 'media_play') return state.state === 'playing';
+  if (domain === 'media_player' && command.action === 'media_pause') return state.state === 'paused';
+  if (domain === 'media_player' && command.action === 'media_stop') return ['idle', 'off', 'paused'].includes(state.state);
+  if (domain === 'cover' && command.action === 'open') return state.state === 'open';
+  if (domain === 'cover' && command.action === 'close') return state.state === 'closed';
+  return null;
+}
+
+function actionHasVerifiableOutcome(domain: string, command: ExecutableHomeAction): boolean {
+  return [
+    'turn_on', 'turn_off', 'set_brightness', 'set_color', 'set_temperature',
+    'set_temperature_offset', 'set_hvac_mode', 'set_preset_mode', 'set_operation_mode',
+    'set_away_mode', 'set_eco_mode', 'set_boost_mode', 'set_antilegionella',
+    'set_child_lock', 'set_preheating', 'set_volume', 'mute', 'unmute', 'select_source',
+    'set_suction_mode', 'set_mop_mode',
+  ].includes(command.action)
+    || (domain === 'vacuum' && ['start', 'stop', 'return_to_base'].includes(command.action))
+    || (domain === 'media_player' && ['media_play', 'media_pause', 'media_stop'].includes(command.action))
+    || (domain === 'cover' && ['open', 'close'].includes(command.action));
 }
 
 export type ResolvedCatalogHomeAction =
@@ -159,6 +257,21 @@ export function resolveCatalogHomeAction(
       call: { domain: 'button', service: 'press', target: { entity_id: target } },
     };
   }
+  if (domain === 'media_player' && mapping.presetId === 'television' && command.action === 'type_text') {
+    return {
+      ok: true,
+      domain,
+      call: {
+        domain: 'webostv',
+        service: 'command',
+        target: { entity_id: mapping.entityId },
+        serviceData: {
+          command: 'com.webos.service.ime/insertText',
+          payload: { text: command.option, replace: false },
+        },
+      },
+    };
+  }
   if (domain === 'climate' && command.action === 'set_temperature_offset') {
     if (!mapping.climate?.offsetEntityId) return { ok: false, status: 400, code: 'home_action_unsupported', domain };
     return { ok: true, domain, call: { domain: 'number', service: 'set_value', target: { entity_id: mapping.climate.offsetEntityId }, serviceData: serviceDataFor(command) } };
@@ -191,6 +304,109 @@ export function resolveCatalogHomeAction(
   };
 }
 
+export async function executeCatalogLightProfile(input: {
+  catalog: HomeCatalog;
+  ha: HomeAssistantClient;
+  profile: ExecutableLightProfile;
+  wait?: (milliseconds: number) => Promise<void>;
+  statePollAttempts?: number;
+}): Promise<HomeActionExecution> {
+  const mapping = input.catalog.getMapping(input.profile.deviceId);
+  if (!mapping) return { ok: false, status: 404, code: 'home_device_not_found' };
+  if (!mapping.entityId) return { ok: false, status: 409, code: 'home_device_not_mapped' };
+  if (!mapping.entityId.startsWith('light.')) {
+    return { ok: false, status: 400, code: 'home_action_unsupported', domain: 'light' };
+  }
+  if (
+    !Number.isFinite(input.profile.brightnessPercent)
+    || input.profile.brightnessPercent < 1
+    || input.profile.brightnessPercent > 100
+    || (input.profile.colorTemperatureKelvin !== undefined
+      && (!Number.isFinite(input.profile.colorTemperatureKelvin)
+        || input.profile.colorTemperatureKelvin < 2_000
+        || input.profile.colorTemperatureKelvin > 6_500))
+    || (input.profile.transitionSeconds !== undefined
+      && (!Number.isFinite(input.profile.transitionSeconds)
+        || input.profile.transitionSeconds < 0
+        || input.profile.transitionSeconds > 300))
+  ) {
+    return { ok: false, status: 400, code: 'home_action_option_invalid', domain: 'light' };
+  }
+  try {
+    const state = await input.ha.getState(mapping.entityId);
+    const attributes = isHassState(state) && state.attributes && typeof state.attributes === 'object'
+      ? state.attributes as Record<string, unknown>
+      : {};
+    let colorTemperatureKelvin: number | undefined;
+    if (input.profile.colorTemperatureKelvin !== undefined) {
+      const supportedColorModes = Array.isArray(attributes.supported_color_modes)
+        ? attributes.supported_color_modes.filter((mode): mode is string => typeof mode === 'string')
+        : [];
+      if (!supportedColorModes.includes('color_temp')) {
+        return { ok: false, status: 400, code: 'home_action_unsupported', domain: 'light' };
+      }
+      const minimum = Number(attributes.min_color_temp_kelvin);
+      const maximum = Number(attributes.max_color_temp_kelvin);
+      colorTemperatureKelvin = Math.round(Math.min(
+        Number.isFinite(maximum) ? maximum : 6_500,
+        Math.max(Number.isFinite(minimum) ? minimum : 2_000, input.profile.colorTemperatureKelvin)
+      ));
+    }
+    await input.ha.callService({
+      domain: 'light',
+      service: 'turn_on',
+      target: { entity_id: mapping.entityId },
+      serviceData: {
+        brightness_pct: Math.round(input.profile.brightnessPercent),
+        ...(colorTemperatureKelvin === undefined ? {} : { color_temp_kelvin: colorTemperatureKelvin }),
+        ...(input.profile.transitionSeconds === undefined
+          ? {}
+          : { transition: input.profile.transitionSeconds }),
+      },
+    });
+    const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+    if ((input.profile.transitionSeconds ?? 0) > 0) {
+      await wait(Math.min(300, Math.round(input.profile.transitionSeconds! * 1_000)));
+    }
+    let readable = false;
+    let evidenceAvailable = false;
+    for (let attempt = 0; attempt < (input.statePollAttempts ?? 3); attempt += 1) {
+      if (attempt > 0) await wait(150);
+      try {
+        const observed = await input.ha.getState(mapping.entityId);
+        if (!isHassState(observed)) continue;
+        readable = true;
+        if (observed.state === 'unknown' || observed.state === 'unavailable') {
+          evidenceAvailable = true;
+          continue;
+        }
+        const brightness = numericAttribute(observed, 'brightness');
+        const kelvin = numericAttribute(observed, 'color_temp_kelvin');
+        const brightnessMatches = brightness !== null
+          && Math.abs((brightness / 255) * 100 - input.profile.brightnessPercent) <= 2;
+        const kelvinMatches = colorTemperatureKelvin === undefined
+          ? true
+          : kelvin !== null && Math.abs(kelvin - colorTemperatureKelvin) <= 75;
+        if (brightness !== null && (colorTemperatureKelvin === undefined || kelvin !== null)) evidenceAvailable = true;
+        if (observed.state === 'on' && brightnessMatches && kelvinMatches) {
+          return { ok: true, domain: 'light', operationStatus: 'succeeded', observedState: observed.state };
+        }
+      } catch {
+        return { ok: true, domain: 'light', operationStatus: 'accepted' };
+      }
+    }
+    if (!readable || !evidenceAvailable) return { ok: true, domain: 'light', operationStatus: 'accepted' };
+    return { ok: true, domain: 'light', operationStatus: 'uncertain' };
+  } catch (error) {
+    if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) {
+      return { ok: true, domain: 'light', operationStatus: 'uncertain' };
+    }
+    return { ok: false, status: 502, code: 'home_control_unavailable', domain: 'light' };
+  }
+}
+
+const activeCommandsByCatalog = new WeakMap<HomeCatalog, Set<string>>();
+
 export async function executeCatalogHomeAction(input: {
   catalog: HomeCatalog;
   ha?: HomeAssistantClient;
@@ -200,6 +416,34 @@ export async function executeCatalogHomeAction(input: {
   televisionPollAttempts?: number;
   statePollAttempts?: number;
   statePollIntervalMs?: number;
+  allowAlreadySatisfied?: boolean;
+}): Promise<HomeActionExecution> {
+  let active = activeCommandsByCatalog.get(input.catalog);
+  if (!active) {
+    active = new Set<string>();
+    activeCommandsByCatalog.set(input.catalog, active);
+  }
+  if (active.has(input.command.deviceId)) {
+    return { ok: false, status: 409, code: 'home_action_in_progress' };
+  }
+  active.add(input.command.deviceId);
+  try {
+    return await executeCatalogHomeActionOnce(input);
+  } finally {
+    active.delete(input.command.deviceId);
+  }
+}
+
+async function executeCatalogHomeActionOnce(input: {
+  catalog: HomeCatalog;
+  ha?: HomeAssistantClient;
+  principal?: RequestPrincipal;
+  command: ExecutableHomeAction;
+  wait?: (milliseconds: number) => Promise<void>;
+  televisionPollAttempts?: number;
+  statePollAttempts?: number;
+  statePollIntervalMs?: number;
+  allowAlreadySatisfied?: boolean;
 }): Promise<HomeActionExecution> {
   const resolved = resolveCatalogHomeAction(input.catalog, input.command);
   if (!resolved.ok) return resolved;
@@ -305,6 +549,22 @@ export async function executeCatalogHomeAction(input: {
           })
         : 'device_state_unreadable';
       if (conflict) {
+        if (
+          input.allowAlreadySatisfied
+          && isHassState(primaryState)
+          && homeActionStateAlreadySatisfied({
+            domain,
+            action: input.command.action,
+            state: primaryState.state,
+          })
+        ) {
+          return {
+            ok: true,
+            domain,
+            operationStatus: 'succeeded',
+            observedState: primaryState.state,
+          };
+        }
         return { ok: false, status: 409, code: 'home_action_state_conflict', domain };
       }
     }
@@ -360,34 +620,29 @@ export async function executeCatalogHomeAction(input: {
   }
 
   const entityId = resolved.call.target?.entity_id;
-  const expectedStates =
-    typeof entityId !== 'string'
-      ? undefined
-      : ['light', 'switch'].includes(resolved.call.domain) && input.command.action === 'turn_on'
-        ? ['on']
-        : ['light', 'switch'].includes(resolved.call.domain) && input.command.action === 'turn_off'
-          ? ['off']
-          : domain === 'vacuum' && input.command.action === 'start'
-            ? ['cleaning']
-            : domain === 'vacuum' && input.command.action === 'stop'
-              ? ['idle', 'paused', 'docked']
-              : domain === 'vacuum' && input.command.action === 'return_to_base'
-                ? ['returning', 'docked']
-                : undefined;
-  if (!expectedStates || typeof entityId !== 'string') {
+  if (!actionHasVerifiableOutcome(domain, input.command) || typeof entityId !== 'string') {
     return { ok: true, domain, operationStatus: 'accepted' };
   }
 
   const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-  const timing = homeActionTiming(domain, input.command.action);
+  // Some catalog actions target a secondary entity (for example a vacuum's
+  // select entity). Use the entity actually mutated so a mode selector does
+  // not inherit the much longer robot movement budget.
+  const timing = homeActionTiming(resolved.call.domain, input.command.action);
   let stateReadable = false;
+  let evidenceAvailable = false;
   for (let attempt = 0; attempt < (input.statePollAttempts ?? timing.pollAttempts); attempt += 1) {
     if (attempt > 0) await wait(input.statePollIntervalMs ?? timing.pollIntervalMs);
     try {
       const state = await input.ha.getState(entityId);
       if (!isHassState(state)) continue;
       stateReadable = true;
-      if (expectedStates.includes(state.state)) {
+      const matches = expectedActionState(state, domain, input.command);
+      if (matches === null) {
+        return { ok: true, domain, operationStatus: 'accepted', observedState: state.state };
+      }
+      if (matches !== null) evidenceAvailable = true;
+      if (matches === true) {
         return { ok: true, domain, operationStatus: 'succeeded', observedState: state.state };
       }
     } catch {
@@ -397,6 +652,7 @@ export async function executeCatalogHomeAction(input: {
     }
   }
   if (!stateReadable) return { ok: true, domain, operationStatus: 'accepted' };
+  if (!evidenceAvailable) return { ok: true, domain, operationStatus: 'accepted' };
   return { ok: true, domain, operationStatus: 'uncertain' };
 }
 
@@ -488,7 +744,7 @@ export async function executeCatalogHomeScene(input: {
   }
   const executions = await Promise.all(
     input.scene.steps.map(async (step) => {
-      const result = await executeCatalogHomeAction({ ...input, command: step });
+      const result = await executeCatalogHomeAction({ ...input, command: step, allowAlreadySatisfied: true });
       return result.ok
         ? {
             deviceId: step.deviceId,

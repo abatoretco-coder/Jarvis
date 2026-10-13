@@ -217,6 +217,7 @@ export async function planHomeActionFromTextWithOpenAi(input: {
           'Une commande multiple ne doit contenir qu’une commande par appareil. Si deux opérations sont demandées sur le même appareil, réponds route=none.',
           'N invente jamais un appareil, une action, une option ou une valeur.',
           'Pour une option, recopie exactement une valeur proposée par le catalogue.',
+          'Exception: pour type_text, option contient uniquement le texte explicitement dicté par l’utilisateur, sans ajout ni reformulation.',
           'value est réservé aux actions numériques; option aux actions textuelles; sinon utilise null.',
           'La demande peut aussi contenir des clauses destinées à d’autres services (musique, recherche, conversation) : ignore-les et ne planifie que la partie domotique.',
           'Planifie toutes les actions domotiques non ambiguës et réalisables, même si une autre clause concerne un autre service.',

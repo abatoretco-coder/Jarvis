@@ -1,6 +1,6 @@
 import { describe, expect, test } from '@jest/globals';
 
-import { canStartRobotRoomCleaning, homeActionStateConflict } from '../src/home/HomeActionPolicy';
+import { canStartRobotRoomCleaning, homeActionStateAlreadySatisfied, homeActionStateConflict } from '../src/home/HomeActionPolicy';
 
 describe('home action state policy', () => {
   test('prevents contradictory television power commands', () => {
@@ -9,6 +9,14 @@ describe('home action state policy', () => {
     expect(homeActionStateConflict({ domain: 'media_player', action: 'turn_on', state: 'off' })).toBeNull();
     expect(homeActionStateConflict({ domain: 'media_player', action: 'turn_off', state: 'playing' })).toBeNull();
     expect(homeActionStateConflict({ domain: 'media_player', action: 'select_source', state: 'turning_on' })).toBeTruthy();
+  });
+
+  test('recognizes an already satisfied television power state for idempotent scenes', () => {
+    expect(homeActionStateAlreadySatisfied({ domain: 'media_player', action: 'turn_off', state: 'off' })).toBe(true);
+    expect(homeActionStateAlreadySatisfied({ domain: 'media_player', action: 'turn_off', state: 'standby' })).toBe(true);
+    expect(homeActionStateAlreadySatisfied({ domain: 'media_player', action: 'turn_on', state: 'playing' })).toBe(true);
+    expect(homeActionStateAlreadySatisfied({ domain: 'media_player', action: 'turn_off', state: 'playing' })).toBe(false);
+    expect(homeActionStateAlreadySatisfied({ domain: 'media_player', action: 'turn_off', state: 'unavailable' })).toBe(false);
   });
 
   test('only exposes robot commands compatible with its live state', () => {

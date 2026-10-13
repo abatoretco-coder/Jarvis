@@ -214,6 +214,100 @@
     "ventilation": "VMC simple flux autoréglable"
   },
   "automation": {
+    "adaptiveLighting": {
+      "enabled": true,
+      "sunEntityId": "sun.sun",
+      "weatherEntityId": "weather.forecast_maison",
+      "pollSeconds": 30,
+      "manualOverrideMinutes": 120,
+      "transitionSeconds": 20,
+      "weather": {
+        "maxBrightnessAdjustment": 8,
+        "maxColorTemperatureAdjustmentKelvin": 0
+      },
+      "rooms": [
+        {
+          "roomId": "room_living",
+          "deviceIds": ["hue-living-ceiling-1", "hue-living-ceiling-2", "tapo-plug-1", "tapo-plug-2"],
+          "phases": {
+            "dawn": {"brightnessPercent": 75, "colorTemperatureKelvin": 3500},
+            "day": {"brightnessPercent": 90, "colorTemperatureKelvin": 3800},
+            "dusk": {"brightnessPercent": 65, "colorTemperatureKelvin": 3000},
+            "night": {"brightnessPercent": 45, "colorTemperatureKelvin": 2700}
+          },
+          "dimmedPhases": {
+            "dawn": {"brightnessPercent": 18, "colorTemperatureKelvin": 2500},
+            "day": {"brightnessPercent": 22, "colorTemperatureKelvin": 2800},
+            "dusk": {"brightnessPercent": 16, "colorTemperatureKelvin": 2500},
+            "night": {"brightnessPercent": 10, "colorTemperatureKelvin": 2300}
+          }
+        },
+        {
+          "roomId": "room_kitchen",
+          "deviceIds": ["hue-kitchen-ceiling"],
+          "phases": {
+            "dawn": {"brightnessPercent": 90, "colorTemperatureKelvin": 3800},
+            "day": {"brightnessPercent": 100, "colorTemperatureKelvin": 4200},
+            "dusk": {"brightnessPercent": 80, "colorTemperatureKelvin": 3500},
+            "night": {"brightnessPercent": 60, "colorTemperatureKelvin": 3000}
+          },
+          "dimmedPhases": {
+            "dawn": {"brightnessPercent": 18, "colorTemperatureKelvin": 2700},
+            "day": {"brightnessPercent": 22, "colorTemperatureKelvin": 3000},
+            "dusk": {"brightnessPercent": 16, "colorTemperatureKelvin": 2600},
+            "night": {"brightnessPercent": 10, "colorTemperatureKelvin": 2300}
+          }
+        },
+        {
+          "roomId": "room_bedroom",
+          "deviceIds": ["hue-bedroom-ceiling"],
+          "phases": {
+            "dawn": {"brightnessPercent": 80, "colorTemperatureKelvin": 3300},
+            "day": {"brightnessPercent": 80, "colorTemperatureKelvin": 3500},
+            "dusk": {"brightnessPercent": 55, "colorTemperatureKelvin": 2800},
+            "night": {"brightnessPercent": 35, "colorTemperatureKelvin": 2500}
+          },
+          "dimmedPhases": {
+            "dawn": {"brightnessPercent": 12, "colorTemperatureKelvin": 2400},
+            "day": {"brightnessPercent": 15, "colorTemperatureKelvin": 2700},
+            "dusk": {"brightnessPercent": 10, "colorTemperatureKelvin": 2400},
+            "night": {"brightnessPercent": 6, "colorTemperatureKelvin": 2200}
+          }
+        },
+        {
+          "roomId": "room_bathroom",
+          "deviceIds": ["hue-bathroom-spot-1", "hue-bathroom-spot-2"],
+          "phases": {
+            "dawn": {"brightnessPercent": 100, "colorTemperatureKelvin": 3800},
+            "day": {"brightnessPercent": 100, "colorTemperatureKelvin": 4000},
+            "dusk": {"brightnessPercent": 75, "colorTemperatureKelvin": 3500},
+            "night": {"brightnessPercent": 50, "colorTemperatureKelvin": 3000}
+          },
+          "dimmedPhases": {
+            "dawn": {"brightnessPercent": 18, "colorTemperatureKelvin": 2800},
+            "day": {"brightnessPercent": 22, "colorTemperatureKelvin": 3000},
+            "dusk": {"brightnessPercent": 15, "colorTemperatureKelvin": 2700},
+            "night": {"brightnessPercent": 10, "colorTemperatureKelvin": 2400}
+          }
+        },
+        {
+          "roomId": "room_office",
+          "deviceIds": ["hue-office-light"],
+          "phases": {
+            "dawn": {"brightnessPercent": 90, "colorTemperatureKelvin": 4000},
+            "day": {"brightnessPercent": 100, "colorTemperatureKelvin": 4200},
+            "dusk": {"brightnessPercent": 85, "colorTemperatureKelvin": 3800},
+            "night": {"brightnessPercent": 55, "colorTemperatureKelvin": 3200}
+          },
+          "dimmedPhases": {
+            "dawn": {"brightnessPercent": 16, "colorTemperatureKelvin": 2800},
+            "day": {"brightnessPercent": 20, "colorTemperatureKelvin": 3100},
+            "dusk": {"brightnessPercent": 14, "colorTemperatureKelvin": 2700},
+            "night": {"brightnessPercent": 8, "colorTemperatureKelvin": 2400}
+          }
+        }
+      ]
+    },
     "spaces": [
       {"roomId": "room_bedroom", "entities": [
         {
@@ -222,14 +316,46 @@
           "name": "Radiateur",
           "presetId": "heating",
           "placement": {"x": 1.6, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
+        },
+        {
+          "deviceId": "hue-bedroom-ceiling",
+          "entityId": "light.plafonnier_chambre",
+          "name": "Plafonnier chambre",
+          "icon": "ceiling-light",
+          "presetId": "light",
+          "placement": {"x": 1.63, "y": 1.62, "z": 2.4, "rotationDeg": 0, "scale": 0.85}
         }
       ]},
       {"roomId": "room_bathroom", "entities": [
         {
           "deviceId": "bathroom-water-heater",
+          "entityId": "water_heater.salle_deau_chauffe_eau",
           "name": "Chauffe-eau",
           "presetId": "water-heater",
-          "placement": {"x": 0.45, "y": 3.72, "z": 1.2, "rotationDeg": 90, "scale": 1}
+          "placement": {"x": 0.45, "y": 3.72, "z": 1.2, "rotationDeg": 90, "scale": 1},
+          "waterHeater": {
+            "ecoEntityId": "switch.salle_deau_chauffe_eau_ariston_net_eco_mode",
+            "antiLegionellaEntityId": "switch.salle_deau_chauffe_eau_ariston_net_anti_legionella",
+            "heatingEntityId": "binary_sensor.salle_deau_chauffe_eau_ariston_net_is_heating",
+            "showersEntityId": "sensor.salle_deau_chauffe_eau_ariston_net_average_showers",
+            "heatingTimeEntityId": "sensor.salle_deau_chauffe_eau_ariston_net_remaining_time"
+          }
+        },
+        {
+          "deviceId": "hue-bathroom-spot-1",
+          "entityId": "light.spot_salle_de_bain_1",
+          "name": "Spot salle de bain 1",
+          "icon": "ceiling-light",
+          "presetId": "light",
+          "placement": {"x": 1.15, "y": 3.82, "z": 2.4, "rotationDeg": 0, "scale": 0.75}
+        },
+        {
+          "deviceId": "hue-bathroom-spot-2",
+          "entityId": "light.spot_salle_de_bain_2",
+          "name": "Spot salle de bain 2",
+          "icon": "ceiling-light",
+          "presetId": "light",
+          "placement": {"x": 2.35, "y": 3.82, "z": 2.4, "rotationDeg": 0, "scale": 0.75}
         }
       ]},
         {"roomId": "room_kitchen", "entities": [
@@ -260,6 +386,14 @@
               "filterLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_filter_life_level_p_11_1",
               "mopLifeEntityId": "sensor.xiaomi_de_1150317461_c102gl_mop_life_level_p_18_1"
             }
+          },
+          {
+            "deviceId": "hue-kitchen-ceiling",
+            "entityId": "light.plafonnier_cuisine",
+            "name": "Plafonnier cuisine",
+            "icon": "ceiling-light",
+            "presetId": "light",
+            "placement": {"x": 4.4, "y": 2.07, "z": 2.4, "rotationDeg": 0, "scale": 0.85}
           }
         ]},
       {"roomId": "room_living", "entities": [
@@ -280,6 +414,12 @@
           "name": "Hub",
           "presetId": "hub",
           "placement": {"x": 7.15, "y": 1.35, "z": 1.1, "rotationDeg": 0, "scale": 0.8}
+        },
+        {
+          "deviceId": "hue-bridge",
+          "name": "Bridge Hue",
+          "presetId": "hub",
+          "placement": {"x": 7.5, "y": 1.35, "z": 1.1, "rotationDeg": 0, "scale": 0.8}
         },
         {
           "deviceId": "tapo-plug-1",
@@ -320,6 +460,22 @@
             "spotifySource": "Spotify - Musique et podcasts"
           },
           "placement": {"x": 8.25, "y": 0.35, "z": 0.85, "rotationDeg": 180, "scale": 1}
+        },
+        {
+          "deviceId": "hue-living-ceiling-1",
+          "entityId": "light.plafonnier_salon_centre",
+          "name": "Plafonnier salon centre",
+          "icon": "ceiling-light",
+          "presetId": "light",
+          "placement": {"x": 7.35, "y": 2.05, "z": 2.4, "rotationDeg": 0, "scale": 0.85}
+        },
+        {
+          "deviceId": "hue-living-ceiling-2",
+          "entityId": "light.plafonnier_salon_couloir",
+          "name": "Plafonnier salon couloir",
+          "icon": "ceiling-light",
+          "presetId": "light",
+          "placement": {"x": 9.15, "y": 2.05, "z": 2.4, "rotationDeg": 0, "scale": 0.85}
           }
       ]},
       {"roomId": "room_wc", "entities": []},
@@ -330,6 +486,14 @@
           "name": "Radiateur",
           "presetId": "heating",
           "placement": {"x": 13.35, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
+        },
+        {
+          "deviceId": "hue-office-light",
+          "entityId": "light.lampe_bureau",
+          "name": "Lampe bureau",
+          "icon": "bulb",
+          "presetId": "light",
+          "placement": {"x": 12.75, "y": 1.25, "z": 1.1, "rotationDeg": 0, "scale": 0.8}
         }
       ]}
     ],
@@ -384,10 +548,145 @@
           {
             "deviceId": "tapo-plug-2",
             "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-living-ceiling-1",
+            "action": "set_brightness",
+            "value": 1
+          },
+          {
+            "deviceId": "hue-living-ceiling-2",
+            "action": "set_brightness",
+            "value": 1
           }
         ],
         "voicePhrases": ["mode film", "lance la scene film"],
         "sortOrder": 0
+      },
+      {
+        "sceneId": "living-ceiling-minimum",
+        "name": "Salon minimum",
+        "icon": "light",
+        "steps": [
+          {
+            "deviceId": "hue-living-ceiling-1",
+            "action": "set_brightness",
+            "value": 1
+          },
+          {
+            "deviceId": "hue-living-ceiling-2",
+            "action": "set_brightness",
+            "value": 1
+          }
+        ],
+        "voicePhrases": [
+          "mets les plafonniers du salon au minimum",
+          "lumiere minimale dans le salon",
+          "salon au minimum"
+        ],
+        "sortOrder": 1
+      },
+      {
+        "sceneId": "living-evening",
+        "name": "Soirée salon",
+        "icon": "light",
+        "steps": [
+          {
+            "deviceId": "hue-living-ceiling-1",
+            "action": "set_brightness",
+            "value": 45
+          },
+          {
+            "deviceId": "hue-living-ceiling-2",
+            "action": "set_brightness",
+            "value": 45
+          }
+        ],
+        "voicePhrases": [
+          "mode soirée dans le salon",
+          "active la soirée dans le salon",
+          "lumière de soirée dans le salon"
+        ],
+        "sortOrder": 2
+      },
+      {
+        "sceneId": "ceilings-on",
+        "name": "Plafonniers allumés",
+        "icon": "light",
+        "steps": [
+          {"deviceId": "hue-living-ceiling-1", "action": "turn_on"},
+          {"deviceId": "hue-living-ceiling-2", "action": "turn_on"},
+          {"deviceId": "hue-kitchen-ceiling", "action": "turn_on"},
+          {"deviceId": "hue-bedroom-ceiling", "action": "turn_on"},
+          {"deviceId": "hue-bathroom-spot-1", "action": "turn_on"},
+          {"deviceId": "hue-bathroom-spot-2", "action": "turn_on"}
+        ],
+        "voicePhrases": ["allume tous les plafonniers", "allume les plafonniers"],
+        "sortOrder": 3
+      },
+      {
+        "sceneId": "ceilings-off",
+        "name": "Plafonniers éteints",
+        "icon": "light",
+        "steps": [
+          {"deviceId": "hue-living-ceiling-1", "action": "turn_off"},
+          {"deviceId": "hue-living-ceiling-2", "action": "turn_off"},
+          {"deviceId": "hue-kitchen-ceiling", "action": "turn_off"},
+          {"deviceId": "hue-bedroom-ceiling", "action": "turn_off"},
+          {"deviceId": "hue-bathroom-spot-1", "action": "turn_off"},
+          {"deviceId": "hue-bathroom-spot-2", "action": "turn_off"}
+        ],
+        "voicePhrases": ["eteins tous les plafonniers", "eteins les plafonniers"],
+        "sortOrder": 4
+      },
+      {
+        "sceneId": "leave-home",
+        "name": "Tout couper",
+        "icon": "home",
+        "steps": [
+          {
+            "deviceId": "tapo-plug-1",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "tapo-plug-2",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "living-room-tv",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-living-ceiling-1",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-living-ceiling-2",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-kitchen-ceiling",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-bedroom-ceiling",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-bathroom-spot-1",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-bathroom-spot-2",
+            "action": "turn_off"
+          },
+          {
+            "deviceId": "hue-office-light",
+            "action": "turn_off"
+          }
+        ],
+        "voicePhrases": ["tout couper", "coupe tout", "je suis parti", "j'ai quitté le logement", "éteins tout"],
+        "sortOrder": 4
       }
     ]
   },

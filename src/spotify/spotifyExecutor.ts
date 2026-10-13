@@ -507,7 +507,7 @@ async function _executeSpotifyCapability(input: {
     if (!query) {
       return {
         status: 'need_clarification',
-        tts: 'Précisez votre recherche.',
+        tts: 'Précise ta recherche.',
         error_code: 'missing_query',
         data: { registry_version: SPOTIFY_CAPABILITY_REGISTRY_VERSION },
       };
@@ -697,7 +697,7 @@ async function _executeSpotifyCapability(input: {
       if (!query) {
         return {
           status: 'need_clarification',
-          tts: 'Précisez le titre à ajouter à la file.',
+          tts: 'Précise le titre à ajouter à la file.',
           error_code: 'missing_query',
           data: {
             expected_slots: ['uri|track_uri', 'query', 'type'],
@@ -797,7 +797,7 @@ async function _executeSpotifyCapability(input: {
     if (!targetPlaylistId) {
       return {
         status: 'need_clarification',
-        tts: 'Précisez la playlist.',
+        tts: 'Précise la playlist.',
         error_code: 'missing_playlist',
       };
     }
@@ -808,7 +808,7 @@ async function _executeSpotifyCapability(input: {
       if (!query) {
         return {
           status: 'need_clarification',
-          tts: 'Précisez le titre à ajouter.',
+          tts: 'Précise le titre à ajouter.',
           error_code: 'missing_track_query',
         };
       }
@@ -915,7 +915,7 @@ async function _executeSpotifyCapability(input: {
 
       return {
         status: 'need_clarification',
-        tts: 'Précisez ce que vous souhaitez écouter.',
+        tts: 'Précise ce que tu veux écouter.',
         error_code: 'missing_play_target',
         data: {
           expected_slots: ['uri|track_uri', 'context_uri', 'query', 'type'],

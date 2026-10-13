@@ -3,6 +3,7 @@ import { describe, expect, it } from '@jest/globals';
 import {
   buildLastMailSummaryFromState,
   extractMailStateFromReply,
+  formatQuickActionVoiceResponse,
   formatVoiceResponse,
   isLastMailSummaryRequest,
   isLikelyTruncatedVoiceUtterance,
@@ -12,6 +13,12 @@ import {
 } from '../../src/conversation/voiceUx';
 
 describe('voiceUx', () => {
+  it('keeps quick-action acknowledgements sharp and non-technical', () => {
+    expect(formatQuickActionVoiceResponse('success')).toBe("C'est fait.");
+    expect(formatQuickActionVoiceResponse('partial')).toBe("Je n'ai pas pu tout faire.");
+    expect(formatQuickActionVoiceResponse('failure')).toBe("Je n'ai pas pu le faire.");
+  });
+
   it('detects detailed mode from user request', () => {
     const mode = resolveVoiceResponseMode({ text: 'detaille la reponse stp' });
     expect(mode).toBe('detailed');
@@ -60,6 +67,18 @@ describe('voiceUx', () => {
     expect(out).toContain('Tu as 5 non lus');
     expect(out).toContain('Premier : Alice');
     expect(out).not.toContain('Tu veux');
+  });
+
+  it('summarizes the email body when reading a message in short mode', () => {
+    const out = formatVoiceResponse({
+      text: 'Email de Alice, objet "Compte-rendu. Version finale" : Bonjour Loïc. La livraison est confirmée pour mardi matin. Il faut transmettre le code au transporteur. Cette dernière phrase est secondaire et ne doit pas être lue.',
+      domain: 'mail',
+      mode: 'short',
+    });
+    expect(out).toContain('Résumé :');
+    expect(out).toContain('livraison est confirmée');
+    expect(out).toContain('transmettre le code');
+    expect(out).not.toContain('dernière phrase');
   });
 
   it('removes web source labels outside the search agent', () => {
@@ -116,6 +135,66 @@ describe('voiceUx', () => {
     expect(out).toContain('Tu peux continuer.');
     expect(out).toContain("Je peux t'aider");
     expect(out).toContain('si tu veux');
+  });
+
+  it('keeps the useful result after a partial-result warning in short mode', () => {
+    const out = formatVoiceResponse({
+      text: "Résultat partiel : 1 service spécialisé n'a pas répondu. Il fera 22 degrés à Paris.",
+      domain: 'general',
+      mode: 'short',
+    });
+    expect(out).toContain('Résultat partiel');
+    expect(out).toContain('22 degrés');
+  });
+
+  it('keeps calendar warnings and bounds event lists in short mode', () => {
+    const out = formatVoiceResponse({
+      text: [
+        'Résultats partiels : agendas indisponibles (travail).',
+        '3 résultats pour "demain" :',
+        'mercredi 14 octobre à 09:00 : Stand-up',
+        'mercredi 14 octobre à 12:00 : Déjeuner',
+        'mercredi 14 octobre à 18:00 : Sport',
+      ].join('\n'),
+      domain: 'calendar',
+      mode: 'short',
+    });
+    expect(out).toContain('Résultats partiels');
+    expect(out).toContain('Stand-up');
+    expect(out).toContain('Déjeuner');
+    expect(out).not.toContain('Sport');
+  });
+
+  it('bounds todo lists even when items are separated with semicolons', () => {
+    const out = formatVoiceResponse({
+      text: 'Tu as 4 tâches : Appeler Alice ; Acheter du lait ; Réserver le train ; Ranger le bureau.',
+      domain: 'todo',
+      mode: 'short',
+    });
+    expect(out).toContain('Appeler Alice');
+    expect(out).toContain('Acheter du lait');
+    expect(out).not.toContain('Réserver le train');
+    expect(out).toContain('2 autres');
+  });
+
+  it("reads every task due today even in short mode", () => {
+    const out = formatVoiceResponse({
+      text: "Tu as 6 tâches aujourd'hui : Appeler Alice ; Acheter du lait ; Réserver le train ; Ranger le bureau ; Envoyer le devis ; Sortir les poubelles.",
+      domain: 'todo',
+      mode: 'short',
+    });
+    expect(out).toContain('Appeler Alice');
+    expect(out).toContain('Sortir les poubelles');
+    expect(out).not.toContain('autres');
+  });
+
+  it('uses tutoiement for imperative Spotify-style prompts', () => {
+    const out = formatVoiceResponse({
+      text: 'Précisez ce que vous souhaitez écouter.',
+      domain: 'spotify',
+      mode: 'short',
+    });
+    expect(out).toBe('Précise ce que tu veux écouter.');
   });
 
   it('turns Culture result lists into concise spoken choices', () => {

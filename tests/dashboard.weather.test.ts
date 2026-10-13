@@ -26,6 +26,7 @@ function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
 describe('dashboard weather route', () => {
   afterEach(() => {
     (global as { fetch?: unknown }).fetch = undefined;
+    jest.restoreAllMocks();
   });
 
   it('prefers desktop geolocation weather when coordinates are provided', async () => {
@@ -208,6 +209,39 @@ describe('dashboard weather route', () => {
       weather: null,
       weatherStatus: 'error',
       organization: expect.any(Object),
+    });
+    await app.close();
+  });
+
+  it('serves the last valid weather snapshot when the provider fails later', async () => {
+    let now = Date.parse('2026-10-13T10:00:00.000Z');
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    let failing = false;
+    const fetchMock = jest.fn(async (url: string) => {
+      if (failing) throw new Error('provider_timeout');
+      const rawUrl = String(url);
+      if (rawUrl.includes('geocoding-api.open-meteo.com')) {
+        return new Response(JSON.stringify({ results: [{ name: 'Paris', latitude: 48.85, longitude: 2.35 }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        current: { time: '2026-10-13T12:00', temperature_2m: 16, apparent_temperature: 15, weather_code: 2, relative_humidity_2m: 60, wind_speed_10m: 8, wind_direction_10m: 220, precipitation: 0 },
+        daily: { time: ['2026-10-13'], weather_code: [2], temperature_2m_max: [18], temperature_2m_min: [10], precipitation_sum: [0], wind_speed_10m_max: [12] },
+        hourly: { time: ['2026-10-13T12:00'], temperature_2m: [16], precipitation_probability: [0], weather_code: [2] },
+      }), { status: 200 });
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const app = Fastify({ logger: false });
+    registerDashboardRoute(app, makeDeps());
+
+    const first = await app.inject({ method: 'GET', url: '/v1/dashboard?city=Paris' });
+    expect(first.json().weather.temp).toBe(16);
+    failing = true;
+    now += 3 * 60_000;
+    const fallback = await app.inject({ method: 'GET', url: '/v1/dashboard?city=Paris' });
+    expect(fallback.json()).toMatchObject({
+      status: 'partial',
+      weatherStatus: 'stale',
+      weather: { temp: 16 },
     });
     await app.close();
   });

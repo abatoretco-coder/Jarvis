@@ -603,7 +603,7 @@ export async function prepareCalendarMutationAction(
       start: ev.start?.dateTime ?? ev.start?.date ?? '',
     }));
     const lines = disambiguationCandidates.map((ev) => `${ev.index}. ${ev.title}, ${ev.start}`);
-    return { status: 'ambiguous', action, candidates: disambiguationCandidates, message: `J'ai trouve plusieurs evenements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
+    return { status: 'ambiguous', action, candidates: disambiguationCandidates, message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
     // eslint-disable-next-line no-unreachable
     return { status: 'ambiguous', message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
   }
@@ -775,7 +775,7 @@ async function executeCalendarAction(
       const dateStr = formatCreatedEventDate(created, isAllDay);
       const title = created.summary ?? plan.summary;
       const agendaLabel = env.GOOGLE_CALENDAR_DEFAULT_CREATE_CALENDAR_LABEL?.trim() || 'ton agenda';
-      return `C'est ajoute dans ${agendaLabel} : ${title}, ${dateStr}${isAllDay ? ', toute la journee' : ''}.`;
+      return `C'est ajouté dans ${agendaLabel} : ${title}, ${dateStr}${isAllDay ? ', toute la journée' : ''}.`;
     }
 
     case 'delete_event': {
@@ -801,7 +801,7 @@ async function executeCalendarAction(
         : undefined;
       if (plan.action === 'remove_from_event' && plan.field === 'attendee') {
         const found = (existing?.attendees ?? []).some((attendee) => attendee.email?.toLowerCase() === plan.attendeeEmail?.toLowerCase());
-        if (!found) return `Je n'ai pas trouve l'invite ${plan.attendeeEmail} sur cet evenement.`;
+        if (!found) return `Je n'ai pas trouvé l'invité ${plan.attendeeEmail} sur cet événement.`;
       }
       const patch = buildMutationPatch(plan, existing);
       await calendarApiRequest<GoogleCalendarEvent>(

@@ -32,7 +32,7 @@ function firstSentence(text: string, maxChars = 140): string {
   return s.length > maxChars ? s.slice(0, maxChars).trimEnd() + '…' : s;
 }
 
-function compactTodoListForFallback(text: string): string {
+export function compactTodoListForFallback(text: string): string {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (!clean) return clean;
 
@@ -41,8 +41,9 @@ function compactTodoListForFallback(text: string): string {
   if (match) {
     const intro = match[1] ?? 'Voici tes tâches :';
     const body = match[2] ?? '';
+    if (/aujourd['’]hui/iu.test(intro)) return clean;
     const parts = body
-      .split(/,\s+(?=[^,]+(?:échéance|urgente|en cours|différée|en attente|récurrente)|[^,]+$)/)
+      .split(/\s*;\s*/u)
       .map((x) => x.trim())
       .filter(Boolean);
 
@@ -51,6 +52,7 @@ function compactTodoListForFallback(text: string): string {
       const remaining = parts.length - shown.length;
       return `${intro} ${shown.join(', ')} et ${remaining} autre${remaining > 1 ? 's' : ''}.`;
     }
+    return clean;
   }
 
   return firstSentence(clean, 220);
@@ -294,6 +296,29 @@ async function graphGet<T>(path: string, token: string): Promise<T> {
     throw new Error(`todo_graph_get_failed:${resp.status}`);
   }
   return resp.json() as Promise<T>;
+}
+
+async function graphGetCollection<T>(path: string, token: string): Promise<T[]> {
+  const values: T[] = [];
+  let nextUrl: string | undefined = new URL(path, `${GRAPH}/`).toString();
+  let pageCount = 0;
+  while (nextUrl) {
+    const url = new URL(nextUrl);
+    if (url.protocol !== 'https:' || url.hostname !== 'graph.microsoft.com') {
+      throw new Error('todo_graph_untrusted_next_link');
+    }
+    const resp = await fetch(url, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!resp.ok) throw new Error(`todo_graph_get_failed:${resp.status}`);
+    const page = await resp.json() as { value?: T[]; '@odata.nextLink'?: string };
+    values.push(...(page.value ?? []));
+    nextUrl = page['@odata.nextLink'];
+    pageCount += 1;
+    if (pageCount >= 100 && nextUrl) throw new Error('todo_graph_pagination_limit');
+  }
+  return values;
 }
 
 async function graphPost<T>(path: string, token: string, body: object): Promise<T> {
@@ -606,9 +631,9 @@ export async function planTodoAgentAction(
   log?: MinLogger,
 ): Promise<TodoAction | { clarification: string }> {
   if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
-    return { clarification: 'La gestion des taches n est pas configuree.' };
+    return { clarification: "La gestion des tâches n'est pas configurée." };
   }
-  if (!env.OPENAI_API_KEY) return { clarification: 'Je ne peux pas gerer les taches pour l instant, la cle OpenAI est manquante.' };
+  if (!env.OPENAI_API_KEY) return { clarification: "Je ne peux pas gérer les tâches pour l'instant, la clé OpenAI est manquante." };
   try {
     let action = await planTodoAction(
       text,
@@ -759,26 +784,24 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         if (!found) return `Je n'ai pas trouvé de liste correspondant à ${action.list_name}.`;
         targetLists = [found];
       } else {
-        const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
-        targetLists = (allData.value ?? []).filter(isWatchedList);
+        targetLists = (await graphGetCollection<MsTaskList>('/me/todo/lists', token)).filter(isWatchedList);
         if (targetLists.length === 0) return 'Aucune liste surveillée trouvée dans Microsoft To Do.';
       }
 
       // Build Graph query string.
       let qs: string;
       if (action.status === 'completed') {
-        qs = `$filter=status eq 'completed'&$top=20`;
+        qs = `$filter=status eq 'completed'&$top=100`;
       } else if (action.status === 'all') {
-        qs = `$top=30`;
+        qs = `$top=100`;
       } else {
-        qs = `$filter=status ne 'completed'&$top=30`;
+        qs = `$filter=status ne 'completed'&$top=100`;
       }
 
       // Fetch from all target lists in parallel.
       const results = await Promise.all(
         targetLists.map((l) =>
-          graphGet<{ value: MsTask[] }>(`/me/todo/lists/${l.id}/tasks?${qs}`, token)
-            .then((d) => d.value ?? [])
+          graphGetCollection<MsTask>(`/me/todo/lists/${l.id}/tasks?${qs}`, token)
             .catch(() => [] as MsTask[]),
         ),
       );
@@ -807,8 +830,8 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       }
 
       const count = tasks.length;
-      // Show more tasks when a period filter is active (all are relevant by definition).
-      const displayMax = action.period ? 10 : 5;
+      // Every task due today is relevant. Future and unbounded queries stay concise.
+      const displayMax = action.period === 'today' ? tasks.length : 5;
       const displayed = tasks.slice(0, displayMax).map((t) => {
         const dueIso = t.dueDateTime?.dateTime.slice(0, 10);
         const isOverdue = dueIso && new Date(dueIso) < startOfDay(new Date());
@@ -830,7 +853,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const intro = action.status === 'completed'
         ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''}${periodLabel} :`
         : `Tu as ${count} tâche${count > 1 ? 's' : ''}${periodLabel} :`;
-      return `${intro} ${joinFr(displayed)}${more}.`;
+      return `${intro} ${displayed.join(' ; ')}${more}.`;
     }
 
     case 'add_task': {
@@ -1071,9 +1094,9 @@ export async function executeTodoAgentAction(
   options?: { userText?: string; log?: MinLogger },
 ): Promise<string> {
   if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
-    return 'La gestion des taches n est pas disponible, les identifiants Microsoft ne sont pas configures.';
+    return "La gestion des tâches n'est pas disponible, les identifiants Microsoft ne sont pas configurés.";
   }
-  if (!env.OPENAI_API_KEY) return 'Je ne peux pas gerer les taches pour l instant, la cle OpenAI est manquante.';
+  if (!env.OPENAI_API_KEY) return "Je ne peux pas gérer les tâches pour l'instant, la clé OpenAI est manquante.";
 
   let token: string;
   try {

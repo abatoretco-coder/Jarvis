@@ -170,6 +170,9 @@ function verifyConversationDatabaseFile(
       );
     if (schemaVersion >= 6) requiredTables.push('admin_idempotency_keys');
     if (schemaVersion >= 7) requiredTables.push('integration_credentials', 'oauth_transactions');
+    if (schemaVersion >= 9) requiredTables.push('daily_life_lists', 'daily_life_items');
+    if (schemaVersion >= 11) requiredTables.push('daily_life_calendar_shares');
+    if (schemaVersion >= 13) requiredTables.push('mutation_idempotency_results');
     for (const table of requiredTables) {
       if (!tableExists(table)) throw new Error(`conversation_database_missing_table:${table}`);
     }

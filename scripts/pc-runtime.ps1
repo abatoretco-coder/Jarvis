@@ -123,7 +123,7 @@ function Initialize-FullProfile() {
     'ALLOW_LEGACY_API_KEYS=false',
     "SERVICE_API_KEYS_JSON=[{`"id`":`"desktop-local`",`"token`":`"$serviceToken`",`"permissions`":[`"chat`",`"history`",`"home`",`"mail`",`"calendar`",`"todo`",`"nas.operations`"]}]",
     'OIDC_ENABLED=true',
-    'OIDC_ISSUER_URL=http://127.0.0.1:8180/realms/jarvis',
+    'OIDC_ISSUER_URL=https://jarvis-abato.duckdns.org/realms/jarvis',
     'OIDC_JWKS_URL=http://identity:8080/realms/jarvis/protocol/openid-connect/certs',
     'OIDC_AUDIENCE=jarvis-api',
     "OIDC_BOOTSTRAP_OWNER_SUBJECT=$normalizedOwnerSubject",
@@ -131,6 +131,8 @@ function Initialize-FullProfile() {
     "OPENAI_API_KEY=$($env:OPENAI_API_KEY)",
     'LLM_PROVIDER=openai',
     'TTS_PROVIDER=none',
+    'NAS_STATUS_ENABLED=false',
+    'CULTURE_ENABLED=false',
     "OAUTH_TOKEN_ENCRYPTION_KEY=$oauthKey",
     'OAUTH_TOKEN_KEY_VERSION=1'
   )

@@ -22,7 +22,7 @@ function formatUptime(seconds: number): string {
   return `${hours} h`;
 }
 
-export function formatNasStatus(status: NasStatus): string {
+export function formatNasStatus(status: NasStatus, question?: string): string {
   const root = status.filesystems.find((item) => item.mount === '/') ?? status.filesystems[0];
   const tank = status.filesystems.find((item) => item.mount.includes('tank'));
   const temperatures = status.temperatures.length > 0
@@ -33,19 +33,31 @@ export function formatNasStatus(status: NasStatus): string {
     .map((item) => item.name)
     .join(', ') || 'aucun protocole confirme';
 
-  const parts = [
-    `NAS ${status.hostname}: uptime ${formatUptime(status.uptimeSeconds)}, charge ${status.load.one.toFixed(2)} / ${status.load.five.toFixed(2)}.`,
-    `RAM utilisee ${status.memory.usedPercent}% (${formatBytes(status.memory.totalBytes - status.memory.availableBytes)} sur ${formatBytes(status.memory.totalBytes)}), swap ${status.swap.usedPercent}%.`,
-  ];
+  const loadPart = `NAS ${status.hostname} : uptime ${formatUptime(status.uptimeSeconds)}, charge ${status.load.one.toFixed(2)} / ${status.load.five.toFixed(2)}.`;
+  const memoryPart = `RAM utilisée ${status.memory.usedPercent}% (${formatBytes(status.memory.totalBytes - status.memory.availableBytes)} sur ${formatBytes(status.memory.totalBytes)}), swap ${status.swap.usedPercent}%.`;
+  const diskParts: string[] = [];
 
   if (root) {
-    parts.push(`Disque systeme ${root.usedPercent}% utilise, ${formatBytes(root.availableBytes)} libres.`);
+    diskParts.push(`Disque système ${root.usedPercent}% utilisé, ${formatBytes(root.availableBytes)} libres.`);
   }
   if (tank) {
-    parts.push(`Stockage tank ${tank.usedPercent}% utilise, ${formatBytes(tank.availableBytes)} libres.`);
+    diskParts.push(`Stockage tank ${tank.usedPercent}% utilisé, ${formatBytes(tank.availableBytes)} libres.`);
   }
 
-  parts.push(`Temperature: ${temperatures}.`);
-  parts.push(`Services detectes: ${activeProtocols}.`);
+  const temperaturePart = `Température : ${temperatures}.`;
+  const servicesPart = `Services détectés : ${activeProtocols}.`;
+  const normalizedQuestion = (question ?? '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase();
+  if (/\btemperature|\btemp\b/u.test(normalizedQuestion)) return temperaturePart;
+  if (/\b(ram|memoire|swap)\b/u.test(normalizedQuestion)) return memoryPart;
+  if (/\b(disques?|stockage|ssd|espace)\b/u.test(normalizedQuestion)) return diskParts.join(' ');
+  if (/\b(service|protocole|port|plex|vm300)\b/u.test(normalizedQuestion)) return servicesPart;
+  if (/\b(cpu|charge|uptime)\b/u.test(normalizedQuestion)) return loadPart;
+
+  const parts = [loadPart, memoryPart, ...diskParts];
+  parts.push(temperaturePart);
+  parts.push(servicesPart);
   return parts.join(' ');
 }

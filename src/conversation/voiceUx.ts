@@ -8,6 +8,14 @@ export type VoiceThreadState = {
   lastMailRaw?: string;
 };
 
+export function formatQuickActionVoiceResponse(
+  outcome: 'success' | 'partial' | 'failure'
+): string {
+  if (outcome === 'success') return "C'est fait.";
+  if (outcome === 'partial') return "Je n'ai pas pu tout faire.";
+  return "Je n'ai pas pu le faire.";
+}
+
 function firstSentence(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
@@ -58,8 +66,46 @@ function capSentences(text: string, maxSentences: number): string {
   return compact(list.slice(0, maxSentences).join(' '));
 }
 
+function shortWithCriticalContext(text: string): string {
+  const sentences = splitSentences(text);
+  if (sentences.length <= 1) return compact(text);
+  if (/^R[ée]sultats? partiels?\b/iu.test(sentences[0] ?? '')) {
+    return compact(sentences.slice(0, 2).join(' '));
+  }
+  return sentences[0] ?? compact(text);
+}
+
+function formatDelimitedListOral(text: string, maxItems: number): string | null {
+  const separator = text.indexOf(':');
+  if (separator < 0) return null;
+  const prefix = text.slice(0, separator + 1).trim();
+  const rawItems = text
+    .slice(separator + 1)
+    .replace(/[.]$/u, '')
+    .split(/\s*;\s*/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (rawItems.length <= maxItems) return null;
+  const visible = rawItems.slice(0, maxItems);
+  return `${prefix} ${visible.join(' ; ')}, et ${rawItems.length - visible.length} autre${rawItems.length - visible.length > 1 ? 's' : ''}.`;
+}
+
+function formatCalendarOral(text: string, mode: VoiceResponseMode): string {
+  const lines = text.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  if (lines.length <= 1) {
+    return mode === 'short' ? shortWithCriticalContext(text) : capSentences(text, mode === 'detailed' ? 4 : 2);
+  }
+
+  const warning = lines.find((line) => /^R[ée]sultats? partiels?\b/iu.test(line));
+  const content = lines.filter((line) => line !== warning);
+  const limit = mode === 'short' ? 3 : mode === 'detailed' ? 6 : 4;
+  return compact([warning, ...content.slice(0, limit)].filter(Boolean).join(' '));
+}
+
 function normalizeTutoiement(text: string): string {
   return text
+    .replace(/\b[Pp]récisez\b/g, 'Précise')
+    .replace(/\b[Pp]recisez\b/g, 'Précise')
     .replace(/\b[Pp]ouvez-vous\b/g, 'Tu peux')
     .replace(/\b[Vv]oulez-vous\b/g, 'Tu veux')
     .replace(/\b[Ss]ouhaitez-vous\b/g, 'Tu veux')
@@ -67,6 +113,7 @@ function normalizeTutoiement(text: string): string {
     .replace(/\b[Vv]ous pouvez\b/g, 'Tu peux')
     .replace(/\b[Vv]ous voulez\b/g, 'Tu veux')
     .replace(/\b[Vv]ous souhaitez\b/g, 'Tu veux')
+    .replace(/\bce que Tu veux\b/g, 'ce que tu veux')
     .replace(/\b[Vv]ous avez\b/g, 'Tu as')
     .replace(/\b[Vv]ous etes\b/g, 'Tu es')
     .replace(/\b[Vv]ous êtes\b/g, 'Tu es')
@@ -152,7 +199,28 @@ function countLikelyImportantItems(items: string[]): number {
   return items.filter((x) => /(urgent|important|asap|immediat|immédiat|deadline|rappel)/i.test(x)).length;
 }
 
+function summarizeMailBodyForVoice(body: string, mode: VoiceResponseMode): string {
+  const sentences = splitSentences(body)
+    .filter((sentence) => !/^(?:bonjour|bonsoir|salut)(?:\s+[^,.!?]+)?[.!?]?$/iu.test(sentence))
+    .filter((sentence) => !/^(?:cordialement|bien à toi|merci)[,.!]?$/iu.test(sentence));
+  const limit = mode === 'detailed' ? 4 : 2;
+  const maxChars = mode === 'detailed' ? 500 : 280;
+  const selected = (sentences.length > 0 ? sentences : [body]).slice(0, limit).join(' ').trim();
+  return selected.length > maxChars
+    ? `${selected.slice(0, maxChars).trimEnd()}…`
+    : selected;
+}
+
 function formatMailOral(text: string, mode: VoiceResponseMode): string {
+  const detail = text.match(/^Email de (.+?), objet "([\s\S]+?)"\s*:\s*([\s\S]+)$/u);
+  if (detail) {
+    const from = detail[1]?.trim() ?? 'expéditeur inconnu';
+    const subject = detail[2]?.trim() ?? 'sans objet';
+    const body = detail[3]?.trim() ?? '';
+    const spokenBody = summarizeMailBodyForVoice(body, mode);
+    return `Email de ${from}, objet « ${subject} ». Résumé : ${spokenBody}`;
+  }
+
   const state = extractMailStateFromReply(text);
   if (!state) {
     if (mode === 'short') return firstSentence(text);
@@ -179,12 +247,13 @@ function formatExecutorOral(text: string, mode: VoiceResponseMode): string {
 }
 
 function formatSearchOral(text: string, mode: VoiceResponseMode): string {
-  if (mode === 'short') return firstSentence(text);
+  if (mode === 'short') return shortWithCriticalContext(text);
   return capSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
 function formatTodoOral(text: string, mode: VoiceResponseMode): string {
-  if (mode === 'short') return firstSentence(text);
+  if (/^Tu as\s+\d+\s+tâches?\s+aujourd['’]hui\s*:/iu.test(text)) return compact(text);
+  if (mode === 'short') return formatDelimitedListOral(text, 2) ?? shortWithCriticalContext(text);
   return capSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
@@ -228,6 +297,9 @@ export function formatVoiceResponse(input: {
     case 'todo':
       body = formatTodoOral(clean, input.mode);
       break;
+    case 'calendar':
+      body = formatCalendarOral(sanitized, input.mode);
+      break;
     case 'search':
       body = formatSearchOral(clean, input.mode);
       break;
@@ -238,7 +310,7 @@ export function formatVoiceResponse(input: {
       body = formatCultureOral(sanitized, input.mode);
       break;
     default:
-      body = input.mode === 'short' ? firstSentence(clean) : capSentences(clean, input.mode === 'detailed' ? 4 : 2);
+      body = input.mode === 'short' ? shortWithCriticalContext(clean) : capSentences(clean, input.mode === 'detailed' ? 4 : 2);
       break;
   }
 

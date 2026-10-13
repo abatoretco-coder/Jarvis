@@ -39,7 +39,7 @@ Le mode public refuse les IP, les noms locaux et les ports HTTPS non standard. C
 
 Le proxy public ne publie que le realm `jarvis`; le realm administratif Keycloak `master`, la console et les métriques restent inaccessibles depuis Internet. HSTS est appliqué à l'API, à l'application Web et aux pages de connexion. Les clients publics Web, Desktop et Android imposent PKCE `S256`.
 
-Les identités machines sont limitées par identifiant et par route : `home-assistant-pc` ne peut appeler que `POST /v1/ingest`, tandis que `pc-agent` ne peut appeler que ses routes de polling et de confirmation. Desktop n'utilise plus de clé statique et s'authentifie exclusivement par OIDC.
+Les identités machines sont limitées par identifiant et par route : `home-assistant-pc` ne peut appeler que `POST /v1/ingest`, `POST /v1/stt/default` et `POST /v1/tts`, tandis que `pc-agent` ne peut appeler que ses routes de polling et de confirmation. Desktop n'utilise plus de clé statique et s'authentifie exclusivement par OIDC. Pour qu'un hub vocal de confiance réutilise les connexions personnelles du propriétaire sans stocker son jeton OIDC, `SERVICE_DELEGATED_USERS_JSON` peut associer explicitement son identifiant de service à l'UUID du propriétaire. Cette délégation ne modifie ni les permissions du service ni la propriété isolée de son historique de conversation.
 
 ## Contrôles après publication
 

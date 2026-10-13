@@ -176,6 +176,16 @@ export class IntegrationService {
     return selected ? this.vault.decrypt(selected.encrypted, selected.credentialId) : null;
   }
 
+  resolveSharedHouseholdRefreshTokens(requesterUserId: string, provider: string) {
+    if (!this.vault) return [];
+    return this.repository.getSharedHouseholdCredentials(requesterUserId, provider).map((credential) => ({
+      userId: credential.userId,
+      displayName: credential.displayName,
+      connectionId: credential.connectionId,
+      refreshToken: this.vault!.decrypt(credential.encrypted, credential.credentialId),
+    }));
+  }
+
   rotateRefreshToken(userId: string, provider: string, token: string, connectionId?: string): void {
     if (!this.vault || !token.trim()) return;
     const selected = this.repository.getCredentialForUser({ userId, provider, connectionId });

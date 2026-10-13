@@ -28,7 +28,7 @@ const devices: HomeDevice[] = [
     mapped: true,
     presetId: 'television',
     placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
-    capabilities: ['turn_off', 'set_volume', 'select_source'],
+    capabilities: ['turn_off', 'set_volume', 'select_source', 'type_text'],
     riskLevel: 'low',
     sourceList: ['CANAL+', 'Netflix', 'HDMI 1'],
   },
@@ -85,7 +85,7 @@ describe('HomeVoicePlanner', () => {
     expect(JSON.parse(buildHomeVoiceActionCatalog(devices))).toEqual([
       expect.objectContaining({
         deviceId: 'living-tv',
-        capabilities: ['turn_off', 'set_volume', 'select_source'],
+        capabilities: ['turn_off', 'set_volume', 'select_source', 'type_text'],
         sources: ['CANAL+', 'Netflix', 'HDMI 1'],
       }),
       expect.objectContaining({
@@ -230,6 +230,20 @@ describe('HomeVoicePlanner', () => {
   });
 
   it('rejects options and numeric values outside the selected live device catalog', () => {
+    expect(
+      isHomeVoiceCommandAllowedForDevice(devices[0]!, {
+        deviceId: 'living-tv',
+        action: 'type_text',
+        option: 'Le Bureau des Légendes',
+      })
+    ).toBe(true);
+    expect(
+      isHomeVoiceCommandAllowedForDevice(devices[0]!, {
+        deviceId: 'living-tv',
+        action: 'type_text',
+        option: 'ligne 1\nligne 2',
+      })
+    ).toBe(false);
     expect(
       isHomeVoiceCommandAllowedForDevice(devices[0]!, {
         deviceId: 'living-tv',

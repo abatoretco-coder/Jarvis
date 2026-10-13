@@ -314,6 +314,21 @@ describe('persistMessages', () => {
     expect(messages[1]?.content).toBe('Lumière allumée.');
   });
 
+  test('stores the complete assistant text separately from the spoken variant', async () => {
+    const { service, msgRepo } = makeService();
+
+    await service.persistMessages(
+      'thread-voice-audit',
+      'Donne-moi le détail',
+      'Première information. Deuxième information importante.',
+      { spokenText: 'Première information.' },
+    );
+
+    const messages = await msgRepo.getRecentMessages('thread-voice-audit', 10);
+    expect(messages[1]?.content).toBe('Première information. Deuxième information importante.');
+    expect(messages[1]?.spokenContent).toBe('Première information.');
+  });
+
   test('increments interaction count on the thread', async () => {
     const { service, threadRepo } = makeService();
 

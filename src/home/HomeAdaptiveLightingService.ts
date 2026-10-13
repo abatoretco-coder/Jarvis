@@ -1,0 +1,345 @@
+import type { FastifyBaseLogger } from 'fastify';
+
+import type { HomeAssistantClient } from '../haClient';
+import { isHassState } from '../hass';
+import type { AdaptiveLightingTarget } from './AdaptiveLightingPolicy';
+import { resolveAdaptiveLightingTarget } from './AdaptiveLightingPolicy';
+import { executeCatalogHomeAction, executeCatalogLightProfile } from './HomeActionExecutor';
+import type { AdaptiveLightingRoomConfig, HomeActionName, HomeCatalog } from './HomeCatalog';
+
+export type HomeLightingRoomMode = 'on' | 'dimmed' | 'off';
+export type HomeLightingRoomObservedMode = HomeLightingRoomMode | 'manual' | 'mixed';
+export type HomeLightingRoomState = {
+  roomId: string;
+  mode: HomeLightingRoomObservedMode;
+  available: boolean;
+  deviceIds: string[];
+  pending?: boolean;
+  target?: AdaptiveLightingTarget;
+};
+
+export type HomeLightingRoomMutation = HomeLightingRoomState & {
+  operationStatus: 'succeeded' | 'accepted' | 'uncertain' | 'partial' | 'failed';
+  failedDeviceIds: string[];
+};
+
+type ObservedLight = {
+  state: string;
+  brightnessPercent?: number;
+  colorTemperatureKelvin?: number;
+  colorMode?: string;
+};
+
+type DesiredRoom = {
+  mode: HomeLightingRoomMode;
+  target?: AdaptiveLightingTarget;
+};
+
+function finiteNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function observedLight(state: unknown): ObservedLight | undefined {
+  if (!isHassState(state)) return undefined;
+  const attributes = state.attributes && typeof state.attributes === 'object'
+    ? state.attributes as Record<string, unknown>
+    : {};
+  const brightness = finiteNumber(attributes.brightness);
+  const colorTemperatureKelvin = finiteNumber(attributes.color_temp_kelvin);
+  return {
+    state: state.state,
+    ...(brightness === undefined ? {} : { brightnessPercent: Math.round((brightness / 255) * 100) }),
+    ...(colorTemperatureKelvin === undefined ? {} : { colorTemperatureKelvin }),
+    ...(typeof attributes.color_mode === 'string' ? { colorMode: attributes.color_mode } : {}),
+  };
+}
+
+function matchesTarget(current: ObservedLight, target: AdaptiveLightingTarget): boolean {
+  return current.state === 'on'
+    && (current.colorMode === undefined || current.colorMode === 'color_temp')
+    && (current.brightnessPercent === undefined
+      || Math.abs(current.brightnessPercent - target.brightnessPercent) <= 3)
+    && (current.colorTemperatureKelvin === undefined
+      || Math.abs(current.colorTemperatureKelvin - target.colorTemperatureKelvin) <= 150);
+}
+
+function mutationStatus(
+  results: Array<Awaited<ReturnType<typeof executeCatalogHomeAction>>>
+): HomeLightingRoomMutation['operationStatus'] {
+  const successes = results.filter((result) => result.ok);
+  if (successes.length !== results.length) return successes.length ? 'partial' : 'failed';
+  if (successes.some((result) => result.ok && result.operationStatus === 'uncertain')) return 'uncertain';
+  if (successes.some((result) => result.ok && result.operationStatus === 'accepted')) return 'accepted';
+  return 'succeeded';
+}
+
+export class HomeAdaptiveLightingService {
+  private timer?: NodeJS.Timeout;
+  private running = false;
+  private readonly desiredRooms = new Map<string, DesiredRoom>();
+  private readonly lastObservedStates = new Map<string, string>();
+  private readonly pendingUntil = new Map<string, number>();
+
+  constructor(
+    private readonly catalog: HomeCatalog,
+    private readonly ha: HomeAssistantClient,
+    private readonly log: Pick<FastifyBaseLogger, 'info' | 'warn'>
+  ) {}
+
+  start(): void {
+    const config = this.catalog.getAdaptiveLightingConfig();
+    if (!config?.enabled || this.timer) return;
+    void this.tick();
+    this.timer = setInterval(() => void this.tick(), config.pollSeconds * 1_000);
+    this.timer.unref();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  private roomDeviceIds(room: AdaptiveLightingRoomConfig): string[] {
+    return [...new Set([...room.deviceIds, ...this.catalog.getRoomLightDeviceIds(room.roomId)])];
+  }
+
+  private target(
+    room: AdaptiveLightingRoomConfig,
+    mode: Exclude<HomeLightingRoomMode, 'off'>,
+    weather: unknown,
+    now: Date
+  ): AdaptiveLightingTarget {
+    const config = this.catalog.getAdaptiveLightingConfig()!;
+    return resolveAdaptiveLightingTarget({
+      room,
+      mode,
+      weatherConfig: config.weather,
+      ...(isHassState(weather) ? { weather } : {}),
+      now,
+    });
+  }
+
+  private applyRoomProfile(
+    deviceId: string,
+    target: AdaptiveLightingTarget,
+    transitionSeconds: number
+  ): ReturnType<typeof executeCatalogHomeAction> {
+    const entityId = this.catalog.getMapping(deviceId)?.entityId;
+    if (!entityId?.startsWith('light.')) {
+      // Some actual lamps are exposed by Home Assistant as switches (smart
+      // plugs). They participate in the room mode but cannot receive a
+      // brightness or colour-temperature profile.
+      return executeCatalogHomeAction({
+        catalog: this.catalog,
+        ha: this.ha,
+        command: { deviceId, action: 'turn_on' },
+        allowAlreadySatisfied: true,
+      });
+    }
+    return executeCatalogLightProfile({
+      catalog: this.catalog,
+      ha: this.ha,
+      profile: {
+        deviceId,
+        brightnessPercent: target.brightnessPercent,
+        colorTemperatureKelvin: target.colorTemperatureKelvin,
+        transitionSeconds,
+      },
+    });
+  }
+
+  async reconcileActions(actions: Array<{ deviceId: string; action: HomeActionName }>): Promise<void> {
+    const config = this.catalog.getAdaptiveLightingConfig();
+    if (!config?.enabled) return;
+    for (const command of actions) {
+      const room = config.rooms.find((candidate) => this.roomDeviceIds(candidate).includes(command.deviceId));
+      if (!room) continue;
+      // A per-light action is an intentional customization. It must not be
+      // overwritten by the previously selected room-wide mode.
+      this.desiredRooms.delete(room.roomId);
+      this.pendingUntil.delete(room.roomId);
+    }
+  }
+
+  async tick(now = new Date()): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      await this.runTick(now);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  async getRoomStates(now = new Date()): Promise<HomeLightingRoomState[]> {
+    const config = this.catalog.getAdaptiveLightingConfig();
+    if (!config?.enabled) return [];
+    const rawStates = await this.ha.getStates();
+    const states = new Map(
+      (Array.isArray(rawStates) ? rawStates : [])
+        .filter(isHassState)
+        .map((state) => [state.entity_id, state] as const)
+    );
+    const weather = states.get(config.weatherEntityId);
+
+    return config.rooms.map((room) => {
+      const deviceIds = this.roomDeviceIds(room);
+      const lights = deviceIds.flatMap((deviceId) => {
+        const entityId = this.catalog.getMapping(deviceId)?.entityId;
+        const current = entityId ? observedLight(states.get(entityId)) : undefined;
+        return current ? [{ deviceId, current }] : [];
+      });
+      const availableLights = lights.filter(({ current }) => !['unavailable', 'unknown'].includes(current.state));
+      const allOff = availableLights.length > 0 && availableLights.every(({ current }) => current.state !== 'on');
+      const allOn = availableLights.length > 0 && availableLights.every(({ current }) => current.state === 'on');
+      const onTarget = this.target(room, 'on', weather, now);
+      const dimmedTarget = this.target(room, 'dimmed', weather, now);
+      const desired = this.desiredRooms.get(room.roomId);
+      const matchesOn = allOn && availableLights.every(({ current }) => matchesTarget(current, onTarget));
+      const matchesDimmed = allOn && availableLights.every(({ current }) => matchesTarget(current, dimmedTarget));
+      const desiredMatches = desired?.mode === 'off'
+        ? allOff
+        : desired?.target
+          ? allOn && availableLights.every(({ current }) => matchesTarget(current, desired.target!))
+          : false;
+      const mode: HomeLightingRoomObservedMode = desired && desiredMatches
+        ? desired.mode
+        : allOff
+          ? 'off'
+          : !allOn
+            ? 'mixed'
+            : matchesDimmed
+              ? 'dimmed'
+              : matchesOn
+                ? 'on'
+                : 'manual';
+      const target = desired?.mode !== 'off' && desired?.target
+        ? desired.target
+        : mode === 'dimmed'
+          ? dimmedTarget
+          : mode === 'on'
+            ? onTarget
+            : undefined;
+      const pending = (this.pendingUntil.get(room.roomId) ?? 0) > now.getTime();
+      return {
+        roomId: room.roomId,
+        mode,
+        available: availableLights.length > 0,
+        deviceIds,
+        ...(pending ? { pending: true } : {}),
+        ...(target ? { target } : {}),
+      };
+    });
+  }
+
+  async setRoomMode(
+    roomId: string,
+    mode: HomeLightingRoomMode,
+    now = new Date()
+  ): Promise<HomeLightingRoomMutation | undefined> {
+    const config = this.catalog.getAdaptiveLightingConfig();
+    const room = config?.enabled ? config.rooms.find((candidate) => candidate.roomId === roomId) : undefined;
+    if (!config || !room) return undefined;
+    const deviceIds = this.roomDeviceIds(room);
+    const rawStates = await this.ha.getStates();
+    const states = new Map(
+      (Array.isArray(rawStates) ? rawStates : [])
+        .filter(isHassState)
+        .map((state) => [state.entity_id, state] as const)
+    );
+    for (const deviceId of deviceIds) {
+      const entityId = this.catalog.getMapping(deviceId)?.entityId;
+      const state = entityId ? states.get(entityId)?.state : undefined;
+      if (state) this.lastObservedStates.set(deviceId, state);
+    }
+    const target = mode === 'off' ? undefined : this.target(room, mode, states.get(config.weatherEntityId), now);
+    const results = await Promise.all(deviceIds.map((deviceId) => mode === 'off'
+      ? executeCatalogHomeAction({
+          catalog: this.catalog,
+          ha: this.ha,
+          command: { deviceId, action: 'turn_off' },
+          allowAlreadySatisfied: true,
+        })
+      : this.applyRoomProfile(deviceId, target!, config.transitionSeconds))) as Array<Awaited<ReturnType<typeof executeCatalogHomeAction>>>;
+    const failedDeviceIds = deviceIds.filter((_, index) => !results[index]?.ok);
+    const operationStatus = mutationStatus(results);
+    if (operationStatus !== 'failed') {
+      this.desiredRooms.set(roomId, { mode, ...(target ? { target } : {}) });
+      if (operationStatus === 'accepted' || operationStatus === 'uncertain') {
+        this.pendingUntil.set(roomId, now.getTime() + (config.transitionSeconds + config.pollSeconds + 10) * 1_000);
+      } else {
+        this.pendingUntil.delete(roomId);
+      }
+    }
+    return {
+      roomId,
+      mode,
+      available: results.some((result) => result.ok),
+      deviceIds,
+      ...(target ? { target } : {}),
+      ...(operationStatus === 'accepted' || operationStatus === 'uncertain' ? { pending: true } : {}),
+      operationStatus,
+      failedDeviceIds,
+    };
+  }
+
+  private async runTick(now: Date): Promise<void> {
+    const config = this.catalog.getAdaptiveLightingConfig();
+    if (!config?.enabled) return;
+    let rawStates: unknown;
+    try {
+      rawStates = await this.ha.getStates();
+    } catch (error) {
+      this.log.warn(
+        { errorCode: error instanceof Error ? error.message : 'room_lighting_state_failed' },
+        'room lighting could not read Home Assistant state'
+      );
+      return;
+    }
+    const states = new Map(
+      (Array.isArray(rawStates) ? rawStates : [])
+        .filter(isHassState)
+        .map((state) => [state.entity_id, state] as const)
+    );
+
+    for (const room of config.rooms) {
+      const desired = this.desiredRooms.get(room.roomId);
+      for (const deviceId of this.roomDeviceIds(room)) {
+        const entityId = this.catalog.getMapping(deviceId)?.entityId;
+        const current = entityId ? observedLight(states.get(entityId)) : undefined;
+        if (!current) continue;
+        const previousState = this.lastObservedStates.get(deviceId);
+        this.lastObservedStates.set(deviceId, current.state);
+        if (!desired || ['unavailable', 'unknown'].includes(current.state)) continue;
+        if ((this.pendingUntil.get(room.roomId) ?? 0) > now.getTime()) continue;
+
+        const shouldRestoreOff = desired.mode === 'off' && current.state === 'on';
+        const reconnected = ['unavailable', 'unknown'].includes(previousState ?? '') && current.state === 'on';
+        const shouldRestoreProfile = desired.mode !== 'off' && desired.target && reconnected
+          && !matchesTarget(current, desired.target);
+        if (!shouldRestoreOff && !shouldRestoreProfile) continue;
+
+        const result = desired.mode === 'off'
+          ? await executeCatalogHomeAction({
+              catalog: this.catalog,
+              ha: this.ha,
+              command: { deviceId, action: 'turn_off' },
+              allowAlreadySatisfied: true,
+            })
+          : await this.applyRoomProfile(deviceId, desired.target!, config.transitionSeconds);
+        if (!result.ok) {
+          this.log.warn(
+            { deviceId, roomId: room.roomId, mode: desired.mode, errorCode: result.code },
+            'room lighting mode reconciliation failed'
+          );
+        } else {
+          this.log.info(
+            { deviceId, roomId: room.roomId, mode: desired.mode },
+            'room lighting mode restored after device reconnect'
+          );
+        }
+      }
+    }
+  }
+}

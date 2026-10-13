@@ -356,8 +356,12 @@ export function registerAdminRoutes(
         },
         {
           key: 'nas-status',
-          status: deps.nasStatus?.isConfigured() ? 'configured' : 'not_configured',
-          configured: Boolean(deps.nasStatus?.isConfigured()),
+          status: !deps.env.NAS_STATUS_ENABLED
+            ? 'disabled'
+            : deps.nasStatus?.isConfigured()
+              ? 'configured'
+              : 'not_configured',
+          configured: Boolean(deps.env.NAS_STATUS_ENABLED && deps.nasStatus?.isConfigured()),
         },
       ],
     };

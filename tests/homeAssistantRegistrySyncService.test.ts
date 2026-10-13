@@ -35,7 +35,38 @@ describe('HomeAssistantRegistrySyncService', () => {
       changes: [{ kind: 'update_device', deviceId: 'living-tv', name: 'TV', roomName: 'Séjour' }],
       unchanged: 0,
       skipped: [],
+      conflicts: [],
     });
+  });
+
+  test('reports direct Home Assistant edits as conflicts and never overwrites them', async () => {
+    const websocketCommand = jest.fn(async (command: Record<string, unknown>) => {
+      if (command.type === 'config/area_registry/list') return [{ area_id: 'salon', name: 'Salon' }];
+      if (command.type === 'config/entity_registry/list') return [{ entity_id: 'media_player.lg_tv', device_id: 'ha-tv' }];
+      if (command.type === 'config/device_registry/list') {
+        return [{ id: 'ha-tv', area_id: 'salon', name_by_user: 'Télé du séjour' }];
+      }
+      throw new Error('unexpected_mutation');
+    });
+    const service = new HomeAssistantRegistrySyncService(
+      { websocketCommand } as unknown as HomeAssistantClient,
+      catalog()
+    );
+
+    await expect(service.apply()).resolves.toMatchObject({
+      operationStatus: 'succeeded',
+      applied: 0,
+      changes: [],
+      conflicts: [{
+        deviceIds: ['living-tv'],
+        reason: 'name_changed_in_home_assistant',
+        current: 'Télé du séjour',
+        desired: 'TV',
+      }],
+    });
+    expect(websocketCommand).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'config/device_registry/update',
+    }));
   });
 
   test('creates missing areas, updates devices, and verifies convergence', async () => {

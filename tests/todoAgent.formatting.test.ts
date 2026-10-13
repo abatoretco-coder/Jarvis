@@ -1,10 +1,95 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 
-import { formatDueDateForUser, formatTodoActionPreview } from '../src/todo/todoAgent';
+import {
+  compactTodoListForFallback,
+  executeTodoAgentAction,
+  formatDueDateForUser,
+  formatTodoActionPreview,
+} from '../src/todo/todoAgent';
+
+const originalFetch = global.fetch;
 
 describe('todoAgent formatting', () => {
   afterEach(() => {
     jest.useRealTimers();
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  it("follows Microsoft Graph pagination and returns every task due today", async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-13T10:00:00.000Z'));
+    global.fetch = jest.fn(async (input) => {
+      const url = String(input);
+      if (url.includes('oauth2')) {
+        return new Response(JSON.stringify({ access_token: 'access', expires_in: 3600 }), { status: 200 });
+      }
+      if (url.endsWith('/me/todo/lists')) {
+        return new Response(JSON.stringify({ value: [{ id: 'tasks', displayName: 'Tâches', wellknownListName: 'defaultList' }] }), { status: 200 });
+      }
+      if (url.includes('page=2')) {
+        return new Response(JSON.stringify({ value: [
+          { id: '3', title: 'Trois', status: 'notStarted', dueDateTime: { dateTime: '2026-10-13T00:00:00', timeZone: 'UTC' } },
+        ] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        value: [
+          { id: '1', title: 'Une', status: 'notStarted', dueDateTime: { dateTime: '2026-10-13T00:00:00', timeZone: 'UTC' } },
+          { id: '2', title: 'Deux', status: 'notStarted', dueDateTime: { dateTime: '2026-10-13T00:00:00', timeZone: 'UTC' } },
+        ],
+        '@odata.nextLink': 'https://graph.microsoft.com/v1.0/me/todo/lists/tasks/tasks?page=2',
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const response = await executeTodoAgentAction(
+      { action: 'list_tasks', period: 'today' },
+      {
+        MICROSOFT_CLIENT_ID: 'pagination-test',
+        MICROSOFT_CLIENT_SECRET: 'secret',
+        MICROSOFT_REFRESH_TOKEN: 'refresh',
+        OPENAI_API_KEY: 'openai',
+        OPENAI_BASE_URL: 'https://api.openai.com/v1',
+        OPENAI_TIMEOUT_MS: 1_000,
+      },
+    );
+    expect(response).toContain('Une');
+    expect(response).toContain('Deux');
+    expect(response).toContain('Trois');
+  });
+
+  it('never forwards the Microsoft access token to an untrusted next-page URL', async () => {
+    const requestedUrls: string[] = [];
+    global.fetch = jest.fn(async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('oauth2')) {
+        return new Response(JSON.stringify({ access_token: 'sensitive-access', expires_in: 3600 }), { status: 200 });
+      }
+      if (url.endsWith('/me/todo/lists')) {
+        return new Response(JSON.stringify({ value: [{ id: 'tasks', displayName: 'Tâches', wellknownListName: 'defaultList' }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        value: [],
+        '@odata.nextLink': 'https://attacker.example/steal',
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    await executeTodoAgentAction(
+      { action: 'list_tasks', period: 'today' },
+      {
+        MICROSOFT_CLIENT_ID: 'untrusted-next-link-test',
+        MICROSOFT_CLIENT_SECRET: 'secret',
+        MICROSOFT_REFRESH_TOKEN: 'refresh',
+        OPENAI_API_KEY: 'openai',
+        OPENAI_BASE_URL: 'https://api.openai.com/v1',
+        OPENAI_TIMEOUT_MS: 1_000,
+      },
+    );
+    expect(requestedUrls.some((url) => url.includes('attacker.example'))).toBe(false);
+  });
+
+  it("keeps every task in today's written list", () => {
+    const text = "Tu as 6 tâches aujourd'hui : Une ; Deux ; Trois ; Quatre ; Cinq ; Six.";
+    expect(compactTodoListForFallback(text)).toBe(text);
   });
 
   it('uses relative wording for today and tomorrow', () => {

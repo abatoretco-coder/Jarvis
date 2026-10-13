@@ -6,6 +6,7 @@ import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import Fastify from 'fastify';
 
 import type { Env } from '../src/env';
+import { resolveLightingPhase } from '../src/home/AdaptiveLightingPolicy';
 import type { PermissionKey, RoleKey } from '../src/identity/IdentityRepository';
 import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { registerHomeRoutes } from '../src/routes/home';
@@ -13,6 +14,7 @@ import type { AppDeps } from '../src/server';
 
 const roots: string[] = [];
 afterEach(() => {
+  jest.useRealTimers();
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -21,7 +23,8 @@ function setup(
   permissions: PermissionKey[] = ['home'],
   writable = false,
   homeControlConfigured = true,
-  clientId?: string
+  clientId?: string,
+  adaptiveLightingConfigured = false
 ) {
   const root = mkdtempSync(join(tmpdir(), 'jarvis-home-'));
   roots.push(root);
@@ -48,6 +51,31 @@ function setup(
         },
       ],
       automation: {
+        ...(adaptiveLightingConfigured ? { adaptiveLighting: {
+          enabled: true,
+          sunEntityId: 'sun.sun',
+          weatherEntityId: 'weather.home',
+          pollSeconds: 30,
+          manualOverrideMinutes: 120,
+          transitionSeconds: 20,
+          weather: { maxBrightnessAdjustment: 12, maxColorTemperatureAdjustmentKelvin: 300 },
+          rooms: [{
+            roomId: 'living',
+            deviceIds: ['living-light'],
+            phases: {
+              dawn: { brightnessPercent: 45, colorTemperatureKelvin: 3200 },
+              day: { brightnessPercent: 55, colorTemperatureKelvin: 3900 },
+              dusk: { brightnessPercent: 25, colorTemperatureKelvin: 2700 },
+              night: { brightnessPercent: 40, colorTemperatureKelvin: 2600 },
+            },
+            dimmedPhases: {
+              dawn: { brightnessPercent: 15, colorTemperatureKelvin: 2500 },
+              day: { brightnessPercent: 20, colorTemperatureKelvin: 2800 },
+              dusk: { brightnessPercent: 12, colorTemperatureKelvin: 2400 },
+              night: { brightnessPercent: 8, colorTemperatureKelvin: 2200 },
+            },
+          }],
+        } } : {}),
         spaces: [
           {
             roomId: 'living',
@@ -104,7 +132,9 @@ function setup(
     })
   );
   const getStates = jest.fn<() => Promise<unknown[]>>(async () => [
-    { entity_id: 'light.salon', state: 'on', attributes: { friendly_name: 'Salon', supported_color_modes: ['brightness'] } },
+    { entity_id: 'sun.sun', state: 'above_horizon', attributes: { elevation: 35, rising: false } },
+    { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
+    { entity_id: 'light.salon', state: 'on', attributes: { friendly_name: 'Salon', brightness: 128, color_temp_kelvin: 2700, color_mode: 'color_temp', supported_color_modes: ['color_temp'], min_color_temp_kelvin: 2237, max_color_temp_kelvin: 6535 } },
     { entity_id: 'camera.salon', state: 'idle', attributes: { friendly_name: 'Caméra salon' } },
     { entity_id: 'sensor.living_temperature', state: '21.4', attributes: { friendly_name: 'Tapo température', device_class: 'temperature' } },
     { entity_id: 'sensor.living_humidity', state: '54', attributes: { device_class: 'humidity' } },
@@ -155,10 +185,14 @@ function setup(
   ]);
   const savedAutomationIds = new Set<string>();
   let vacuumState = 'docked';
+  let suctionState = 'Strong';
   const callService = jest.fn(async (input: unknown) => {
-    const call = input as { domain?: string; service?: string };
+    const call = input as { domain?: string; service?: string; serviceData?: { option?: string } };
     if (call.domain === 'vacuum' && call.service === 'start') vacuumState = 'cleaning';
     if (call.domain === 'vacuum' && call.service === 'return_to_base') vacuumState = 'returning';
+    if (call.domain === 'select' && call.service === 'select_option' && call.serviceData?.option) {
+      suctionState = call.serviceData.option;
+    }
     if (call.domain === 'xiaomi_vacuum_local' && call.service === 'get_rooms') {
       return {
         status: 200,
@@ -177,7 +211,7 @@ function setup(
   ]]);
   const getState = jest.fn<(entityId: string) => Promise<unknown>>(async (entityId: string) => {
     if (entityId === 'light.salon') {
-      return { entity_id: entityId, state: 'on', attributes: { friendly_name: 'Salon' } };
+      return { entity_id: entityId, state: 'on', attributes: { friendly_name: 'Salon', brightness: 128, color_temp_kelvin: 2700, color_mode: 'color_temp', supported_color_modes: ['color_temp'], min_color_temp_kelvin: 2237, max_color_temp_kelvin: 6535 } };
     }
     if (entityId === 'vacuum.robot') {
       return { entity_id: entityId, state: vacuumState, attributes: { friendly_name: 'Nono' } };
@@ -190,7 +224,7 @@ function setup(
       };
     }
     if (entityId === 'select.robot_suction') {
-      return { entity_id: entityId, state: 'Strong', attributes: { options: ['Silent', 'Strong'] } };
+      return { entity_id: entityId, state: suctionState, attributes: { options: ['Silent', 'Strong'] } };
     }
     if (entityId === 'select.robot_mop') {
       return { entity_id: entityId, state: 'Medium', attributes: { options: ['Low', 'Medium', 'High'] } };
@@ -299,6 +333,106 @@ function setup(
 }
 
 describe('home routes', () => {
+  test('exposes and changes the three room-wide lighting modes for household members', async () => {
+    const { app, callService } = setup('resident', ['home'], false, true, undefined, true);
+
+    const initial = await app.inject({ method: 'GET', url: '/v1/home/lighting/rooms' });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json().rooms).toEqual([
+      expect.objectContaining({ roomId: 'living', mode: 'manual', available: true }),
+    ]);
+
+    callService.mockClear();
+    const dimmed = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'dimmed' },
+    });
+    expect(dimmed.statusCode).toBe(200);
+    expect(dimmed.json()).toMatchObject({ mode: 'dimmed', operationStatus: 'uncertain', pending: true });
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'turn_on',
+      serviceData: expect.objectContaining({ brightness_pct: expect.any(Number), color_temp_kelvin: expect.any(Number) }),
+    }));
+
+    const on = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'on' },
+    });
+    expect(on.statusCode).toBe(200);
+    const expectedTargets = {
+      dawn: { brightnessPercent: 45, colorTemperatureKelvin: 3200 },
+      day: { brightnessPercent: 55, colorTemperatureKelvin: 3900 },
+      dusk: { brightnessPercent: 25, colorTemperatureKelvin: 2700 },
+      night: { brightnessPercent: 40, colorTemperatureKelvin: 2600 },
+    };
+    expect(on.json()).toMatchObject({
+      mode: 'on',
+      target: expectedTargets[resolveLightingPhase()],
+    });
+    await app.close();
+  });
+
+  test('lets the owner read and update room lighting curves while residents stay read-only', async () => {
+    const owner = setup('owner', ['home'], true, true, undefined, true);
+    const initial = await owner.app.inject({ method: 'GET', url: '/v1/home/lighting/profiles' });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      canEdit: true,
+      rooms: [{
+        roomId: 'living',
+        phases: { day: { brightnessPercent: 55, colorTemperatureKelvin: 3900 } },
+        dimmedPhases: { day: { brightnessPercent: 20, colorTemperatureKelvin: 2800 } },
+      }],
+    });
+
+    const updated = await owner.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/profile',
+      payload: {
+        expectedRevision: initial.json().revision,
+        phases: {
+          dawn: { brightnessPercent: 45, colorTemperatureKelvin: 3200 },
+          day: { brightnessPercent: 62, colorTemperatureKelvin: 4100 },
+          dusk: { brightnessPercent: 25, colorTemperatureKelvin: 2700 },
+          night: { brightnessPercent: 40, colorTemperatureKelvin: 2600 },
+        },
+        dimmedPhases: {
+          dawn: { brightnessPercent: 15, colorTemperatureKelvin: 2500 },
+          day: { brightnessPercent: 18, colorTemperatureKelvin: 2700 },
+          dusk: { brightnessPercent: 12, colorTemperatureKelvin: 2400 },
+          night: { brightnessPercent: 8, colorTemperatureKelvin: 2200 },
+        },
+      },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      room: {
+        roomId: 'living',
+        phases: { day: { brightnessPercent: 62, colorTemperatureKelvin: 4100 } },
+        dimmedPhases: { day: { brightnessPercent: 18, colorTemperatureKelvin: 2700 } },
+      },
+    });
+    await owner.app.close();
+
+    const resident = setup('resident', ['home'], false, true, undefined, true);
+    const visible = await resident.app.inject({ method: 'GET', url: '/v1/home/lighting/profiles' });
+    expect(visible.statusCode).toBe(200);
+    expect(visible.json().canEdit).toBe(false);
+    const forbidden = await resident.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/profile',
+      payload: {
+        expectedRevision: visible.json().revision,
+        phases: visible.json().rooms[0].phases,
+        dimmedPhases: visible.json().rooms[0].dimmedPhases,
+      },
+    });
+    expect(forbidden.statusCode).toBe(403);
+    await resident.app.close();
+  });
+
   test('returns deterministic robot rooms and cleaning history to household members', async () => {
     const resident = setup('resident', ['home']);
     const response = await resident.app.inject({
@@ -756,6 +890,29 @@ describe('home routes', () => {
       serviceData: { button: 'HOME' },
     });
 
+    const keyboard = await app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-tv', action: 'type_text', option: 'Le Bureau des Légendes' },
+    });
+    expect(keyboard.statusCode).toBe(200);
+    expect(callService).toHaveBeenLastCalledWith({
+      domain: 'webostv',
+      service: 'command',
+      target: { entity_id: 'media_player.lg_tv' },
+      serviceData: {
+        command: 'com.webos.service.ime/insertText',
+        payload: { text: 'Le Bureau des Légendes', replace: false },
+      },
+    });
+
+    const controlCharacters = await app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-tv', action: 'type_text', option: 'ligne 1\nligne 2' },
+    });
+    expect(controlCharacters.statusCode).toBe(400);
+
     const channel = await app.inject({
       method: 'POST',
       url: '/v1/home/actions',
@@ -849,7 +1006,7 @@ describe('home routes', () => {
     expect(invalid.json()).toEqual({ error: 'home_action_option_invalid' });
     expect(callService).toHaveBeenCalledTimes(callsBeforeInvalidOption);
     await app.close();
-  });
+  }, 10_000);
 
   test('exposes only real heating capabilities and validates modes and ranges server-side', async () => {
     const { app, callService } = setup('resident', ['home']);

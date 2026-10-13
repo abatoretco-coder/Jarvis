@@ -41,7 +41,8 @@ export class HomeHeatingPlanUpdateError extends Error {
   constructor(
     public readonly outcome: 'failed' | 'partial' | 'uncertain',
     public readonly appliedFields: Array<'comfortTemperature' | 'ecoTemperature' | 'enabled'>,
-    cause?: unknown
+    cause?: unknown,
+    public readonly observedPlan?: HomeHeatingPlan
   ) {
     super(`home_heating_plan_${outcome}`, { cause });
     this.name = 'HomeHeatingPlanUpdateError';
@@ -113,6 +114,22 @@ export class HomeHeatingPlanService {
   }
 
   async update(input: HomeHeatingPlanUpdate): Promise<HomeHeatingPlanUpdateResult> {
+    const fields = Object.entries(input).filter(([, value]) => value !== undefined);
+    if (fields.length === 0) throw new HomeHeatingPlanUpdateError('failed', []);
+    if (
+      (input.comfortTemperature !== undefined
+        && (!Number.isFinite(input.comfortTemperature)
+          || input.comfortTemperature < 16
+          || input.comfortTemperature > 24
+          || input.comfortTemperature * 2 % 1 !== 0))
+      || (input.ecoTemperature !== undefined
+        && (!Number.isFinite(input.ecoTemperature)
+          || input.ecoTemperature < 12
+          || input.ecoTemperature > 21
+          || input.ecoTemperature * 2 % 1 !== 0))
+    ) {
+      throw new HomeHeatingPlanUpdateError('failed', []);
+    }
     const current = await this.get();
     if (!current.available || current.comfortTemperature === null || current.ecoTemperature === null) {
       throw new HomeHeatingPlanUpdateError('failed', []);
@@ -125,8 +142,7 @@ export class HomeHeatingPlanService {
       field: 'comfortTemperature' | 'ecoTemperature' | 'enabled';
       call: () => ReturnType<HomeAssistantClient['callService']>;
     }> = [];
-    if (input.comfortTemperature !== undefined) {
-      operations.push({
+    const comfortOperation = input.comfortTemperature === undefined ? null : {
         field: 'comfortTemperature',
         call: () => this.ha.callService({
           domain: 'input_number',
@@ -134,10 +150,8 @@ export class HomeHeatingPlanService {
           target: { entity_id: entities.comfort },
           serviceData: { value: input.comfortTemperature },
         }),
-      });
-    }
-    if (input.ecoTemperature !== undefined) {
-      operations.push({
+      } as const;
+    const ecoOperation = input.ecoTemperature === undefined ? null : {
         field: 'ecoTemperature',
         call: () => this.ha.callService({
           domain: 'input_number',
@@ -145,7 +159,17 @@ export class HomeHeatingPlanService {
           target: { entity_id: entities.eco },
           serviceData: { value: input.ecoTemperature },
         }),
-      });
+      } as const;
+    // Preserve the invariant during a two-field transition as well as at the
+    // final target: lower Eco first when Confort decreases, otherwise raise
+    // Confort before Eco.
+    if (comfortOperation && ecoOperation) {
+      operations.push(...(comfort < current.comfortTemperature
+        ? [ecoOperation, comfortOperation]
+        : [comfortOperation, ecoOperation]));
+    } else {
+      if (comfortOperation) operations.push(comfortOperation);
+      if (ecoOperation) operations.push(ecoOperation);
     }
     if (input.enabled !== undefined) {
       operations.push({
@@ -169,7 +193,8 @@ export class HomeHeatingPlanService {
           : appliedFields.length > 0
             ? 'partial'
             : 'failed';
-        throw new HomeHeatingPlanUpdateError(outcome, appliedFields, error);
+        const observedPlan = await this.get().catch(() => undefined);
+        throw new HomeHeatingPlanUpdateError(outcome, appliedFields, error, observedPlan);
       }
     }
 
@@ -190,6 +215,7 @@ export class HomeHeatingPlanService {
         lastError = error;
       }
     }
-    throw new HomeHeatingPlanUpdateError('uncertain', appliedFields, lastError);
+    const observedPlan = await this.get().catch(() => undefined);
+    throw new HomeHeatingPlanUpdateError('uncertain', appliedFields, lastError, observedPlan);
   }
 }

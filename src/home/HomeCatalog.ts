@@ -37,7 +37,7 @@ export const HOME_ACTION_NAMES = [
   'set_antilegionella', 'open', 'close', 'stop', 'set_brightness', 'set_color',
   'set_volume', 'volume_up', 'volume_down', 'mute', 'unmute', 'media_play',
   'media_pause', 'media_stop', 'media_next', 'media_previous', 'play_channel',
-  'select_source', 'select_sound_output', 'remote_key', 'empty_dust_bin', 'wash_mop',
+  'select_source', 'select_sound_output', 'remote_key', 'type_text', 'empty_dust_bin', 'wash_mop',
   'start_mop_drying', 'stop_mop_drying',
 ] as const;
 export type HomeActionName = (typeof HOME_ACTION_NAMES)[number];
@@ -55,8 +55,8 @@ export type HomeQuickAction = {
 export type DeterministicHomeVoiceAction = {
   name: string;
   deviceId: string;
-  action: 'set_volume';
-  value: number;
+  action: 'turn_on' | 'turn_off' | 'set_brightness' | 'set_volume';
+  value?: number;
 };
 export type HomeScene = {
   sceneId: string;
@@ -72,6 +72,42 @@ export type HomeRoutine = {
   enabled: boolean;
   sceneId: string;
   trigger: { type: 'time'; at: string; weekdays: number[] };
+};
+export type AdaptiveLightingPhase = 'dawn' | 'day' | 'dusk' | 'night';
+export type HomeLightingVoiceMode = 'on' | 'dimmed' | 'off';
+export type DeterministicRoomLightingMode = {
+  roomId: string;
+  roomName: string;
+  mode: HomeLightingVoiceMode;
+};
+export type AdaptiveLightingLevel = {
+  brightnessPercent: number;
+  colorTemperatureKelvin: number;
+};
+export type AdaptiveLightingRoomConfig = {
+  roomId: string;
+  deviceIds: string[];
+  phases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
+  dimmedPhases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
+};
+export type AdaptiveLightingConfig = {
+  enabled: boolean;
+  sunEntityId: string;
+  weatherEntityId: string;
+  pollSeconds: number;
+  manualOverrideMinutes: number;
+  transitionSeconds: number;
+  weather: {
+    maxBrightnessAdjustment: number;
+    maxColorTemperatureAdjustmentKelvin: number;
+  };
+  rooms: AdaptiveLightingRoomConfig[];
+};
+export type UpdateAdaptiveLightingRoomProfile = {
+  expectedRevision: string;
+  roomId: string;
+  phases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
+  dimmedPhases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
 };
 export type DevicePlacement = {
   x: number;
@@ -253,6 +289,7 @@ export type HomeDevice = {
   heatingActive?: boolean;
   showersAvailable?: number;
   heatingTimeMinutes?: number;
+  brightnessPercent?: number;
   volumeLevel?: number;
   muted?: boolean;
   source?: string;
@@ -287,6 +324,7 @@ export type HomeSnapshot = {
   revision: string;
   rooms: HomeRoom[];
   devices: HomeDevice[];
+  adaptiveLightingDeviceIds: string[];
   quickActions: HomeQuickAction[];
   scenes: HomeScene[];
   routines: HomeRoutine[];
@@ -311,6 +349,7 @@ type HomeFile = {
     quickActions?: HomeQuickAction[];
     scenes?: HomeScene[];
     routines?: HomeRoutine[];
+    adaptiveLighting?: AdaptiveLightingConfig;
   };
   [key: string]: unknown;
 };
@@ -376,6 +415,16 @@ export function isHomeActionValueValid(
   if (action === 'remote_key') {
     return value === undefined && typeof option === 'string' && tvRemoteKeys.has(option);
   }
+  if (action === 'type_text') {
+    return value === undefined
+      && typeof option === 'string'
+      && option.trim().length >= 1
+      && option.length <= 120
+      && !Array.from(option).some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 31 || codePoint === 127;
+      });
+  }
   return value === undefined && option === undefined;
 }
 
@@ -420,6 +469,90 @@ export function inferDeterministicTvVolumeAction(
     action: 'set_volume',
     value,
   };
+}
+
+type DeterministicLightTarget = {
+  deviceId: string;
+  name: string;
+  roomName: string;
+  kind: 'ceiling' | 'spot' | 'light';
+  ordinal?: number;
+};
+
+function lightRoomAliases(roomName: string): string[] {
+  const normalized = normalizeVoicePhrase(roomName);
+  return normalized === 'sejour' ? ['sejour', 'salon'] : [normalized];
+}
+
+function inferDeterministicLightActions(
+  text: string,
+  lights: ReadonlyArray<DeterministicLightTarget>
+): DeterministicHomeVoiceAction[] {
+  const normalized = normalizeVoiceCommand(text);
+  const requestedKind = /\bplafonniers?\b/u.test(normalized)
+    ? 'ceiling'
+    : /\bspots?\b/u.test(normalized)
+      ? 'spot'
+      : undefined;
+  const eligibleLights = requestedKind
+    ? lights.filter((light) => light.kind === requestedKind)
+    : [...lights];
+  if (
+    eligibleLights.length === 0
+    || !/\b(?:plafonnier|plafonniers|spot|spots|lampe|lampes|ampoule|ampoules|lumiere|lumieres|eclairage)\b/u.test(normalized)
+    || /\b(?:et|puis|ensuite)\b/u.test(normalized)
+  ) return [];
+
+  let action: DeterministicHomeVoiceAction['action'] | undefined;
+  let value: number | undefined;
+  if (/\b(?:au minimum|minimale|minimal|minimum)\b/u.test(normalized)) {
+    action = 'set_brightness';
+    value = 1;
+  } else {
+    const brightnessMatch = normalized.match(/\b(?:a|au)\s+(\d{1,3})(?:\s*%)?\b/u);
+    if (brightnessMatch && /\b(?:mets|met|regle|fixe|baisse|monte)\b/u.test(normalized)) {
+      const parsed = Number(brightnessMatch[1]);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) return [];
+      action = 'set_brightness';
+      value = parsed;
+    } else if (/\b(?:eteins|eteindre|coupe|couper)\b/u.test(normalized)) {
+      action = 'turn_off';
+    } else if (/\b(?:allume|allumer|active|activer)\b/u.test(normalized)) {
+      action = 'turn_on';
+    }
+  }
+  if (!action) return [];
+
+  const exact = eligibleLights.filter((light) => {
+    const normalizedName = normalizeVoicePhrase(light.name);
+    if (normalized.includes(normalizedName)) return true;
+    const index = light.ordinal?.toString() ?? normalizedName.match(/\b([1-9])$/u)?.[1];
+    if (!index || !lightRoomAliases(light.roomName).some((alias) => new RegExp(`\\b${alias}\\b`, 'u').test(normalized))) {
+      return false;
+    }
+    const ordinal = index === '1' ? '(?:1|1er|premier)' : index === '2' ? '(?:2|2e|deuxieme|second)' : index;
+    const roomAliasPattern = lightRoomAliases(light.roomName).join('|');
+    return new RegExp(
+      `(?:plafonnier\\s+(?:(?:${roomAliasPattern})\\s+)?(?:numero\\s+)?${ordinal}|${ordinal}\\s+plafonnier)`,
+      'u'
+    ).test(normalized);
+  });
+  let targets = exact;
+  if (targets.length === 0) {
+    const roomNames = [...new Set(eligibleLights.flatMap((light) => lightRoomAliases(light.roomName)))]
+      .filter((alias) => new RegExp(`\\b${alias}\\b`, 'u').test(normalized));
+    if (roomNames.length === 1) {
+      targets = eligibleLights.filter((light) => lightRoomAliases(light.roomName).includes(roomNames[0] as string));
+    } else if (/\b(?:tous|toutes|tout)\b/u.test(normalized)) {
+      targets = [...eligibleLights];
+    }
+  }
+  return targets.map((light) => ({
+    name: light.name,
+    deviceId: light.deviceId,
+    action,
+    ...(value === undefined ? {} : { value }),
+  }));
 }
 
 function normalizeQuickAction(value: HomeQuickAction): HomeQuickAction | null {
@@ -735,6 +868,74 @@ function validateHome(value: unknown, expectedId: string): HomeFile {
   return home;
 }
 
+function normalizeAdaptiveLighting(
+  value: AdaptiveLightingConfig | undefined,
+  rooms: ReadonlyMap<string, HomeFile['rooms'][number]>,
+  mappings: ReadonlyMap<string, DeviceMapping>,
+  mappingsByRoom: ReadonlyMap<string, DeviceMapping[]>
+): AdaptiveLightingConfig | undefined {
+  if (value === undefined) return undefined;
+  const phases: AdaptiveLightingPhase[] = ['dawn', 'day', 'dusk', 'night'];
+  if (
+    typeof value.enabled !== 'boolean'
+    || !entityIdPattern.test(value.sunEntityId)
+    || value.sunEntityId.split('.')[0] !== 'sun'
+    || !entityIdPattern.test(value.weatherEntityId)
+    || value.weatherEntityId.split('.')[0] !== 'weather'
+    || !Number.isInteger(value.pollSeconds)
+    || value.pollSeconds < 15
+    || value.pollSeconds > 900
+    || !Number.isInteger(value.manualOverrideMinutes)
+    || value.manualOverrideMinutes < 5
+    || value.manualOverrideMinutes > 1_440
+    || !Number.isFinite(value.transitionSeconds)
+    || value.transitionSeconds < 0
+    || value.transitionSeconds > 300
+    || !Number.isFinite(value.weather?.maxBrightnessAdjustment)
+    || value.weather.maxBrightnessAdjustment < 0
+    || value.weather.maxBrightnessAdjustment > 30
+    || !Number.isFinite(value.weather?.maxColorTemperatureAdjustmentKelvin)
+    || value.weather.maxColorTemperatureAdjustmentKelvin < 0
+    || value.weather.maxColorTemperatureAdjustmentKelvin > 1_000
+    || !Array.isArray(value.rooms)
+    || value.rooms.length === 0
+  ) throw new Error('home_config_invalid');
+
+  const configuredRooms = new Set<string>();
+  const configuredDevices = new Set<string>();
+  const validLevels = (levels: Record<AdaptiveLightingPhase, AdaptiveLightingLevel> | undefined) =>
+    phases.every((phase) => {
+      const level = levels?.[phase];
+      return level !== undefined
+        && Number.isFinite(level.brightnessPercent)
+        && level.brightnessPercent >= 1
+        && level.brightnessPercent <= 100
+        && Number.isFinite(level.colorTemperatureKelvin)
+        && level.colorTemperatureKelvin >= 2_000
+        && level.colorTemperatureKelvin <= 6_500;
+    });
+  for (const room of value.rooms) {
+    if (
+      !rooms.has(room.roomId)
+      || configuredRooms.has(room.roomId)
+      || !Array.isArray(room.deviceIds)
+      || room.deviceIds.length === 0
+      || new Set(room.deviceIds).size !== room.deviceIds.length
+      || !validLevels(room.phases)
+      || !validLevels(room.dimmedPhases)
+      || room.deviceIds.some((deviceId) => {
+        const mapping = mappings.get(deviceId);
+        return configuredDevices.has(deviceId)
+          || !['light', 'switch'].includes(mapping?.entityId?.split('.')[0] ?? '')
+          || !mappingsByRoom.get(room.roomId)?.some((candidate) => candidate.deviceId === deviceId);
+      })
+    ) throw new Error('home_config_invalid');
+    configuredRooms.add(room.roomId);
+    room.deviceIds.forEach((deviceId) => configuredDevices.add(deviceId));
+  }
+  return structuredClone(value);
+}
+
 function seedWritableHome(templateRoot: string, dataRoot: string, homeId: string): string {
   const source = resolve(templateRoot, homeId);
   const destination = resolve(dataRoot, homeId);
@@ -764,6 +965,7 @@ export class HomeCatalog {
   private quickActions: HomeQuickAction[] = [];
   private scenes: HomeScene[] = [];
   private routines: HomeRoutine[] = [];
+  private adaptiveLighting?: AdaptiveLightingConfig;
 
   constructor(configRoot: string, homeId: string, dataRoot?: string) {
     const templateRoot = resolve(configRoot);
@@ -852,6 +1054,12 @@ export class HomeCatalog {
       routineIds.add(routine.routineId);
       return routine;
     });
+    this.adaptiveLighting = normalizeAdaptiveLighting(
+      home.automation?.adaptiveLighting,
+      validRooms,
+      mappingsByDeviceId,
+      mappingsByRoom
+    );
   }
 
   isWritable(): boolean {
@@ -864,6 +1072,12 @@ export class HomeCatalog {
 
   getMapping(deviceId: string): DeviceMapping | undefined {
     return this.mappingsByDeviceId.get(deviceId);
+  }
+
+  getRoomLightDeviceIds(roomId: string): string[] {
+    return (this.mappingsByRoom.get(roomId) ?? [])
+      .filter((mapping) => mapping.entityId?.startsWith('light.'))
+      .map((mapping) => mapping.deviceId);
   }
 
   getQuickActions(): HomeQuickAction[] {
@@ -882,10 +1096,81 @@ export class HomeCatalog {
   }
 
   inferDeterministicVoiceAction(text: string): DeterministicHomeVoiceAction | undefined {
+    const lightActions = inferDeterministicLightActions(text, this.lightVoiceTargets());
+    if (lightActions.length === 1) return lightActions[0];
     const televisions = [...this.mappingsByDeviceId.values()]
       .filter((mapping) => mapping.presetId === 'television' && mapping.entityId?.startsWith('media_player.'))
       .map((mapping) => ({ deviceId: mapping.deviceId, name: mapping.name }));
     return inferDeterministicTvVolumeAction(text, televisions);
+  }
+
+  inferDeterministicRoomLightingMode(text: string): DeterministicRoomLightingMode | undefined {
+    const normalized = normalizeVoiceCommand(text);
+    if (/\b(?:lampe|lampes|ampoule|ampoules|plafonnier|plafonniers|spot|spots)\b/u.test(normalized)) {
+      return undefined;
+    }
+    const mode: HomeLightingVoiceMode | undefined = /\b(?:tamise|tamiser|tamisee|tamisees|doux|douce)\b/u.test(normalized)
+      ? 'dimmed'
+      : /\b(?:eteins|eteindre|coupe|couper)\b/u.test(normalized)
+        ? 'off'
+        : /\b(?:allume|allumer|eclaire|eclairer|active|activer)\b/u.test(normalized)
+          ? 'on'
+          : undefined;
+    if (!mode) return undefined;
+    const configuredRoomIds = new Set(this.adaptiveLighting?.rooms.map((room) => room.roomId) ?? []);
+    const matches = this.home.rooms.filter((room) => {
+      if (!configuredRoomIds.has(room.roomId)) return false;
+      const roomName = normalizeVoicePhrase(room.name);
+      const aliases = roomName === 'sejour'
+        ? ['sejour', 'salon']
+        : roomName === 'salle deau'
+          ? ['salle deau', 'salle de bain']
+          : [roomName];
+      return aliases.some((alias) => new RegExp(`\\b${alias.replace(/\s+/gu, '\\s+')}\\b`, 'u').test(normalized));
+    });
+    if (matches.length !== 1) return undefined;
+    return { roomId: matches[0]!.roomId, roomName: matches[0]!.name, mode };
+  }
+
+  inferDeterministicVoiceScene(text: string): HomeScene | undefined {
+    const lightActions = inferDeterministicLightActions(text, this.lightVoiceTargets());
+    if (lightActions.length < 2) return undefined;
+    const normalized = normalizeVoiceCommand(text).slice(0, 48).replace(/\s+/gu, '-');
+    return {
+      sceneId: `voice-light-${createHash('sha256').update(normalized).digest('hex').slice(0, 12)}`,
+      name: 'Lumière',
+      icon: 'light',
+      steps: lightActions.map(({ deviceId, action, value }) => ({
+        deviceId,
+        action,
+        ...(value === undefined ? {} : { value }),
+      })),
+      voicePhrases: [],
+      sortOrder: 999,
+    };
+  }
+
+  private lightVoiceTargets(): DeterministicLightTarget[] {
+    const roomsById = new Map(this.home.rooms.map((room) => [room.roomId, room.name]));
+    return [...this.mappingsByRoom.entries()].flatMap(([roomId, mappings]) =>
+      mappings
+        .filter((mapping) => mapping.presetId === 'light' && Boolean(mapping.entityId))
+        .map((mapping) => ({
+          deviceId: mapping.deviceId,
+          name: mapping.name ?? 'Plafonnier',
+          roomName: roomsById.get(roomId) ?? roomId,
+          kind: mapping.deviceId.includes('-ceiling')
+            ? 'ceiling' as const
+            : mapping.deviceId.includes('-spot-')
+              ? 'spot' as const
+              : 'light' as const,
+          ordinal: mapping.deviceId === 'hue-living-ceiling-1'
+            ? 1
+            : mapping.deviceId === 'hue-living-ceiling-2'
+              ? 2
+              : undefined,
+        }))
+    );
   }
 
   getScenes(): HomeScene[] {
@@ -905,6 +1190,27 @@ export class HomeCatalog {
 
   getRoutines(): HomeRoutine[] {
     return structuredClone(this.routines).sort((left, right) => left.name.localeCompare(right.name, 'fr'));
+  }
+
+  getAdaptiveLightingConfig(): AdaptiveLightingConfig | undefined {
+    return this.adaptiveLighting ? structuredClone(this.adaptiveLighting) : undefined;
+  }
+
+  updateAdaptiveLightingRoomProfile(input: UpdateAdaptiveLightingRoomProfile): void {
+    if (!this.writable) throw new Error('home_config_read_only');
+    if (input.expectedRevision !== this.revision) throw new Error('home_config_conflict');
+    const config = this.adaptiveLighting;
+    const room = config?.rooms.find((candidate) => candidate.roomId === input.roomId);
+    if (!config || !room) throw new Error('lighting_room_not_found');
+
+    const nextHome = structuredClone(this.home);
+    const nextRoom = nextHome.automation?.adaptiveLighting?.rooms.find(
+      (candidate) => candidate.roomId === input.roomId
+    );
+    if (!nextRoom) throw new Error('lighting_room_not_found');
+    nextRoom.phases = structuredClone(input.phases);
+    nextRoom.dimmedPhases = structuredClone(input.dimmedPhases);
+    this.persist(nextHome);
   }
 
   upsertScene(input: UpsertHomeScene): void {
@@ -1217,6 +1523,10 @@ export class HomeCatalog {
           preset.domain === 'media_player' && typeof attributes.volume_level === 'number'
             ? Math.round(attributes.volume_level * 100)
             : undefined;
+        const brightnessPercent =
+          preset.domain === 'light' && typeof attributes.brightness === 'number'
+            ? Math.round((attributes.brightness / 255) * 100)
+            : undefined;
         const sourceList =
           preset.domain === 'media_player' && Array.isArray(attributes.source_list)
             ? attributes.source_list.filter((value): value is string => typeof value === 'string').slice(0, 100)
@@ -1357,6 +1667,7 @@ export class HomeCatalog {
           ...(numericCompanion(mapping.waterHeater?.energyEntityId) === undefined ? {} : { energyKwh: numericCompanion(mapping.waterHeater?.energyEntityId) }),
           ...(numericCompanion(mapping.waterHeater?.showersEntityId) === undefined ? {} : { showersAvailable: numericCompanion(mapping.waterHeater?.showersEntityId) }),
           ...(numericCompanion(mapping.waterHeater?.heatingTimeEntityId) === undefined ? {} : { heatingTimeMinutes: numericCompanion(mapping.waterHeater?.heatingTimeEntityId) }),
+          ...(brightnessPercent === undefined ? {} : { brightnessPercent }),
           ...(volumeLevel === undefined ? {} : { volumeLevel }),
           ...(typeof attributes.is_volume_muted === 'boolean' ? { muted: attributes.is_volume_muted } : {}),
           ...(typeof attributes.source === 'string' ? { source: attributes.source } : {}),
@@ -1396,6 +1707,9 @@ export class HomeCatalog {
         deviceIds: (this.mappingsByRoom.get(room.roomId) ?? []).map((mapping) => mapping.deviceId),
       })),
       devices,
+      adaptiveLightingDeviceIds: this.adaptiveLighting?.enabled
+        ? [...new Set(this.adaptiveLighting.rooms.flatMap((room) => this.getRoomLightDeviceIds(room.roomId)))]
+        : [],
       quickActions: this.getQuickActions(),
       scenes: this.getScenes(),
       routines: this.getRoutines(),

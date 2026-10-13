@@ -5,7 +5,12 @@ import type { FastifyRequest } from 'fastify';
 import type { PermissionKey } from './IdentityRepository';
 import type { UserPrincipal } from './IdentityService';
 
-export type ServicePrincipal = { kind: 'service'; serviceId: string; permissions: PermissionKey[] };
+export type ServicePrincipal = {
+  kind: 'service';
+  serviceId: string;
+  permissions: PermissionKey[];
+  delegatedUserId?: string;
+};
 export type RequestPrincipal = UserPrincipal | ServicePrincipal;
 
 const principals = new WeakMap<FastifyRequest, RequestPrincipal>();
@@ -27,12 +32,15 @@ export function getRequestPrincipal(request: FastifyRequest): RequestPrincipal |
 }
 
 /**
- * Returns the authenticated human owner for repository-level row filtering.
- * `null` is the isolated unauthenticated compatibility partition; it never aliases a user.
+ * Returns the authenticated human owner, or the user explicitly delegated to a
+ * trusted service, for connected-provider credential lookup. Conversation data
+ * ownership remains isolated by `getCurrentDataOwnerScope` below.
  */
 export function getCurrentOwnerUserId(): string | null {
   const principal = requestIdentityContext.getStore()?.principal;
-  return principal?.kind === 'user' ? principal.userId : null;
+  if (principal?.kind === 'user') return principal.userId;
+  if (principal?.kind === 'service') return principal.delegatedUserId ?? null;
+  return null;
 }
 
 export function setCurrentIntegrationConnectionId(connectionId: string | undefined): void {
@@ -45,9 +53,7 @@ export function getCurrentIntegrationConnectionId(): string | undefined {
 }
 
 export type DataOwnerScope =
-  | { kind: 'user'; userId: string }
-  | { kind: 'service'; serviceId: string }
-  | { kind: 'legacy' };
+  { kind: 'user'; userId: string } | { kind: 'service'; serviceId: string } | { kind: 'legacy' };
 
 export function getCurrentDataOwnerScope(): DataOwnerScope {
   const principal = requestIdentityContext.getStore()?.principal;

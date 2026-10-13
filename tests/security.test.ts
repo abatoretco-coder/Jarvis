@@ -2,6 +2,7 @@ import { describe, expect, test } from '@jest/globals';
 import Fastify from 'fastify';
 
 import { loadEnv } from '../src/env';
+import { getRequestPrincipal } from '../src/identity/requestIdentity';
 import { registerApiKeyHook } from '../src/routes/apiKeyHook';
 import { registerPrincipalRateLimitHook, registerSecurityHooks } from '../src/routes/securityHooks';
 
@@ -10,7 +11,24 @@ const TEST_SERVICE_TOKEN = 'test-service-token-0123456789abcdef';
 function makeEnv(overrides: Record<string, string | undefined> = {}) {
   return loadEnv({
     REQUIRE_API_KEY: 'true',
-    SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'test-service', token: TEST_SERVICE_TOKEN, permissions: ['chat', 'history', 'mail', 'calendar', 'todo', 'music', 'home', 'cameras', 'admin', 'nas.operations'] }]),
+    SERVICE_API_KEYS_JSON: JSON.stringify([
+      {
+        id: 'test-service',
+        token: TEST_SERVICE_TOKEN,
+        permissions: [
+          'chat',
+          'history',
+          'mail',
+          'calendar',
+          'todo',
+          'music',
+          'home',
+          'cameras',
+          'admin',
+          'nas.operations',
+        ],
+      },
+    ]),
     GOOGLE_CLIENT_ID: 'google-client',
     GOOGLE_CLIENT_SECRET: 'google-secret',
     ...overrides,
@@ -295,7 +313,7 @@ describe('security hooks', () => {
     const retiredDesktopToken = 'retired-desktop-token-with-32-characters';
     const env = makeEnv({
       SERVICE_API_KEYS_JSON: JSON.stringify([
-        { id: 'home-assistant-pc', token: homeAssistantToken, permissions: ['home', 'music'] },
+        { id: 'home-assistant-pc', token: homeAssistantToken, permissions: ['chat', 'home', 'music'] },
         { id: 'pc-agent', token: pcAgentToken, permissions: ['music'] },
         { id: 'desktop-local', token: retiredDesktopToken, permissions: ['chat'] },
       ]),
@@ -303,28 +321,66 @@ describe('security hooks', () => {
     const app = Fastify();
     registerApiKeyHook(app, env);
     app.post('/v1/ingest', async () => ({ ok: true }));
+    app.post('/v1/stt/default', async () => ({ ok: true }));
+    app.post('/v1/tts', async () => ({ ok: true }));
+    app.post('/v1/tts/openai', async () => ({ ok: true }));
     app.get('/v1/home', async () => ({ ok: true }));
     app.post('/v1/pc-agent/poll', async () => ({ ok: true }));
     app.post('/v1/music/actions', async () => ({ ok: true }));
     app.get('/v1/ping', async () => ({ ok: true }));
 
     const haIngest = await app.inject({
-      method: 'POST', url: '/v1/ingest', headers: { 'x-api-key': homeAssistantToken }, payload: {},
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-api-key': homeAssistantToken },
+      payload: {},
     });
     const haHomeDenied = await app.inject({
-      method: 'GET', url: '/v1/home', headers: { 'x-api-key': homeAssistantToken },
+      method: 'GET',
+      url: '/v1/home',
+      headers: { 'x-api-key': homeAssistantToken },
+    });
+    const haStt = await app.inject({
+      method: 'POST',
+      url: '/v1/stt/default',
+      headers: { 'x-api-key': homeAssistantToken },
+      payload: {},
+    });
+    const haTts = await app.inject({
+      method: 'POST',
+      url: '/v1/tts',
+      headers: { 'x-api-key': homeAssistantToken },
+      payload: {},
+    });
+    const haAlternateTtsDenied = await app.inject({
+      method: 'POST',
+      url: '/v1/tts/openai',
+      headers: { 'x-api-key': homeAssistantToken },
+      payload: {},
     });
     const pcPoll = await app.inject({
-      method: 'POST', url: '/v1/pc-agent/poll', headers: { 'x-api-key': pcAgentToken }, payload: {},
+      method: 'POST',
+      url: '/v1/pc-agent/poll',
+      headers: { 'x-api-key': pcAgentToken },
+      payload: {},
     });
     const pcMusicDenied = await app.inject({
-      method: 'POST', url: '/v1/music/actions', headers: { 'x-api-key': pcAgentToken }, payload: {},
+      method: 'POST',
+      url: '/v1/music/actions',
+      headers: { 'x-api-key': pcAgentToken },
+      payload: {},
     });
     const desktopDenied = await app.inject({
-      method: 'GET', url: '/v1/ping', headers: { 'x-api-key': retiredDesktopToken },
+      method: 'GET',
+      url: '/v1/ping',
+      headers: { 'x-api-key': retiredDesktopToken },
     });
 
     expect(haIngest.statusCode).toBe(200);
+    expect(haStt.statusCode).toBe(200);
+    expect(haTts.statusCode).toBe(200);
+    expect(haAlternateTtsDenied.statusCode).toBe(403);
+    expect(haAlternateTtsDenied.json()).toEqual({ error: 'service_route_forbidden' });
     expect(haHomeDenied.statusCode).toBe(403);
     expect(haHomeDenied.json()).toEqual({ error: 'service_route_forbidden' });
     expect(pcPoll.statusCode).toBe(200);
@@ -355,6 +411,46 @@ describe('security hooks', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ ok: true });
     await app.close();
+  });
+
+  test('attaches only an explicitly configured delegated user to a service principal', async () => {
+    const delegatedUserId = '00000000-0000-4000-8000-000000000001';
+    const env = makeEnv({
+      SERVICE_DELEGATED_USERS_JSON: JSON.stringify({ 'test-service': delegatedUserId }),
+    });
+    const app = Fastify();
+    registerApiKeyHook(app, env);
+    app.post('/v1/ingest', async (request) => ({ principal: getRequestPrincipal(request) }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-api-key': TEST_SERVICE_TOKEN },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().principal).toMatchObject({
+      kind: 'service',
+      serviceId: 'test-service',
+      delegatedUserId,
+    });
+    await app.close();
+  });
+
+  test('rejects delegation to an invalid user id or from an unknown service', () => {
+    expect(() =>
+      makeEnv({
+        SERVICE_DELEGATED_USERS_JSON: JSON.stringify({ 'test-service': 'not-a-user-uuid' }),
+      })
+    ).toThrow('SERVICE_DELEGATED_USERS_JSON');
+    expect(() =>
+      makeEnv({
+        SERVICE_DELEGATED_USERS_JSON: JSON.stringify({
+          'unknown-service': '00000000-0000-4000-8000-000000000001',
+        }),
+      })
+    ).toThrow('SERVICE_DELEGATED_USERS_JSON');
   });
 
   test('applies a stricter independent limiter to authentication routes', async () => {

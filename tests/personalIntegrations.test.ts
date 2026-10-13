@@ -69,6 +69,36 @@ describe('personal integration isolation', () => {
       .toThrow('integration_credential_decryption_failed');
   });
 
+  it('decrypts household calendar tokens only after explicit sharing and membership', () => {
+    const db = createConversationDb(':memory:');
+    insertUser(db, 'owner', 'owner@example.test');
+    insertUser(db, 'resident', 'resident@example.test');
+    insertUser(db, 'outsider', 'outsider@example.test');
+    db.exec(`
+      INSERT INTO households(household_id,name,created_by_user_id,created_at_ms,updated_at_ms)
+      VALUES ('home','Maison','owner',1,1),('other-home','Autre','outsider',1,1);
+      INSERT INTO household_memberships(household_id,user_id,role_key,status,created_at_ms,updated_at_ms)
+      VALUES ('home','owner','owner','active',1,1),('home','resident','resident','active',1,1),
+        ('other-home','outsider','owner','active',1,1);
+    `);
+    const repository = new IntegrationRepository(db);
+    const service = new IntegrationService(repository, env());
+    const connectionId = repository.beginOAuth({ ownerUserId: 'owner', provider: 'google-calendar',
+      kind: 'personal', scopes: ['calendar'], state: 'state', codeVerifier: 'verifier',
+      redirectUri: 'https://jarvis.test/callback', expiresAtMs: Date.now() + 60_000 });
+    const credentialId = 'owner-calendar-secret';
+    repository.activate({ connectionId, credentialId,
+      encrypted: new CredentialVault(key).encrypt('owner-refresh', credentialId), scopes: ['calendar'] });
+
+    expect(service.resolveSharedHouseholdRefreshTokens('resident', 'google-calendar')).toEqual([]);
+    db.prepare(`INSERT INTO daily_life_calendar_shares(household_id,user_id,enabled_at_ms,updated_at_ms)
+      VALUES ('home','owner',1,1)`).run();
+    expect(service.resolveSharedHouseholdRefreshTokens('resident', 'google-calendar'))
+      .toEqual([expect.objectContaining({ userId: 'owner', refreshToken: 'owner-refresh' })]);
+    expect(service.resolveSharedHouseholdRefreshTokens('outsider', 'google-calendar')).toEqual([]);
+    db.close();
+  });
+
   it('binds PKCE callbacks to their initiating users without cross-account token access', async () => {
     const db = createConversationDb(':memory:');
     insertUser(db, 'user-a', 'a@example.test');

@@ -322,25 +322,45 @@ export class HomeAssistantClient {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const resp = await fetch(url, {
-        method,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          ...(body ? { 'content-type': 'application/json' } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-        signal: controller.signal,
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(url, {
+          method,
+          headers: {
+            authorization: `Bearer ${this.token}`,
+            ...(body ? { 'content-type': 'application/json' } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        throw new HomeAssistantRequestError(
+          'Home Assistant automation transport failed',
+          'transport',
+          method !== 'GET',
+          { cause: error }
+        );
+      }
       const data = await this.readResponseBody(resp);
       if (!resp.ok) {
-        throw new Error(`Home Assistant automation request failed: ${resp.status}`);
+        throw new HomeAssistantRequestError(
+          `Home Assistant automation request failed: ${resp.status}`,
+          'rejected',
+          false
+        );
       }
       return data && typeof data === 'object' && !Array.isArray(data)
         ? (data as HomeAssistantAutomationConfig)
         : {};
     } catch (err) {
+      if (err instanceof HomeAssistantRequestError) throw err;
       const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      throw new Error(`Home Assistant request failed: ${msg}`, { cause: err });
+      throw new HomeAssistantRequestError(
+        `Home Assistant automation response failed: ${msg}`,
+        'transport',
+        method !== 'GET',
+        { cause: err }
+      );
     } finally {
       clearTimeout(timeout);
     }

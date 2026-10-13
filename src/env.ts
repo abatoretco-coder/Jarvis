@@ -58,6 +58,7 @@ const envSchema = z
     API_KEY: optionalNonEmptyString,
     API_KEYS: optionalNonEmptyString,
     SERVICE_API_KEYS_JSON: optionalNonEmptyString,
+    SERVICE_DELEGATED_USERS_JSON: optionalNonEmptyString,
     INGEST_ALLOWLIST_IPS: optionalNonEmptyString,
     RATE_LIMIT_WINDOW_MS: numberFromEnv.pipe(z.number().min(1000).max(3600000)).default(60000),
     RATE_LIMIT_MAX: numberFromEnv.pipe(z.number().min(10).max(10000)).default(240),
@@ -101,6 +102,7 @@ const envSchema = z
       .default('home_fr_paris_10_fsm_236_lot_204'),
 
     // Read-only NAS metrics collector.
+    NAS_STATUS_ENABLED: booleanFromEnv.default(false),
     NAS_STATUS_URL: optionalUrl,
     NAS_STATUS_TOKEN: optionalNonEmptyString,
     NAS_STATUS_TIMEOUT_MS: numberFromEnv.default(2500),
@@ -137,6 +139,7 @@ const envSchema = z
     HELIX_NEWS_TIMEOUT_MS: numberFromEnv.default(60000),
 
     // Agora Culture / Sorties. Provider secrets never enter Jarvis.
+    CULTURE_ENABLED: booleanFromEnv.default(false),
     AGORA_BASE_URL: optionalUrl,
     AGORA_API_TOKEN: optionalNonEmptyString,
     AGORA_TIMEOUT_MS: numberFromEnv.default(8000),
@@ -475,6 +478,37 @@ const envSchema = z
           code: z.ZodIssueCode.custom,
           path: ['SERVICE_API_KEYS_JSON'],
           message: 'must be a valid scoped service credential array',
+        });
+      }
+    }
+    if (val.SERVICE_DELEGATED_USERS_JSON) {
+      try {
+        const parsed = JSON.parse(val.SERVICE_DELEGATED_USERS_JSON) as unknown;
+        const serviceIds = new Set<string>();
+        if (val.SERVICE_API_KEYS_JSON) {
+          const services = JSON.parse(val.SERVICE_API_KEYS_JSON) as Array<{ id?: unknown }>;
+          for (const service of services) {
+            if (typeof service.id === 'string') serviceIds.add(service.id);
+          }
+        }
+        const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+        const entries =
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? Object.entries(parsed as Record<string, unknown>)
+            : [];
+        const valid =
+          entries.length > 0 &&
+          entries.length <= 100 &&
+          entries.every(
+            ([serviceId, userId]) =>
+              serviceIds.has(serviceId) && typeof userId === 'string' && uuid.test(userId)
+          );
+        if (!valid) throw new Error();
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SERVICE_DELEGATED_USERS_JSON'],
+          message: 'must map configured service ids to user UUIDs',
         });
       }
     }
