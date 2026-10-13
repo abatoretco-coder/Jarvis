@@ -167,7 +167,11 @@ describe('HomeAssistantAutomationService', () => {
   test('reconciles a stale managed automation with the current scene mapping', async () => {
     let state = 'on';
     const saveAutomationConfig = jest.fn(async (_id: string, _config: unknown) => undefined);
-    const callService = jest.fn(async (input: { service: string }) => {
+    const callService = jest.fn(async (input: {
+      domain: string;
+      service: string;
+      target: { entity_id: string };
+    }) => {
       state = input.service === 'turn_on' ? 'on' : 'off';
       return { status: 200, data: [] };
     });
@@ -202,6 +206,57 @@ describe('HomeAssistantAutomationService', () => {
         ]),
       })
     );
+    expect(callService.mock.invocationCallOrder[0]).toBeLessThan(saveAutomationConfig.mock.invocationCallOrder[0]!);
+    expect(callService).toHaveBeenNthCalledWith(1, {
+      domain: 'automation',
+      service: 'turn_off',
+      target: { entity_id: 'automation.soiree' },
+    });
+    expect(callService).toHaveBeenLastCalledWith({
+      domain: 'automation',
+      service: 'turn_on',
+      target: { entity_id: 'automation.soiree' },
+    });
+  });
+
+  test('does not mutate the catalog while an active managed automation cannot be confirmed off', async () => {
+    const mutation = jest.fn(() => 'changed');
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree',
+        state: 'on',
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => ({
+        description: 'jarvis-managed:v1:scene=scene-evening',
+      })),
+      callService: jest.fn(async () => ({ status: 200, data: [] })),
+    } as unknown as HomeAssistantClient;
+
+    await expect(
+      new HomeAssistantAutomationService(ha, catalog(), async () => undefined)
+        .reconcileCatalogMutation(mutation)
+    ).rejects.toThrow('home_automation_pause_unconfirmed');
+    expect(mutation).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when an active automation cannot be classified before a catalog mutation', async () => {
+    const mutation = jest.fn(() => 'changed');
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.unreadable',
+        state: 'on',
+        attributes: { id: 'unreadable_schedule' },
+      }]),
+      getAutomationConfig: jest.fn(async () => { throw new Error('ha_unavailable'); }),
+      callService: jest.fn(),
+    } as unknown as HomeAssistantClient;
+
+    await expect(
+      new HomeAssistantAutomationService(ha, catalog()).reconcileCatalogMutation(mutation)
+    ).rejects.toThrow('home_automation_pause_unconfirmed');
+    expect(mutation).not.toHaveBeenCalled();
+    expect(ha.callService).not.toHaveBeenCalled();
   });
 
   test('waits for a saved automation to reload and applies the requested state', async () => {

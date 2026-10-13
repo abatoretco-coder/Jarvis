@@ -221,6 +221,7 @@ function mutationError(error: unknown): { status: number; code: string } {
   if (code === 'home_automation_not_found') return { status: 404, code };
   if (code === 'home_automation_not_managed') return { status: 409, code };
   if (code === 'home_automation_invalid') return { status: 400, code };
+  if (code === 'home_automation_pause_unconfirmed') return { status: 503, code };
   if (code === 'home_config_read_only') return { status: 503, code };
   if (code.startsWith('home_')) return { status: 400, code };
   return { status: 500, code: 'home_config_update_failed' };
@@ -318,6 +319,18 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       return { operationStatus: 'uncertain' as const, updated: [], skipped: [], failed: [] };
     }
   };
+  const mutateCatalogWithReconciliation = async <T>(reason: string, mutation: () => T) => {
+    if (!automationService) return { value: mutation(), reconciliation: null };
+    const result = await automationService.reconcileCatalogMutation(mutation);
+    if (
+      result.reconciliation.operationStatus !== 'succeeded'
+      || result.reconciliation.updated.length > 0
+      || result.reconciliation.skipped.length > 0
+    ) {
+      app.log.info({ reason, ...result.reconciliation }, 'managed home automations reconciled');
+    }
+    return result;
+  };
 
   app.get('/v1/home/configuration/home-assistant-sync', async (request, reply) => {
     if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {
@@ -370,12 +383,14 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
           errorCode: syncError?.message ?? 'home_assistant_registry_unavailable',
           operationStatus,
           applied: syncError?.applied ?? 0,
+          failureCount: syncError?.failures.length ?? 0,
         },
       });
       return reply.code(operationStatus === 'uncertain' ? 503 : 502).send({
         error: syncError?.message ?? 'home_assistant_registry_unavailable',
         operationStatus,
         applied: syncError?.applied ?? 0,
+        failures: syncError?.failures ?? [],
       });
     }
   });
@@ -995,8 +1010,9 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(400).send({ error: 'home_device_invalid' });
       }
       try {
-        catalog.upsertDevice({ deviceId: deviceId.data, ...body.data });
-        await reconcileManagedAutomations('device_mapping_changed');
+        await mutateCatalogWithReconciliation('device_mapping_changed', () =>
+          catalog.upsertDevice({ deviceId: deviceId.data, ...body.data })
+        );
         recordHomeAudit(app, deps, request, {
           action: 'home.device.upsert',
           targetId: deviceId.data,
@@ -1034,8 +1050,9 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
         return reply.code(400).send({ error: 'home_device_invalid' });
       }
       try {
-        catalog.deleteDevice(deviceId.data, body.data.expectedRevision);
-        await reconcileManagedAutomations('device_mapping_deleted');
+        await mutateCatalogWithReconciliation('device_mapping_deleted', () =>
+          catalog.deleteDevice(deviceId.data, body.data.expectedRevision)
+        );
         recordHomeAudit(app, deps, request, {
           action: 'home.device.delete',
           targetId: deviceId.data,
@@ -1206,20 +1223,22 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     const actions = parsed.data.quickActionIds.map((quickActionId) => catalog?.getQuickAction(quickActionId));
     if (actions.some((action) => !action)) return reply.code(400).send({ error: 'home_scene_invalid' });
     try {
-      catalog.upsertScene({
-        sceneId: id.data,
-        expectedRevision: parsed.data.expectedRevision,
-        name: parsed.data.name,
-        icon: parsed.data.icon,
-        voicePhrases: parsed.data.voicePhrases,
-        steps: actions.map((action) => ({
-          deviceId: action!.deviceId,
-          action: action!.action,
-          ...(action!.value === undefined ? {} : { value: action!.value }),
-          ...(action!.option === undefined ? {} : { option: action!.option }),
-        })),
-      });
-      const automationReconciliation = await reconcileManagedAutomations('scene_changed');
+      const { reconciliation: automationReconciliation } = await mutateCatalogWithReconciliation(
+        'scene_changed',
+        () => catalog.upsertScene({
+          sceneId: id.data,
+          expectedRevision: parsed.data.expectedRevision,
+          name: parsed.data.name,
+          icon: parsed.data.icon,
+          voicePhrases: parsed.data.voicePhrases,
+          steps: actions.map((action) => ({
+            deviceId: action!.deviceId,
+            action: action!.action,
+            ...(action!.value === undefined ? {} : { value: action!.value }),
+            ...(action!.option === undefined ? {} : { option: action!.option }),
+          })),
+        })
+      );
       recordHomeAudit(app, deps, request, {
         action: 'home.scene.update',
         targetType: 'home.scene',
@@ -1286,8 +1305,9 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       const body = deleteConfigurationSchema.safeParse(request.body);
       if (!id.success || !body.success) return reply.code(400).send({ error: 'home_scene_invalid' });
       try {
-        catalog.deleteScene(id.data, body.data.expectedRevision);
-        await reconcileManagedAutomations('scene_deleted');
+        await mutateCatalogWithReconciliation('scene_deleted', () =>
+          catalog.deleteScene(id.data, body.data.expectedRevision)
+        );
         recordHomeAudit(app, deps, request, {
           action: 'home.scene.delete',
           targetType: 'home.scene',

@@ -119,6 +119,10 @@ describe('HomeAssistantRegistrySyncService', () => {
     await expect(service.apply()).rejects.toMatchObject({
       outcome: 'uncertain',
       applied: 0,
+      failures: [{
+        change: { kind: 'create_area', roomId: 'living', roomName: 'Séjour' },
+        reason: 'request_failed',
+      }],
     });
     expect(websocketCommand).toHaveBeenCalledTimes(4);
   });

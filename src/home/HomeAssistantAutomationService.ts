@@ -38,6 +38,19 @@ export type ManagedAutomationInput = {
   enabled: boolean;
 };
 
+export type HomeAutomationReconciliationResult = {
+  operationStatus: 'succeeded' | 'partial' | 'uncertain';
+  updated: string[];
+  skipped: Array<{ automationId: string; reason: 'missing_scene' | 'invalid_configuration' }>;
+  failed: string[];
+};
+
+type SuspendedManagedAutomation = {
+  automationId: string;
+  entityId: string;
+  sceneId: string;
+};
+
 type HaState = {
   entity_id: string;
   state: string;
@@ -308,12 +321,31 @@ export class HomeAssistantAutomationService {
     if (!managedMetadata(config)) throw new Error('home_automation_not_managed');
   }
 
-  async reconcile(): Promise<{
-    operationStatus: 'succeeded' | 'partial' | 'uncertain';
-    updated: string[];
-    skipped: Array<{ automationId: string; reason: 'missing_scene' | 'invalid_configuration' }>;
-    failed: string[];
+  async reconcileCatalogMutation<T>(mutation: () => T): Promise<{
+    value: T;
+    reconciliation: HomeAutomationReconciliationResult;
   }> {
+    const suspended = await this.suspendManagedAutomations();
+    let value: T;
+    try {
+      value = mutation();
+    } catch (error) {
+      await this.restoreManagedAutomations(suspended);
+      throw error;
+    }
+    const reconciliation = await this.reconcile();
+    const blocked = new Set([
+      ...reconciliation.failed,
+      ...reconciliation.skipped.map((item) => item.automationId),
+    ]);
+    const restoreStatus = await this.restoreManagedAutomations(
+      suspended.filter((item) => !blocked.has(item.automationId) && this.catalog.getScene(item.sceneId))
+    );
+    if (restoreStatus !== 'succeeded') reconciliation.operationStatus = 'uncertain';
+    return { value, reconciliation };
+  }
+
+  async reconcile(): Promise<HomeAutomationReconciliationResult> {
     const rawStates = await this.ha.getStates();
     const states = (Array.isArray(rawStates) ? rawStates : [])
       .filter(isHaState)
@@ -344,6 +376,7 @@ export class HomeAssistantAutomationService {
         skipped.push({ automationId, reason: 'invalid_configuration' });
         continue;
       }
+      const wasEnabled = state.state === 'on';
       let desired: HomeAssistantAutomationConfig;
       try {
         desired = compileManagedAutomation(this.catalog, {
@@ -351,7 +384,7 @@ export class HomeAssistantAutomationService {
           sceneId: managed.sceneId,
           at: schedule.at,
           weekdays: schedule.weekdays,
-          enabled: state.state === 'on',
+          enabled: false,
         });
       } catch {
         skipped.push({ automationId, reason: 'invalid_configuration' });
@@ -361,8 +394,16 @@ export class HomeAssistantAutomationService {
         continue;
       }
       try {
+        if (wasEnabled) {
+          const disabledStatus = await this.setEnabledAndVerify(automationId, state.entity_id, false);
+          if (disabledStatus !== 'succeeded') {
+            failed.push(automationId);
+            uncertain = true;
+            continue;
+          }
+        }
         await this.ha.saveAutomationConfig(automationId, desired);
-        const enabledStatus = await this.setEnabledWhenLoaded(automationId, state.state === 'on');
+        const enabledStatus = await this.setEnabledWhenLoaded(automationId, wasEnabled);
         if (enabledStatus !== 'succeeded') uncertain = true;
         updated.push(automationId);
       } catch (error) {
@@ -376,6 +417,49 @@ export class HomeAssistantAutomationService {
       skipped,
       failed,
     };
+  }
+
+  private async suspendManagedAutomations(): Promise<SuspendedManagedAutomation[]> {
+    const rawStates = await this.ha.getStates();
+    const states = (Array.isArray(rawStates) ? rawStates : [])
+      .filter(isHaState)
+      .filter((state) => state.entity_id.startsWith('automation.') && state.state === 'on');
+    const suspended: SuspendedManagedAutomation[] = [];
+    for (const state of states) {
+      const automationId = typeof state.attributes?.id === 'string' ? state.attributes.id : '';
+      if (!automationIdPattern.test(automationId)) continue;
+      let config: HomeAssistantAutomationConfig | null;
+      try {
+        config = await this.ha.getAutomationConfig(automationId);
+      } catch {
+        await this.restoreManagedAutomations(suspended);
+        throw new Error('home_automation_pause_unconfirmed');
+      }
+      const managed = managedMetadata(config);
+      if (!managed) continue;
+      const status = await this.setEnabledAndVerify(automationId, state.entity_id, false);
+      if (status !== 'succeeded') {
+        await this.restoreManagedAutomations(suspended);
+        throw new Error('home_automation_pause_unconfirmed');
+      }
+      suspended.push({ automationId, entityId: state.entity_id, sceneId: managed.sceneId });
+    }
+    return suspended;
+  }
+
+  private async restoreManagedAutomations(
+    automations: SuspendedManagedAutomation[]
+  ): Promise<'succeeded' | 'uncertain'> {
+    let uncertain = false;
+    for (const automation of automations) {
+      try {
+        const status = await this.setEnabledWhenLoaded(automation.automationId, true);
+        if (status !== 'succeeded') uncertain = true;
+      } catch {
+        uncertain = true;
+      }
+    }
+    return uncertain ? 'uncertain' : 'succeeded';
   }
 
   private async findStateById(automationId: string): Promise<HaState | undefined> {

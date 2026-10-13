@@ -38,6 +38,10 @@ export class HomeAssistantSyncError extends Error {
   constructor(
     public readonly outcome: 'failed' | 'partial' | 'uncertain',
     public readonly applied: number,
+    public readonly failures: Array<{
+      change: HomeAssistantSyncChange;
+      reason: 'request_failed' | 'result_unconfirmed';
+    }> = [],
     cause?: unknown
   ) {
     super(`home_assistant_sync_${outcome}`, { cause });
@@ -175,14 +179,17 @@ export class HomeAssistantRegistrySyncService {
     const initialState = await this.state();
     const preview = this.buildPreview(initialState);
     let applied = 0;
+    let activeChange: HomeAssistantSyncChange | null = null;
 
     try {
       for (const change of preview.changes.filter((item) => item.kind === 'create_area')) {
+        activeChange = change;
         await this.ha.websocketCommand<AreaRegistryEntry>({
           type: 'config/area_registry/create',
           name: change.roomName,
         }, { mutation: true });
         applied += 1;
+        activeChange = null;
       }
 
       const current = await this.state();
@@ -200,10 +207,19 @@ export class HomeAssistantRegistrySyncService {
         const registryDevice = devicesById.get(entity.device_id);
         const room = roomsById.get(mapping.roomId);
         if (!registryDevice || !room) continue;
+        activeChange = {
+          kind: 'update_device',
+          deviceId: mapping.deviceId,
+          name: mapping.name,
+          roomName: room.name,
+        };
         const area = (room.areaId ? areasById.get(room.areaId) : undefined)
           ?? areasByName.get(normalizedName(room.name));
         if (!area) throw new Error('home_assistant_sync_area_missing');
-        if (registryDevice.area_id === area.area_id && registryDevice.name_by_user === mapping.name) continue;
+        if (registryDevice.area_id === area.area_id && registryDevice.name_by_user === mapping.name) {
+          activeChange = null;
+          continue;
+        }
         await this.ha.websocketCommand({
           type: 'config/device_registry/update',
           device_id: registryDevice.id,
@@ -211,6 +227,7 @@ export class HomeAssistantRegistrySyncService {
           name_by_user: mapping.name,
         }, { mutation: true });
         applied += 1;
+        activeChange = null;
       }
       let finalPreview: HomeAssistantSyncPreview | null = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -220,7 +237,11 @@ export class HomeAssistantRegistrySyncService {
           return { ...finalPreview, operationStatus: 'succeeded', applied };
         }
       }
-      throw new HomeAssistantSyncError('uncertain', applied);
+      throw new HomeAssistantSyncError(
+        'uncertain',
+        applied,
+        (finalPreview?.changes ?? []).map((change) => ({ change, reason: 'result_unconfirmed' }))
+      );
     } catch (error) {
       if (error instanceof HomeAssistantSyncError) throw error;
       const outcome = error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted
@@ -228,7 +249,12 @@ export class HomeAssistantRegistrySyncService {
         : applied > 0
           ? 'partial'
           : 'failed';
-      throw new HomeAssistantSyncError(outcome, applied, error);
+      throw new HomeAssistantSyncError(
+        outcome,
+        applied,
+        activeChange ? [{ change: activeChange, reason: 'request_failed' }] : [],
+        error
+      );
     }
   }
 }

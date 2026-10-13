@@ -29,8 +29,14 @@ type Entry = {
   promise: Promise<CachedMutationResponse>;
   resolve: (response: CachedMutationResponse) => void;
   settled: boolean;
+  response?: CachedMutationResponse;
   pendingTimer: NodeJS.Timeout;
 };
+
+export type MutationResultLookup =
+  | { state: 'missing' }
+  | { state: 'pending' }
+  | { state: 'completed'; response: CachedMutationResponse };
 
 export type MutationReservation =
   | { kind: 'owner'; cacheKey: string }
@@ -130,6 +136,7 @@ export class MutationIdempotencyCoordinator {
           // The in-memory waiter must still be released if persistence is no
           // longer available during shutdown.
         }
+        entry.response = response;
         entry.resolve(response);
       }, pendingTimeoutMs),
     };
@@ -148,7 +155,25 @@ export class MutationIdempotencyCoordinator {
     entry.settled = true;
     clearTimeout(entry.pendingTimer);
     this.options.store?.complete(entry.identity, entry.idempotencyKey, response);
+    entry.response = response;
     entry.resolve(response);
+  }
+
+  lookup(identity: string, idempotencyKey: string): MutationResultLookup {
+    const now = (this.options.now ?? Date.now)();
+    this.prune(now);
+    const cacheKey = `${identity}\u0000${idempotencyKey}`;
+    const current = this.entries.get(cacheKey);
+    if (current) {
+      return current.settled && current.response
+        ? { state: 'completed', response: current.response }
+        : { state: 'pending' };
+    }
+    const persisted = this.options.store?.get(identity, idempotencyKey, now);
+    if (!persisted) return { state: 'missing' };
+    return persisted.state === 'completed' && persisted.response
+      ? { state: 'completed', response: persisted.response }
+      : { state: 'pending' };
   }
 
   private prune(now: number): void {

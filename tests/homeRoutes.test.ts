@@ -184,14 +184,19 @@ function setup(
     },
   ]);
   const savedAutomationIds = new Set<string>();
+  const automationStates = new Map<string, 'on' | 'off'>();
   let vacuumState = 'docked';
   let suctionState = 'Strong';
   const callService = jest.fn(async (input: unknown) => {
-    const call = input as { domain?: string; service?: string; serviceData?: { option?: string } };
+    const call = input as { domain?: string; service?: string; serviceData?: { option?: string }; target?: { entity_id?: string } };
     if (call.domain === 'vacuum' && call.service === 'start') vacuumState = 'cleaning';
     if (call.domain === 'vacuum' && call.service === 'return_to_base') vacuumState = 'returning';
     if (call.domain === 'select' && call.service === 'select_option' && call.serviceData?.option) {
       suctionState = call.serviceData.option;
+    }
+    if (call.domain === 'automation' && call.target?.entity_id) {
+      const automationId = call.target.entity_id.replace(/^automation\./u, '');
+      automationStates.set(automationId, call.service === 'turn_on' ? 'on' : 'off');
     }
     if (call.domain === 'xiaomi_vacuum_local' && call.service === 'get_rooms') {
       return {
@@ -248,12 +253,13 @@ function setup(
   }));
   const saveAutomationConfig = jest.fn(async (id: string, _config: unknown) => {
     savedAutomationIds.add(id);
+    if (!automationStates.has(id)) automationStates.set(id, 'on');
     getStates.mockImplementation(async () => [
       { entity_id: 'light.salon', state: 'on', attributes: { friendly_name: 'Salon' } },
       { entity_id: 'camera.salon', state: 'idle', attributes: { friendly_name: 'Caméra salon' } },
       ...[...savedAutomationIds].map((automationId) => ({
         entity_id: `automation.${automationId}`,
-        state: 'on',
+        state: automationStates.get(automationId) ?? 'off',
         attributes: { id: automationId, friendly_name: automationId },
       })),
     ]);

@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import {
@@ -25,7 +27,11 @@ function mutationAction(request: FastifyRequest): string | undefined {
   if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return undefined;
   const route = request.routeOptions.url;
   if (!route) return undefined;
-  if (route.startsWith('/v1/home') || (method === 'POST' && route === '/v1/music/actions')) {
+  if (
+    route.startsWith('/v1/home')
+    || (method === 'POST' && route === '/v1/music/actions')
+    || (method === 'POST' && route === '/v1/ingest')
+  ) {
     return `${method} ${route}`;
   }
   return undefined;
@@ -35,6 +41,26 @@ export function registerMutationIdempotencyHooks(
   app: FastifyInstance,
   coordinator = new MutationIdempotencyCoordinator()
 ): void {
+  app.get<{ Params: { idempotencyKey: string } }>(
+    '/v1/mutation-results/:idempotencyKey',
+    async (request, reply) => {
+      const key = request.params.idempotencyKey.trim();
+      if (!IDEMPOTENCY_KEY.test(key)) {
+        return reply.code(400).send({ error: 'invalid_idempotency_key' });
+      }
+      const result = coordinator.lookup(identityFor(request), key);
+      reply.header('cache-control', 'no-store');
+      if (result.state === 'missing') return reply.code(404).send({ state: 'missing' });
+      if (result.state === 'pending') return reply.code(202).send({ state: 'pending' });
+      return reply.code(200).send({
+        state: 'completed',
+        statusCode: result.response.statusCode,
+        contentType: result.response.contentType,
+        payloadBase64: Buffer.from(result.response.payload).toString('base64'),
+      });
+    }
+  );
+
   app.addHook('preHandler', async (request, reply) => {
     const action = mutationAction(request);
     if (!action) return;
@@ -69,6 +95,25 @@ export function registerMutationIdempotencyHooks(
     const cacheKey = reservations.get(request);
     if (!cacheKey) return payload;
     reservations.delete(request);
+    if (payload instanceof Readable) {
+      const chunks: Buffer[] = [];
+      payload.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(chunk));
+      });
+      payload.once('end', () => {
+        coordinator.complete(cacheKey, {
+          statusCode: reply.statusCode,
+          contentType: reply.getHeader('content-type')?.toString(),
+          payload: Buffer.concat(chunks),
+        });
+      });
+      // Keep the source alive as a cache sink even if the HTTP consumer drops.
+      // Pause until Fastify has attached its own consumer so no early chunk is
+      // lost from the live SSE response.
+      payload.pause();
+      setImmediate(() => payload.resume());
+      return payload;
+    }
     const cachedPayload = Buffer.isBuffer(payload) ? Buffer.from(payload) : String(payload ?? '');
     coordinator.complete(cacheKey, {
       statusCode: reply.statusCode,

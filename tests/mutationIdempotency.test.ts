@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+
 import { describe, expect, jest, test } from '@jest/globals';
 import Fastify from 'fastify';
 
@@ -15,12 +20,15 @@ function deferred<T>() {
 
 describe('mutation idempotency', () => {
   test('survives a process restart and does not replay an in-flight mutation', async () => {
-    const db = createConversationDb(':memory:');
-    const store = new SqliteMutationIdempotencyStore(db);
-    const first = new MutationIdempotencyCoordinator({ store });
+    const directory = mkdtempSync(join(tmpdir(), 'jarvis-idempotency-'));
+    const databasePath = join(directory, 'runtime.sqlite');
+    const firstDb = createConversationDb(databasePath);
+    const first = new MutationIdempotencyCoordinator({ store: new SqliteMutationIdempotencyStore(firstDb) });
     expect(first.reserve('user:a', 'restart-safe-0001', 'same-fingerprint')).toMatchObject({ kind: 'owner' });
+    firstDb.close();
 
-    const restarted = new MutationIdempotencyCoordinator({ store });
+    const restartedDb = createConversationDb(databasePath);
+    const restarted = new MutationIdempotencyCoordinator({ store: new SqliteMutationIdempotencyStore(restartedDb) });
     const replay = restarted.reserve('user:a', 'restart-safe-0001', 'same-fingerprint');
     expect(replay.kind).toBe('replay');
     if (replay.kind !== 'replay') throw new Error('expected_replay');
@@ -28,7 +36,8 @@ describe('mutation idempotency', () => {
       statusCode: 503,
       payload: expect.stringContaining('mutation_result_unknown'),
     });
-    db.close();
+    restartedDb.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 
   test('replays the completed response from durable storage after restart', async () => {
@@ -159,6 +168,64 @@ describe('mutation idempotency', () => {
     }
 
     expect(mutation).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+
+  test('captures an ingest stream and exposes its completed result without replaying the action', async () => {
+    const app = Fastify();
+    registerMutationIdempotencyHooks(app, new MutationIdempotencyCoordinator());
+    const mutation = jest.fn(() => Readable.from([
+      'event: ack\ndata: {"text":"Je m’en occupe"}\n\n',
+      'event: response\ndata: {"threadId":"voice-1","responseText":"Terminé"}\n\n',
+    ]));
+    app.post('/v1/ingest', async (_request, reply) => {
+      reply.type('text/event-stream');
+      return reply.send(mutation());
+    });
+
+    const key = 'voice-turn-recovery-0001';
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest?sse=1',
+      headers: { 'idempotency-key': key, accept: 'text/event-stream' },
+      payload: { threadId: 'voice-1', text: 'Éteins le salon' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('event: response');
+
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    expect(recovery.statusCode).toBe(200);
+    const result = recovery.json();
+    expect(result).toMatchObject({ state: 'completed', statusCode: 200 });
+    expect(Buffer.from(result.payloadBase64, 'base64').toString('utf8')).toBe(response.body);
+    expect(mutation).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
+
+  test('reports a concurrent ingest as pending without invoking it again', async () => {
+    const app = Fastify();
+    const coordinator = new MutationIdempotencyCoordinator();
+    registerMutationIdempotencyHooks(app, coordinator);
+    const gate = deferred<void>();
+    const mutation = jest.fn(async () => {
+      await gate.promise;
+      return { threadId: 'voice-2', responseText: 'Terminé' };
+    });
+    app.post('/v1/ingest', async () => mutation());
+    const key = 'voice-turn-pending-0001';
+    const first = app.inject({
+      method: 'POST', url: '/v1/ingest', headers: { 'idempotency-key': key },
+      payload: { threadId: 'voice-2', text: 'Allume le salon' },
+    });
+    for (let attempt = 0; attempt < 10 && mutation.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    expect(recovery.statusCode).toBe(202);
+    expect(recovery.json()).toEqual({ state: 'pending' });
+    expect(mutation).toHaveBeenCalledTimes(1);
+    gate.resolve();
+    await first;
     await app.close();
   });
 });
