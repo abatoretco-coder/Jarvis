@@ -8,6 +8,7 @@ import type {
   LiveDelegationState,
   LiveSessionRecord,
   LiveSessionState,
+  LiveTelemetryEventType,
 } from './types';
 
 type SessionRow = {
@@ -304,6 +305,28 @@ export class LiveSessionRegistry {
       .prepare('SELECT COUNT(*) AS count FROM live_voice_delegations WHERE session_id=?')
       .get(sessionId) as { count: number };
     return Number(row.count);
+  }
+
+  recordTelemetry(input: {
+    sessionId: string;
+    eventType: LiveTelemetryEventType;
+    delegationId?: string;
+    elapsedMs?: number;
+    nowMs?: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO live_voice_telemetry(
+          session_id,delegation_id,event_type,elapsed_ms,occurred_at_ms
+        ) VALUES (?,?,?,?,?)`
+      )
+      .run(
+        input.sessionId,
+        input.delegationId ?? null,
+        input.eventType,
+        input.elapsedMs ?? null,
+        input.nowMs ?? Date.now()
+      );
   }
 
   transitionDelegation(input: {

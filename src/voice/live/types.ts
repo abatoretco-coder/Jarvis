@@ -44,6 +44,16 @@ export type LiveDelegationRecord = {
   updatedAtMs: number;
 };
 
+export type LiveTelemetryEventType =
+  | 'client_connected'
+  | 'first_input_transcript'
+  | 'delegation_received'
+  | 'ingest_started'
+  | 'ingest_completed'
+  | 'first_audio_played'
+  | 'fallback_started'
+  | 'client_closed';
+
 export type LiveAvailability = {
   available: boolean;
   reason?: 'disabled' | 'client_disabled' | 'not_configured' | 'budget_exhausted' | 'circuit_open';

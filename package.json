@@ -24,6 +24,7 @@
     "oauth:google:exchange": "tsx scripts/oauth-helper.ts google:exchange",
     "tokens:generate": "tsx scripts/generate-api-keys.ts",
     "db:conversation": "tsx scripts/conversation-db.ts",
+    "report:live-pilot": "tsx scripts/live-pilot-report.ts",
     "preview:replies": "tsx scripts/preview-replies.ts",
     "eval:routing": "tsx scripts/evaluate-semantic-router.ts",
     "eval:openai:capabilities": "tsx scripts/evaluate-openai-capabilities.ts",

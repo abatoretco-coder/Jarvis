@@ -179,6 +179,9 @@ function verifyConversationDatabaseFile(
         'home_telemetry_samples',
         'home_telemetry_sync_state'
       );
+    if (schemaVersion >= 20)
+      requiredTables.push('live_voice_sessions', 'live_voice_delegations');
+    if (schemaVersion >= 21) requiredTables.push('live_voice_telemetry');
     for (const table of requiredTables) {
       if (!tableExists(table)) throw new Error(`conversation_database_missing_table:${table}`);
     }

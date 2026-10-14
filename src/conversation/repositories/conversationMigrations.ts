@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 20;
+export const CONVERSATION_SCHEMA_VERSION = 21;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -42,6 +42,8 @@ const HOME_TELEMETRY_CHECKSUM =
   'sha256:31e938ce94d0b1244754c65c63ea37a112e060c8667515731a34f256317c814d';
 const LIVE_VOICE_REGISTRY_CHECKSUM =
   'sha256:b68bec7dc1542485cf0907a9355eefbe2e7204c2cc24e291f6b70b47e8a38121';
+const LIVE_VOICE_TELEMETRY_CHECKSUM =
+  'sha256:de5648b90458a59b4e85b9d16f94e12f0c2b07aec50666a5c8a60bd67d3db388';
 
 function ensureLiveVoiceRegistrySchema(db: Database.Database): void {
   db.exec(`
@@ -93,6 +95,29 @@ function ensureLiveVoiceRegistrySchema(db: Database.Database): void {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_live_voice_delegations_operation_key
       ON live_voice_delegations(operation_key) WHERE operation_key IS NOT NULL;
+  `);
+}
+
+function ensureLiveVoiceTelemetrySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS live_voice_telemetry (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      delegation_id TEXT,
+      event_type TEXT NOT NULL CHECK (event_type IN (
+        'client_connected','first_input_transcript','delegation_received','ingest_started',
+        'ingest_completed','first_audio_played','fallback_started','client_closed'
+      )),
+      elapsed_ms INTEGER CHECK (elapsed_ms IS NULL OR elapsed_ms BETWEEN 0 AND 3600000),
+      occurred_at_ms INTEGER NOT NULL,
+      FOREIGN KEY(session_id) REFERENCES live_voice_sessions(session_id) ON DELETE CASCADE,
+      CHECK (delegation_id IS NULL OR length(delegation_id) BETWEEN 1 AND 160)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_live_voice_telemetry_session_time
+      ON live_voice_telemetry(session_id,occurred_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_live_voice_telemetry_event_time
+      ON live_voice_telemetry(event_type,occurred_at_ms);
   `);
 }
 
@@ -1082,6 +1107,8 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:19');
   if (applied.get(20) && applied.get(20) !== LIVE_VOICE_REGISTRY_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:20');
+  if (applied.get(21) && applied.get(21) !== LIVE_VOICE_TELEMETRY_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:21');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -1202,6 +1229,12 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (20, ?, ?, ?)'
       ).run('live_voice_registry', LIVE_VOICE_REGISTRY_CHECKSUM, Date.now());
+    }
+    ensureLiveVoiceTelemetrySchema(db);
+    if (!applied.has(21)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (21, ?, ?, ?)'
+      ).run('live_voice_client_telemetry', LIVE_VOICE_TELEMETRY_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();
