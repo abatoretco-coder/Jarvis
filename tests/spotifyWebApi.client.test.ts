@@ -55,6 +55,55 @@ afterEach(() => {
 });
 
 describe('spotify web api client integration mocks', () => {
+  test('logs an unexpected autonomous playlist refresh rejection', async () => {
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    const client = new SpotifyWebApiClient(makeEnv(), logger);
+    jest
+      .spyOn(client as unknown as { fetchAndCacheSituation(): Promise<void> }, 'fetchAndCacheSituation')
+      .mockResolvedValue();
+    jest
+      .spyOn(
+        client as unknown as { listCurrentUserPlaylists(): Promise<unknown> },
+        'listCurrentUserPlaylists'
+      )
+      .mockRejectedValue(new Error('playlist_persistence_failed'));
+
+    client.startSituationPrefetch();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      {
+        errorCode: 'playlist_persistence_failed',
+        spotify_module: 'webapi',
+      },
+      'spotify_playlist_background_refresh_failed'
+    );
+    client.stopSituationPrefetch();
+  });
+
+  test('cancels periodic and delayed background refreshes at shutdown', async () => {
+    jest.useFakeTimers();
+    const client = new SpotifyWebApiClient(makeEnv());
+    const fetchSituation = jest
+      .spyOn(client as unknown as { fetchAndCacheSituation(): Promise<void> }, 'fetchAndCacheSituation')
+      .mockResolvedValue();
+    jest
+      .spyOn(client as unknown as { refreshUserPlaylistCache(): void }, 'refreshUserPlaylistCache')
+      .mockImplementation(() => undefined);
+
+    client.startSituationPrefetch();
+    client.scheduleSituationRefresh(1_000);
+    expect(fetchSituation).toHaveBeenCalledTimes(1);
+
+    client.stopSituationPrefetch();
+    await jest.advanceTimersByTimeAsync(60_000);
+    client.scheduleSituationRefresh(1_000);
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    expect(fetchSituation).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
   test('invalidates playback immediately when a post-command refresh is scheduled', async () => {
     jest.useFakeTimers();
     let playbackReads = 0;

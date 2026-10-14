@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { AdminControlPlaneRepository } from './admin/AdminControlPlaneRepository';
+import { stopGoogleCalendarTokenKeepalives } from './calendar/googleCalendarClient';
 import { ProactiveContextCache } from './context/ProactiveContextCache';
 import { createConversationDb } from './conversation/repositories/SqliteRepositories';
 import { DailyLifeRepository } from './dailyLife/DailyLifeRepository';
@@ -19,6 +20,7 @@ import { IdentityService } from './identity/IdentityService';
 import { OidcTokenVerifier } from './identity/OidcTokenVerifier';
 import { IntegrationRepository } from './integrations/IntegrationRepository';
 import { IntegrationService } from './integrations/IntegrationService';
+import { stopMailTokenKeepalives } from './mail/mailAgent';
 import { NasStatusClient } from './nas/NasStatusClient';
 import { configureOpenAiResilience, shutdownOpenAiResilience } from './openai/resilience';
 import { PcAgentCommandBroker } from './pc/PcAgentCommandBroker';
@@ -46,6 +48,7 @@ import { registerPrincipalRateLimitHook, registerSecurityHooks } from './routes/
 import { parseTrustedProxyCidrs } from './security/edgePolicy';
 import { SpotifyClientResolver } from './spotify/SpotifyClientResolver';
 import { SpotifyWebApiClient } from './spotifyWebApi';
+import { stopTodoTokenKeepalives } from './todo/todoAgent';
 
 export type AppDeps = {
   env: Env;
@@ -105,7 +108,7 @@ export function buildApp(env: Env): FastifyInstance {
   });
 
   const spotifyWebApi = new SpotifyWebApiClient(env, app.log);
-  const nasStatus = env.NAS_STATUS_ENABLED ? new NasStatusClient(env) : undefined;
+  const nasStatus = env.NAS_STATUS_ENABLED ? new NasStatusClient(env, app.log) : undefined;
   spotifyWebApi.startSituationPrefetch();
 
   const contextCache = new ProactiveContextCache({
@@ -116,10 +119,6 @@ export function buildApp(env: Env): FastifyInstance {
     log: app.log,
   });
   contextCache.start();
-  app.addHook('onClose', async () => {
-    contextCache.stop();
-    shutdownOpenAiResilience();
-  });
 
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
   const runtimeDb = createConversationDb(env.CONVERSATION_DB_PATH);
@@ -172,6 +171,14 @@ export function buildApp(env: Env): FastifyInstance {
   deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
   app.addHook('onClose', async () => {
     if (dailyLifeTimer) clearInterval(dailyLifeTimer);
+    contextCache.stop();
+    spotifyWebApi.stopSituationPrefetch();
+    await Promise.allSettled([
+      stopGoogleCalendarTokenKeepalives(),
+      stopMailTokenKeepalives(),
+      stopTodoTokenKeepalives(),
+    ]);
+    shutdownOpenAiResilience();
   });
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.

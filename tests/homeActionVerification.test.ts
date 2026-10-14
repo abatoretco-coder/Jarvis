@@ -281,6 +281,35 @@ describe('home action state verification', () => {
     expect(callService).not.toHaveBeenCalled();
   });
 
+  test('rejects contradictory steps for one device before sending any command', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>();
+    const result = await executeCatalogHomeScene({
+      catalog: {
+        getMapping: () => ({ deviceId: 'light', entityId: 'light.salon' }),
+      } as unknown as HomeCatalog,
+      ha: { callService } as unknown as HomeAssistantClient,
+      scene: {
+        sceneId: 'scene-conflict',
+        name: 'Conflit',
+        icon: 'light',
+        steps: [
+          { deviceId: 'light', action: 'turn_on' },
+          { deviceId: 'light', action: 'turn_off' },
+        ],
+        voicePhrases: [],
+        sortOrder: 0,
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      outcome: 'failed',
+      errorCode: 'home_scene_device_conflict',
+    });
+    expect(result.steps).toHaveLength(2);
+    expect(callService).not.toHaveBeenCalled();
+  });
+
   test('allows the Film scene to control only its light-switch steps for Stream Deck', async () => {
     const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
     let stateReads = 0;

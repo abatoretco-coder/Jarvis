@@ -1343,17 +1343,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       app.log.warn({ err }, 'conversation_retention_purge_error');
     }
   };
-  void runRetentionCleanup();
+  let closing = false;
+  let retentionWork: Promise<void> | undefined;
+  const scheduleRetentionCleanup = () => {
+    if (closing || retentionWork) return;
+    const work = runRetentionCleanup().finally(() => {
+      if (retentionWork === work) retentionWork = undefined;
+    });
+    retentionWork = work;
+  };
+  scheduleRetentionCleanup();
   const retentionTimer = setInterval(() => {
-    void runRetentionCleanup();
+    scheduleRetentionCleanup();
   }, CLEANUP_INTERVAL_MS);
   retentionTimer.unref();
-  app.addHook('onClose', async () => {
-    clearInterval(retentionTimer);
-    await voiceArchive.close();
-    db.close();
-  });
-
   const summarizationService = new SummarizationService(threadRepository, messageRepository, {
     hotWindowK: deps.env.LIMIT_K,
     minDeltaM: deps.env.LIMIT_M,
@@ -1363,6 +1366,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     llmModel: deps.env.OPENAI_MODEL_SUMMARY,
     llmTimeoutMs: deps.env.OPENAI_TIMEOUT_MS,
     llmMaxOutputTokens: deps.env.OPENAI_MAX_OUTPUT_TOKENS_SUMMARY,
+    log: app.log,
+  });
+  app.addHook('onClose', async () => {
+    closing = true;
+    clearInterval(retentionTimer);
+    await Promise.allSettled([
+      ...(retentionWork ? [retentionWork] : []),
+      summarizationService.stop(),
+      voiceArchive.close(),
+    ]);
+    db.close();
   });
 
   const conversationService = new ConversationService(threadRepository, messageRepository, {

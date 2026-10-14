@@ -4,6 +4,12 @@ Date : 2026-10-07
 
 Statut : **socle logiciel livré, recette matérielle en attente**.
 
+> Document historique. Depuis la migration décrite dans
+> [`AUTOMATION_OWNERSHIP.md`](../AUTOMATION_OWNERSHIP.md), Home Assistant est
+> l'autorité des automatisations horaires. La création via
+> `POST /v1/home/routines` est retirée ; seules la lecture et la suppression des
+> anciens horaires subsistent pour permettre leur migration.
+
 ## Livré
 
 - commandes directes déterministes pour marche/arrêt, température, luminosité et volume ;
