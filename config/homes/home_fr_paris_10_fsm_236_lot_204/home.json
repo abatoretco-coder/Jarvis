@@ -13,6 +13,20 @@
     "lot": "204",
     "doorLabel": "A Droite"
   },
+  "telemetry": {
+    "entities": [
+      {
+        "entityId": "sensor.temperature_exterieure_jarvis",
+        "deviceId": "outdoor-weather",
+        "role": "external_temperature"
+      },
+      {
+        "entityId": "weather.forecast_maison",
+        "deviceId": "outdoor-weather",
+        "role": "external_weather"
+      }
+    ]
+  },
   "geometry": {
     "quality": "approximate_from_diagnostics",
     "surveyGrade": false,
@@ -310,6 +324,9 @@
           "entityId": "climate.chauffage_chambre_thermostat",
           "name": "Radiateur",
           "presetId": "heating",
+          "climate": {
+            "temperatureEntityId": "sensor.temperature_chambre_de_reference"
+          },
           "placement": {"x": 1.6, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
         },
         {
@@ -329,6 +346,7 @@
           "presetId": "water-heater",
           "placement": {"x": 0.45, "y": 3.72, "z": 1.2, "rotationDeg": 90, "scale": 1},
           "waterHeater": {
+            "powerSwitchEntityId": "switch.salle_deau_chauffe_eau_ariston_net_power",
             "ecoEntityId": "switch.salle_deau_chauffe_eau_ariston_net_eco_mode",
             "antiLegionellaEntityId": "switch.salle_deau_chauffe_eau_ariston_net_anti_legionella",
             "heatingEntityId": "binary_sensor.salle_deau_chauffe_eau_ariston_net_is_heating",
@@ -474,6 +492,9 @@
           "entityId": "climate.chauffage_bureau_thermostat",
           "name": "Radiateur",
           "presetId": "heating",
+          "climate": {
+            "temperatureEntityId": "sensor.temperature_bureau_de_reference"
+          },
           "placement": {"x": 13.35, "y": 0.25, "z": 0, "rotationDeg": 180, "scale": 1}
         },
         {

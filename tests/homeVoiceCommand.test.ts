@@ -11,6 +11,9 @@ describe('deterministic TV voice commands', () => {
     ['Jarvis, tamise le salon', 'room_living', 'dimmed'],
     ['Allume les lumières du salon', 'room_living', 'on'],
     ['Jarvis, allume la cuisine', 'room_kitchen', 'on'],
+    ['Je voudrais que tu allumes la chambre, s’il te plaît', 'room_bedroom', 'on'],
+    ['Allumne salon', 'room_living', 'on'],
+    ['Je voudrais que tu allumes la chambre, elle est uniquement en mode tamisé', 'room_bedroom', 'on'],
     ['Jarvis, éteins la chambre', 'room_bedroom', 'off'],
     ['Éclaire le bureau', 'room_office', 'on'],
   ] as const)('maps a room lighting mode locally: %s', (text, roomId, mode) => {

@@ -133,6 +133,7 @@ const environmentEntityDomains: Record<keyof EnvironmentEntityMapping, string> =
   batteryEntityId: 'sensor',
 };
 type WaterHeaterEntityMapping = {
+  powerSwitchEntityId?: string;
   ecoEntityId?: string;
   boostEntityId?: string;
   antiLegionellaEntityId?: string;
@@ -143,6 +144,7 @@ type WaterHeaterEntityMapping = {
   heatingTimeEntityId?: string;
 };
 const waterHeaterEntityDomains: Record<keyof WaterHeaterEntityMapping, string> = {
+  powerSwitchEntityId: 'switch',
   ecoEntityId: 'switch',
   boostEntityId: 'switch',
   antiLegionellaEntityId: 'switch',
@@ -153,6 +155,7 @@ const waterHeaterEntityDomains: Record<keyof WaterHeaterEntityMapping, string> =
   heatingTimeEntityId: 'sensor',
 };
 type ClimateEntityMapping = {
+  temperatureEntityId?: string;
   offsetEntityId?: string;
   windowEntityId?: string;
   presenceEntityId?: string;
@@ -162,6 +165,7 @@ type ClimateEntityMapping = {
   energyEntityId?: string;
 };
 const climateEntityDomains: Record<keyof ClimateEntityMapping, string> = {
+  temperatureEntityId: 'sensor',
   offsetEntityId: 'number',
   windowEntityId: 'binary_sensor',
   presenceEntityId: 'binary_sensor',
@@ -326,12 +330,21 @@ export type HomeSnapshot = {
   presets: HomePreset[];
   updatedAt: string;
 };
+export type HomeTelemetryEntityMapping = {
+  entityId: string;
+  deviceId: string;
+  roomId?: string;
+  role: string;
+};
 
 type HomeFile = {
   schemaVersion?: string;
   homeId: string;
   displayName: string;
   geometry: { quality: string; units: string };
+  telemetry?: {
+    entities?: HomeTelemetryEntityMapping[];
+  };
   rooms: Array<{
     roomId: string;
     name: string;
@@ -956,6 +969,7 @@ export class HomeCatalog {
   private scenes: HomeScene[] = [];
   private routines: HomeRoutine[] = [];
   private adaptiveLighting?: AdaptiveLightingConfig;
+  private telemetryEntities: HomeTelemetryEntityMapping[] = [];
 
   constructor(configRoot: string, homeId: string, dataRoot?: string) {
     const templateRoot = resolve(configRoot);
@@ -1001,6 +1015,20 @@ export class HomeCatalog {
     this.mappingsByDeviceId.clear();
     for (const [key, mappings] of mappingsByRoom) this.mappingsByRoom.set(key, mappings);
     for (const [key, mapping] of mappingsByDeviceId) this.mappingsByDeviceId.set(key, mapping);
+    const telemetryEntityIds = new Set<string>();
+    this.telemetryEntities = (home.telemetry?.entities ?? []).map((candidate) => {
+      if (
+        !candidate
+        || !entityIdPattern.test(candidate.entityId)
+        || telemetryEntityIds.has(candidate.entityId)
+        || !deviceIdPattern.test(candidate.deviceId)
+        || (candidate.roomId !== undefined && !validRooms.has(candidate.roomId))
+        || typeof candidate.role !== 'string'
+        || !/^[a-z][a-z0-9_.-]{1,63}$/u.test(candidate.role)
+      ) throw new Error('home_config_invalid');
+      telemetryEntityIds.add(candidate.entityId);
+      return structuredClone(candidate);
+    });
     const quickActionIds = new Set<string>();
     const voicePhrases = new Set<string>();
     this.quickActions = (home.automation?.quickActions ?? []).map((rawAction) => {
@@ -1099,13 +1127,15 @@ export class HomeCatalog {
     if (/\b(?:lampe|lampes|ampoule|ampoules|plafonnier|plafonniers|spot|spots)\b/u.test(normalized)) {
       return undefined;
     }
-    const mode: HomeLightingVoiceMode | undefined = /\b(?:tamise|tamiser|tamisee|tamisees|doux|douce)\b/u.test(normalized)
-      ? 'dimmed'
-      : /\b(?:eteins|eteindre|coupe|couper)\b/u.test(normalized)
-        ? 'off'
-        : /\b(?:allume|allumer|eclaire|eclairer|active|activer)\b/u.test(normalized)
-          ? 'on'
-          : undefined;
+    const modePatterns: ReadonlyArray<{ mode: HomeLightingVoiceMode; pattern: RegExp }> = [
+      { mode: 'dimmed', pattern: /\b(?:tamise|tamises|tamiser|tamisez|tamisee|tamisees|doux|douce)\b/u },
+      { mode: 'off', pattern: /\b(?:eteins|eteint|eteindre|eteignez|coupe|coupes|couper|coupez|coupent)\b/u },
+      { mode: 'on', pattern: /\b(?:allume|allumes|allumer|allumez|allument|allumne|eclaire|eclaires|eclairer|eclairez|eclairent|active|actives|activer|activez|activent)\b/u },
+    ];
+    const mode = modePatterns
+      .map(({ mode: candidateMode, pattern }) => ({ mode: candidateMode, index: normalized.search(pattern) }))
+      .filter((candidate) => candidate.index >= 0)
+      .sort((left, right) => left.index - right.index)[0]?.mode;
     if (!mode) return undefined;
     const configuredRoomIds = new Set(this.adaptiveLighting?.rooms.map((room) => room.roomId) ?? []);
     const matches = this.home.rooms.filter((room) => {
@@ -1325,6 +1355,38 @@ export class HomeCatalog {
     return [...this.mappingsByDeviceId.values()].flatMap((mapping) =>
       mapping.entityId ? [{ deviceId: mapping.deviceId, entityId: mapping.entityId }] : []
     );
+  }
+
+  getTelemetryEntities(): HomeTelemetryEntityMapping[] {
+    const entities: HomeTelemetryEntityMapping[] = [];
+    const seen = new Set<string>();
+    const add = (mapping: DeviceMapping, roomId: string, entityId: string | undefined, role: string) => {
+      if (!entityId || seen.has(entityId) || entityId.startsWith('button.')) return;
+      seen.add(entityId);
+      entities.push({ entityId, deviceId: mapping.deviceId, roomId, role });
+    };
+    for (const [roomId, mappings] of this.mappingsByRoom.entries()) {
+      for (const mapping of mappings) {
+        add(mapping, roomId, mapping.entityId, 'primary');
+        for (const [groupName, companions] of [
+          ['robot', mapping.robot],
+          ['climate', mapping.climate],
+          ['environment', mapping.environment],
+          ['water_heater', mapping.waterHeater],
+        ] as const) {
+          if (!companions) continue;
+          for (const [key, value] of Object.entries(companions)) {
+            if (typeof value === 'string') add(mapping, roomId, value, `${groupName}.${key}`);
+          }
+        }
+      }
+    }
+    for (const mapping of this.telemetryEntities) {
+      if (seen.has(mapping.entityId) || mapping.entityId.startsWith('button.')) continue;
+      seen.add(mapping.entityId);
+      entities.push(structuredClone(mapping));
+    }
+    return entities.sort((left, right) => left.entityId.localeCompare(right.entityId));
   }
 
   getHomeAssistantProjection(): {

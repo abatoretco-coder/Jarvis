@@ -14,7 +14,10 @@ import { planHomeActionFromTextWithOpenAi } from '../src/home/HomeVoicePlanner';
 import { IdentityRepository } from '../src/identity/IdentityRepository';
 import { setRequestPrincipal } from '../src/identity/requestIdentity';
 import { callMailAgent } from '../src/mail/mailAgent';
-import { resetOpenAiResilienceForTests } from '../src/openai/resilience';
+import {
+  getOpenAiResilienceSnapshot,
+  resetOpenAiResilienceForTests,
+} from '../src/openai/resilience';
 import { registerIngestRoute } from '../src/routes/ingest';
 import { trySemanticRouter } from '../src/routing/semanticRouter';
 import type { AppDeps } from '../src/server';
@@ -523,6 +526,47 @@ describe('/v1/ingest integration', () => {
     });
     expect(setRoomMode).toHaveBeenCalledWith(roomId, mode);
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['accepted', 'Séjour : commande du mode « tamisé » acceptée, sans confirmation des équipements.', 'Commande envoyée.'],
+    ['uncertain', 'Séjour : commande du mode « tamisé » envoyée, mais son résultat reste incertain.', 'Commande envoyée, sans confirmation.'],
+    ['partial', 'Séjour : mode « tamisé » appliqué en partie.', "Je n'ai pas pu tout faire."],
+    ['failed', 'Je n’ai pas pu régler l’éclairage de Séjour.', "Je n'ai pas pu le faire."],
+  ] as const)('keeps room lighting confirmation honest for a %s operation', async (operationStatus, displayText, spokenText) => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    const deps = makeDeps(env);
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      inferDeterministicVoiceScene: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicRoomLightingMode: () => ({ roomId: 'living', roomName: 'Séjour', mode: 'dimmed' }),
+    } as unknown as HomeCatalog;
+    deps.homeLightingService = {
+      setRoomMode: async () => ({
+        roomId: 'living',
+        mode: 'dimmed',
+        available: true,
+        deviceIds: ['living-light'],
+        operationStatus,
+        failedDeviceIds: operationStatus === 'partial' || operationStatus === 'failed' ? ['living-light'] : [],
+      }),
+    } as unknown as AppDeps['homeLightingService'];
+    registerIngestRoute(app, deps);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'x-voice-turn-id': `room-mode-${operationStatus}` },
+      payload: {
+        threadId: `thread-room-mode-${operationStatus}`,
+        text: 'Tamise le salon',
+        clientContext: { channel: 'voice' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ responseText: spokenText, spokenText, displayText });
   });
 
   it.each(['hey jarvis, met le son de la téléphone à 2', 'met le son de la télé à 2'])(
@@ -1196,6 +1240,83 @@ describe('/v1/ingest integration', () => {
       domain: 'media_player', service: 'volume_set', target: { entity_id: 'media_player.bedroom_tv' },
       serviceData: { volume_level: 0.15 },
     }));
+  });
+
+  it('keeps a confirmed multi-device home action acknowledgement concise', async () => {
+    const callService = jest.fn(async (_call: unknown) => ({ status: 200, data: {} }));
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'test-openai-key',
+      HA_AGENT_MAP: 'executors:conversation.legacy_executor:Ancien agent domotique',
+    });
+    const deps = makeDeps(env);
+    deps.ha = {
+      getStates: async () => [],
+      getState: async (entityId: string) => ({ entity_id: entityId, state: 'on', attributes: {} }),
+      callService,
+    } as unknown as AppDeps['ha'];
+    const mappings = {
+      'kitchen-light': {
+        deviceId: 'kitchen-light', entityId: 'light.kitchen', name: 'Plafonnier cuisine', presetId: 'light',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      },
+      'living-light': {
+        deviceId: 'living-light', entityId: 'light.living', name: 'Plafonnier salon', presetId: 'light',
+        placement: { x: 0, y: 0, z: 0, rotationDeg: 0, scale: 1 },
+      },
+    } as const;
+    deps.homeCatalog = {
+      findSceneByVoicePhrase: () => undefined,
+      findQuickActionByVoicePhrase: () => undefined,
+      inferDeterministicVoiceAction: () => undefined,
+      getMapping: (deviceId: keyof typeof mappings) => mappings[deviceId],
+      getScene: () => undefined,
+    } as unknown as HomeCatalog;
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'home_control', confidence: 0.99 }],
+      reason: 'multiple_home_actions',
+    });
+    mockedPlanHomeAction.mockResolvedValue({
+      route: 'home_actions',
+      reason: 'two_lights_requested',
+      commands: [
+        { deviceId: 'kitchen-light', action: 'turn_on' },
+        { deviceId: 'living-light', action: 'turn_on' },
+      ],
+    });
+
+    registerIngestRoute(app, deps);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-multi-confirmed',
+        text: 'Allume la cuisine et le salon',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().responseText).toBe("C'est fait.");
+    expect(callService).toHaveBeenCalledTimes(2);
+
+    mockedPlanHomeAction.mockResolvedValue({
+      route: 'home_actions',
+      reason: 'one_light_requested',
+      commands: [{ deviceId: 'kitchen-light', action: 'turn_on' }],
+    });
+    const singleResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-home-single-confirmed',
+        text: 'Allume la cuisine',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(singleResponse.statusCode).toBe(200);
+    expect(singleResponse.json().responseText).toBe('C’est fait pour Plafonnier cuisine.');
+    expect(callService).toHaveBeenCalledTimes(3);
   });
 
   it('launches a scene selected by the planner through the shared scene executor', async () => {
@@ -5028,14 +5149,22 @@ describe('/v1/ingest integration', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('maps an empty cloud transcription to a non-retriable silence response', async () => {
-    (global as { fetch: typeof fetch }).fetch = jest.fn(
-      async () =>
+  it('retries an empty cloud transcription inside the same STT request', async () => {
+    const fetchMock = jest
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
         new Response(JSON.stringify({ text: '   ' }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })
-    ) as unknown as typeof fetch;
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: 'Éteins la télé.' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      );
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
     const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
       OPENAI_API_KEY: 'cloud-stt-key',
       OPENAI_STT_MODEL: 'transcription-model',
@@ -5047,11 +5176,56 @@ describe('/v1/ingest integration', () => {
       method: 'POST',
       url: '/v1/stt/default',
       headers: { 'content-type': 'audio/wav' },
-      payload: Buffer.from('silence'),
+      payload: Buffer.from('audible-wave'),
     });
 
-    expect(response.statusCode).toBe(422);
-    expect(response.json()).toEqual({ error: 'stt_empty_transcript', engineId: 'openai' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ text: 'Éteins la télé.' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not open the shared STT circuit after five requests with empty transcription retries', async () => {
+    let providerCalls = 0;
+    const fetchMock = jest.fn(async () => {
+      providerCalls += 1;
+      return new Response(
+        JSON.stringify({ text: providerCalls <= 10 ? '   ' : 'Commande suivante' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    (global as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      OPENAI_API_KEY: 'cloud-stt-key',
+      OPENAI_STT_MODEL: 'transcription-model',
+      OPENAI_STT_TIMEOUT_MS: 1_000,
+    });
+    registerIngestRoute(app, makeDeps(env));
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const emptyResponse = await app.inject({
+        method: 'POST',
+        url: '/v1/stt/default',
+        headers: { 'content-type': 'audio/wav', 'x-voice-turn-id': `ha-turn-empty-${attempt}` },
+        payload: Buffer.from('audible-wave'),
+      });
+      expect(emptyResponse.statusCode).toBe(422);
+      expect(emptyResponse.json()).toEqual({ error: 'stt_empty_transcript', engineId: 'openai' });
+    }
+    expect(getOpenAiResilienceSnapshot()).toMatchObject({
+      capabilities: {
+        stt: { circuit: 'closed', failures: 0, successes: 5 },
+      },
+    });
+
+    const nextResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/stt/default',
+      headers: { 'content-type': 'audio/wav', 'x-voice-turn-id': 'ha-turn-next' },
+      payload: Buffer.from('next-wave'),
+    });
+    expect(nextResponse.statusCode).toBe(200);
+    expect(nextResponse.json()).toMatchObject({ text: 'Commande suivante' });
+    expect(fetchMock).toHaveBeenCalledTimes(11);
   });
 
   it('returns 404 for an unknown history without creating a phantom thread', async () => {

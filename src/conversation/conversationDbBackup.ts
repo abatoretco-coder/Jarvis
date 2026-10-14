@@ -173,6 +173,12 @@ function verifyConversationDatabaseFile(
     if (schemaVersion >= 9) requiredTables.push('daily_life_lists', 'daily_life_items');
     if (schemaVersion >= 11) requiredTables.push('daily_life_calendar_shares');
     if (schemaVersion >= 13) requiredTables.push('mutation_idempotency_results');
+    if (schemaVersion >= 19)
+      requiredTables.push(
+        'home_telemetry_entities',
+        'home_telemetry_samples',
+        'home_telemetry_sync_state'
+      );
     for (const table of requiredTables) {
       if (!tableExists(table)) throw new Error(`conversation_database_missing_table:${table}`);
     }

@@ -31,7 +31,7 @@ type RealtimeServerEvent = {
 const MAX_REALTIME_TTS_BYTES = 20 * 1024 * 1024;
 
 const DEFAULT_OPENAI_TTS_INSTRUCTIONS =
-  'Parle en francais de France avec une voix masculine adulte, naturelle, chaleureuse et fluide. Garde un timbre masculin pose, une intonation souple et des pauses legeres. Evite le ton monotone, saccade, trop rapide ou sur-articule. Reste simple, clair et en tutoiement.';
+  "Parle exclusivement en francais de France avec une voix d'homme adulte, baryton, naturelle et chaleureuse. Adopte une prononciation francaise metropolitaine native, sans accent anglophone. Garde un timbre grave et nettement masculin, une intonation souple et des pauses legeres. Evite le ton monotone, saccade, trop rapide ou sur-articule. Reste simple, clair et en tutoiement.";
 
 export function buildFfmpegFilters(opts: AudioTransformOpts, skipSpeed = false): string[] {
   const filters: string[] = [];

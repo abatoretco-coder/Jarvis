@@ -4,7 +4,7 @@
   mode: restart
   trigger:
     - platform: state
-      entity_id: assist_satellite.home_assistant_voice_0a79e5_satellite_assist
+      entity_id: assist_satellite.home_assistant_voice_0a79e5_assist_satellite
   action:
     - choose:
         - conditions:
@@ -46,7 +46,7 @@
           sequence:
             - delay: "00:00:01"
             - condition: state
-              entity_id: assist_satellite.home_assistant_voice_0a79e5_satellite_assist
+              entity_id: assist_satellite.home_assistant_voice_0a79e5_assist_satellite
               state: "idle"
             - service: light.turn_off
               target:

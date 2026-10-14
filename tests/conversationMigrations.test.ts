@@ -49,12 +49,15 @@ describe('conversation database migrations', () => {
       { version: 14, name: 'durable_home_and_recurrence_state' },
       { version: 15, name: 'response_provenance_audit' },
       { version: 16, name: 'response_decision_audit' },
+      { version: 17, name: 'voice_artifact_archive' },
+      { version: 18, name: 'lighting_intent_maximum_mode' },
+      { version: 19, name: 'durable_home_telemetry' },
     ]);
     first.close();
 
     const reopened = createConversationDb(databasePath);
     expect(reopened.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({
-      count: 16,
+      count: 19,
     });
     reopened.close();
   });
@@ -127,7 +130,61 @@ describe('conversation database migrations', () => {
     expect(columns.map((column) => column.name)).toEqual(
       expect.arrayContaining(['raw_content', 'sources_json', 'decision_metadata_json'])
     );
-    expect(database.pragma('user_version', { simple: true })).toBe(16);
+    expect(database.pragma('user_version', { simple: true })).toBe(CONVERSATION_SCHEMA_VERSION);
+    database.close();
+  });
+
+  test('upgrades populated v17 lighting intents to accept maximum without losing state', () => {
+    const database = createConversationDb(':memory:');
+    database
+      .prepare(
+        `INSERT INTO home_lighting_intents(room_id,mode,target_json,updated_at_ms)
+         VALUES ('room_kitchen','dimmed','{"brightness":35}',123)`
+      )
+      .run();
+    database.exec(`
+      ALTER TABLE home_lighting_intents RENAME TO home_lighting_intents_v18;
+      CREATE TABLE home_lighting_intents (
+        room_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL CHECK (mode IN ('on','dimmed','off')),
+        target_json TEXT,
+        updated_at_ms INTEGER NOT NULL
+      );
+      INSERT INTO home_lighting_intents(room_id,mode,target_json,updated_at_ms)
+        SELECT room_id,mode,target_json,updated_at_ms FROM home_lighting_intents_v18;
+      DROP TABLE home_lighting_intents_v18;
+    `);
+    database.prepare('DELETE FROM schema_migrations WHERE version = 18').run();
+    database.pragma('user_version = 17');
+
+    runConversationMigrations(database);
+
+    expect(
+      database.prepare('SELECT * FROM home_lighting_intents WHERE room_id = ?').get('room_kitchen')
+    ).toEqual({
+      room_id: 'room_kitchen',
+      mode: 'dimmed',
+      target_json: '{"brightness":35}',
+      updated_at_ms: 123,
+    });
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO home_lighting_intents(room_id,mode,target_json,updated_at_ms)
+           VALUES ('room_living','maximum',NULL,124)`
+        )
+        .run()
+    ).not.toThrow();
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO home_lighting_intents(room_id,mode,target_json,updated_at_ms)
+           VALUES ('room_bad','unknown',NULL,125)`
+        )
+        .run()
+    ).toThrow();
+    expect(() => runConversationMigrations(database)).not.toThrow();
+    expect(database.pragma('user_version', { simple: true })).toBe(CONVERSATION_SCHEMA_VERSION);
     database.close();
   });
 

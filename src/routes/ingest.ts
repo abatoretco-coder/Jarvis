@@ -155,6 +155,8 @@ import {
   planTodoAgentAction,
   type TodoAction,
 } from '../todo/todoAgent';
+import { VoiceArchiveRepository } from '../voice/VoiceArchiveRepository';
+import { VoiceArchiveService } from '../voice/VoiceArchiveService';
 import {
   isClearlyExternalWeather,
   isClearlyLocalWeather,
@@ -811,61 +813,77 @@ async function transcribeWithOpenAi(params: {
   env: AppDeps['env'];
   body: Buffer;
   incomingContentType: string;
-}): Promise<{ text: string; model: string }> {
+}): Promise<{ text: string; model: string; transcriptionAttempts: number }> {
   const openAiApiKey = params.env.OPENAI_API_KEY?.trim();
   if (!openAiApiKey) {
     throw new Error('openai_api_key_missing');
   }
 
   const model = params.env.OPENAI_STT_MODEL.trim();
-  const form = new FormData();
-  form.set('model', model);
-  if (params.env.OPENAI_STT_LANGUAGE?.trim()) {
-    form.set('language', params.env.OPENAI_STT_LANGUAGE.trim());
-  }
-
   const fileExt = audioExtensionFromContentType(params.incomingContentType);
-  form.set(
-    'file',
-    new Blob([bufferToWebBytes(params.body)], { type: params.incomingContentType }),
-    `audio.${fileExt}`
-  );
-
   const sttBaseUrl = params.env.OPENAI_STT_BASE_URL?.trim() || params.env.OPENAI_BASE_URL;
-  return executeOpenAiOperation({
+  const result = await executeOpenAiOperation({
     capability: 'stt',
     model,
     operation: async (_attempt, operationSignal) => {
-      const response = await fetch(`${sttBaseUrl.replace(/\/$/, '')}/audio/transcriptions`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${openAiApiKey}` },
-        body: form,
-        signal: AbortSignal.any([
-          operationSignal,
-          AbortSignal.timeout(params.env.OPENAI_STT_TIMEOUT_MS),
-        ]),
-      });
-      const raw = await response.text();
-      if (!response.ok) {
-        throw new OpenAiHttpError(
-          response.status,
-          retryAfterMsFromHeaders(response.headers),
-          `openai_stt_failed:${response.status}`
+      // A successful HTTP response can exceptionally contain no transcript even
+      // for intelligible audio. Retry that neutral result once while keeping the
+      // original HA request (and therefore the hub processing state) alive.
+      for (let transcriptionAttempt = 1; transcriptionAttempt <= 2; transcriptionAttempt += 1) {
+        const form = new FormData();
+        form.set('model', model);
+        if (params.env.OPENAI_STT_LANGUAGE?.trim()) {
+          form.set('language', params.env.OPENAI_STT_LANGUAGE.trim());
+        }
+        form.set(
+          'file',
+          new Blob([bufferToWebBytes(params.body)], { type: params.incomingContentType }),
+          `audio.${fileExt}`
         );
+
+        const response = await fetch(`${sttBaseUrl.replace(/\/$/, '')}/audio/transcriptions`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${openAiApiKey}` },
+          body: form,
+          signal: AbortSignal.any([
+            operationSignal,
+            AbortSignal.timeout(params.env.OPENAI_STT_TIMEOUT_MS),
+          ]),
+        });
+        const raw = await response.text();
+        if (!response.ok) {
+          throw new OpenAiHttpError(
+            response.status,
+            retryAfterMsFromHeaders(response.headers),
+            `openai_stt_failed:${response.status}`
+          );
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = raw ? (JSON.parse(raw) as unknown) : {};
+        } catch {
+          parsed = {};
+        }
+        const root = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+        const text = toSingleParagraphPlainText(typeof root.text === 'string' ? root.text : '');
+        if (text || transcriptionAttempt === 2) {
+          return {
+            value: { text, model, transcriptionAttempts: transcriptionAttempt },
+            status: response.status,
+            model,
+          };
+        }
       }
 
-      let parsed: unknown;
-      try {
-        parsed = raw ? (JSON.parse(raw) as unknown) : {};
-      } catch {
-        parsed = {};
-      }
-      const root = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-      const text = toSingleParagraphPlainText(typeof root.text === 'string' ? root.text : '');
-      if (!text) throw new Error('openai_stt_empty_transcript');
-      return { value: { text, model }, status: response.status, model };
+      throw new Error('openai_stt_unreachable');
     },
   });
+
+  // Empty transcripts are a completed provider response, not an outage. Keep
+  // them outside the resilience circuit so they cannot block other voice hubs.
+  if (!result.text) throw new Error('openai_stt_empty_transcript');
+  return result;
 }
 
 function toEntityStates(input: unknown): EntityStateLike[] {
@@ -1289,6 +1307,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const db = createConversationDb(deps.env.CONVERSATION_DB_PATH);
   const threadRepository = new SqliteThreadRepository(db);
   const messageRepository = new SqliteMessageRepository(db);
+  const voiceArchive = new VoiceArchiveService(new VoiceArchiveRepository(db), {
+    enabled: deps.env.VOICE_ARCHIVE_ENABLED,
+    retentionDays: deps.env.VOICE_ARCHIVE_RETENTION_DAYS,
+    maxAudioBytes: deps.env.VOICE_ARCHIVE_MAX_AUDIO_BYTES,
+    logger: app.log,
+  });
   const pendingMutationRepository = new PendingMutationRepository(db);
   const resultSetRepository = new ConversationResultSetRepository(db);
   const cultureProfileRepository = new CultureProfileRepository(
@@ -1302,16 +1326,19 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   );
   const pendingVoiceIdentityStore = new PendingVoiceIdentityStore();
 
-  // ─── Retention cleanup: purge threads inactive for more than 7 days ───────
-  const RETENTION_MS = runtimeCfg.conversationRetentionMs; // default: 7 days
+  // A zero retention keeps conversation context until explicit deletion.
+  const RETENTION_MS = runtimeCfg.conversationRetentionMs;
   const CLEANUP_INTERVAL_MS = runtimeCfg.retentionCleanupIntervalMs; // default: once per day
   const runRetentionCleanup = async () => {
     try {
-      const cutoff = Date.now() - RETENTION_MS;
-      const deleted = await threadRepository.purgeThreadsOlderThan(cutoff, { allOwners: true });
-      if (deleted > 0) {
-        app.log.info({ deleted }, 'conversation_retention_purge');
+      if (RETENTION_MS > 0) {
+        const cutoff = Date.now() - RETENTION_MS;
+        const deleted = await threadRepository.purgeThreadsOlderThan(cutoff, { allOwners: true });
+        if (deleted > 0) app.log.info({ deleted }, 'conversation_retention_purge');
       }
+      const deletedAudio = voiceArchive.cleanup();
+      if (deletedAudio > 0)
+        app.log.info({ deleted: deletedAudio }, 'voice_archive_retention_purge');
     } catch (err) {
       app.log.warn({ err }, 'conversation_retention_purge_error');
     }
@@ -1323,6 +1350,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   retentionTimer.unref();
   app.addHook('onClose', async () => {
     clearInterval(retentionTimer);
+    await voiceArchive.close();
     db.close();
   });
 
@@ -2453,6 +2481,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     try {
       await threadRepository.getOrCreate(effectiveThreadId, { channel: clientChannel ?? null });
+      voiceArchive.linkTurn(voiceTurnId, effectiveThreadId);
     } catch (error) {
       if (error instanceof Error && error.message === 'conversation_thread_not_found') {
         return reply.code(404).send({ error: 'thread_not_found' });
@@ -5446,7 +5475,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                           .join(' et ');
                     const text =
                       execution.outcome === 'confirmed'
-                        ? `${label}, c’est fait.`
+                        ? plan.route === 'home_actions' && plan.commands.length > 1
+                          ? formatQuickActionVoiceResponse('confirmed')
+                          : `${label}, c’est fait.`
                         : execution.outcome === 'accepted'
                           ? `${label}, commandes envoyées sans confirmation immédiate.`
                           : execution.outcome === 'partial'
@@ -6098,10 +6129,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
 
       recordPerf('stt', Date.now() - t0);
+      voiceArchive.archive({
+        voiceTurnId,
+        direction: 'input',
+        audio: body,
+        contentType: incomingContentType,
+        transcript: openAiResult.text,
+        engineId: `openai:${openAiResult.model}`,
+        latencyMs: Date.now() - t0,
+      });
       app.log.info(
         {
           engineId: `openai:${openAiResult.model}`,
           elapsed_ms: Date.now() - t0,
+          transcription_attempts: openAiResult.transcriptionAttempts,
           voice_turn_id: voiceTurnId || undefined,
         },
         'stt_complete'
@@ -6113,12 +6154,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       });
     } catch (err) {
       if (err instanceof Error && err.message === 'openai_stt_empty_transcript') {
+        voiceArchive.archive({
+          voiceTurnId,
+          direction: 'input',
+          audio: body,
+          contentType: incomingContentType,
+          engineId: 'openai:empty_transcript',
+          latencyMs: Date.now() - t0,
+        });
         app.log.info(
-          { engineId: 'openai', voice_turn_id: voiceTurnId || undefined },
-          'stt_openai_empty_silence_skip'
+          { engineId: 'openai', transcription_attempts: 2, voice_turn_id: voiceTurnId || undefined },
+          'stt_openai_empty_transcript'
         );
         return reply.code(422).send({ error: 'stt_empty_transcript', engineId: 'openai' });
       }
+      voiceArchive.archive({
+        voiceTurnId,
+        direction: 'input',
+        audio: body,
+        contentType: incomingContentType,
+        engineId: 'openai:failed',
+        latencyMs: Date.now() - t0,
+      });
       app.log.warn({ err }, 'stt_openai_failed');
       return reply.code(503).send({
         error: 'stt_not_available',
@@ -6203,6 +6260,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       if (mode === 'auto') {
         const warmHit = ttsWarmCache.get(ttsKey);
         if (warmHit && Date.now() - warmHit.at < TTS_WARM_TTL_MS) {
+          voiceArchive.archive({
+            voiceTurnId,
+            direction: 'output',
+            audio: warmHit.bytes,
+            contentType: warmHit.contentType,
+            transcript: text,
+            engineId: 'warm_cache',
+            latencyMs: Date.now() - t0,
+          });
           recordPerf('tts', Date.now() - t0);
           app.log.info(
             {
@@ -6223,6 +6289,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         if (warmPending) {
           const prewarmed = await warmPending;
           if (prewarmed) {
+            voiceArchive.archive({
+              voiceTurnId,
+              direction: 'output',
+              audio: prewarmed.bytes,
+              contentType: prewarmed.contentType,
+              transcript: text,
+              engineId: 'warm_inflight',
+              latencyMs: Date.now() - t0,
+            });
             recordPerf('tts', Date.now() - t0);
             app.log.info(
               {
@@ -6264,6 +6339,15 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
 
       recordPerf('tts', Date.now() - t0);
+      voiceArchive.archive({
+        voiceTurnId,
+        direction: 'output',
+        audio: winner.bytes,
+        contentType: winner.contentType,
+        transcript: text,
+        engineId: winner.engineId,
+        latencyMs: Date.now() - t0,
+      });
       app.log.info(
         {
           engineId: winner.engineId,

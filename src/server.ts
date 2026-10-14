@@ -10,6 +10,8 @@ import { HomeAssistantClient } from './haClient';
 import type { HomeAdaptiveLightingService } from './home/HomeAdaptiveLightingService';
 import type { HomeCatalog } from './home/HomeCatalog';
 import { HomeRuntimeStateRepository } from './home/HomeRuntimeStateRepository';
+import { HomeTelemetryCollector } from './home/HomeTelemetryCollector';
+import { HomeTelemetryRepository } from './home/HomeTelemetryRepository';
 import { MutationIdempotencyCoordinator } from './idempotency/MutationIdempotencyCoordinator';
 import { SqliteMutationIdempotencyStore } from './idempotency/SqliteMutationIdempotencyStore';
 import { IdentityRepository } from './identity/IdentityRepository';
@@ -31,6 +33,7 @@ import { registerGoogleCalendarRoute } from './routes/googleCalendar';
 import { registerHaIndexRoute } from './routes/haIndex';
 import { registerHealthRoute } from './routes/health';
 import { registerHomeRoutes } from './routes/home';
+import { registerHomeTelemetryRoutes } from './routes/homeTelemetry';
 import { registerIdentityRoutes } from './routes/identity';
 import { registerIngestRoute } from './routes/ingest';
 import { registerIntegrationRoutes } from './routes/integrations';
@@ -56,6 +59,7 @@ export type AppDeps = {
   homeCatalog?: HomeCatalog;
   homeLightingService?: HomeAdaptiveLightingService;
   homeRuntimeState?: HomeRuntimeStateRepository;
+  homeTelemetry?: HomeTelemetryRepository;
   pcAgentBroker?: PcAgentCommandBroker;
   identityRepository?: IdentityRepository;
 };
@@ -120,6 +124,7 @@ export function buildApp(env: Env): FastifyInstance {
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
   const runtimeDb = createConversationDb(env.CONVERSATION_DB_PATH);
   deps.homeRuntimeState = new HomeRuntimeStateRepository(runtimeDb);
+  deps.homeTelemetry = new HomeTelemetryRepository(runtimeDb);
   const identityDb = env.OIDC_ENABLED ? runtimeDb : undefined;
   const issuer = env.OIDC_ISSUER_URL?.replace(/\/$/u, '');
   const identityService =
@@ -167,7 +172,6 @@ export function buildApp(env: Env): FastifyInstance {
   deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
   app.addHook('onClose', async () => {
     if (dailyLifeTimer) clearInterval(dailyLifeTimer);
-    runtimeDb.close();
   });
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
@@ -209,6 +213,29 @@ export function buildApp(env: Env): FastifyInstance {
   // edge, authentication and rate-limit policy.
   registerHealthRoute(app, deps);
   registerHomeRoutes(app, deps);
+  registerHomeTelemetryRoutes(app, deps);
+
+  const homeTelemetryCollector =
+    env.HOME_TELEMETRY_ENABLED && ha && deps.homeCatalog && deps.homeTelemetry
+      ? new HomeTelemetryCollector(
+          ha,
+          deps.homeCatalog,
+          deps.homeTelemetry,
+          {
+            homeId: env.ACTIVE_HOME_ID,
+            intervalMs: env.HOME_TELEMETRY_SYNC_INTERVAL_MS,
+            initialLookbackMs: env.HOME_TELEMETRY_INITIAL_LOOKBACK_HOURS * 3_600_000,
+            maximumCatchupMs: env.HOME_TELEMETRY_MAX_CATCHUP_DAYS * 86_400_000,
+            retentionMs: env.HOME_TELEMETRY_RETENTION_DAYS * 86_400_000,
+          },
+          app.log
+        )
+      : undefined;
+  homeTelemetryCollector?.start();
+  app.addHook('onClose', async () => {
+    await homeTelemetryCollector?.stop();
+    runtimeDb.close();
+  });
 
   if (identityService && adminRepository) {
     registerIdentityRoutes(app, identityService, adminRepository);

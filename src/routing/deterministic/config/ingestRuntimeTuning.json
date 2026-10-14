@@ -1,5 +1,5 @@
 {
-  "conversationRetentionMs": 604800000,
+  "conversationRetentionMs": 0,
   "retentionCleanupIntervalMs": 86400000,
   "ttsProviderCacheTtlMs": 900000,
   "ttsCircuitBreakerThreshold": 3,

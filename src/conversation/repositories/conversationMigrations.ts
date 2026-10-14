@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 16;
+export const CONVERSATION_SCHEMA_VERSION = 19;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -34,6 +34,115 @@ const RESPONSE_PROVENANCE_AUDIT_CHECKSUM =
   'sha256:612eae8e9dd8f345831c829a772c9f195a4edc8beb6074c23af43b8c89230f70';
 const RESPONSE_DECISION_AUDIT_CHECKSUM =
   'sha256:d4ddcd6379a4b488881253f937c176b5bf4a0ef46bd8e09b037c0e9ed6774706';
+const VOICE_ARTIFACT_ARCHIVE_CHECKSUM =
+  'sha256:742e92f0e7023b5fbb529956aa07b7f3b2af993eab9e3b30cc16986a41e2818a';
+const LIGHTING_INTENT_MAXIMUM_MODE_CHECKSUM =
+  'sha256:c62b153f283296530a6916d3909cca0d97073d98dbaacf1d40e2e1fc63789bbf';
+const HOME_TELEMETRY_CHECKSUM =
+  'sha256:31e938ce94d0b1244754c65c63ea37a112e060c8667515731a34f256317c814d';
+
+function ensureHomeTelemetrySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS home_telemetry_entities (
+      home_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      device_id TEXT,
+      room_id TEXT,
+      domain TEXT NOT NULL,
+      role TEXT NOT NULL,
+      unit_of_measurement TEXT,
+      device_class TEXT,
+      state_class TEXT,
+      first_seen_at_ms INTEGER NOT NULL,
+      last_seen_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(home_id,entity_id),
+      CHECK (length(home_id) BETWEEN 1 AND 128),
+      CHECK (length(entity_id) BETWEEN 3 AND 255),
+      CHECK (instr(entity_id,'.') > 1),
+      CHECK (last_seen_at_ms >= first_seen_at_ms)
+    );
+    CREATE INDEX IF NOT EXISTS idx_home_telemetry_entities_device
+      ON home_telemetry_entities(home_id,device_id);
+    CREATE INDEX IF NOT EXISTS idx_home_telemetry_entities_room
+      ON home_telemetry_entities(home_id,room_id);
+
+    CREATE TABLE IF NOT EXISTS home_telemetry_samples (
+      home_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      observed_at_ms INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      numeric_value REAL,
+      attributes_json TEXT,
+      source TEXT NOT NULL CHECK (source IN ('home_assistant_history','home_assistant_snapshot')),
+      captured_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(home_id,entity_id,observed_at_ms),
+      FOREIGN KEY(home_id,entity_id)
+        REFERENCES home_telemetry_entities(home_id,entity_id) ON DELETE CASCADE,
+      CHECK (length(state) <= 512),
+      CHECK (attributes_json IS NULL OR json_valid(attributes_json))
+    );
+    CREATE INDEX IF NOT EXISTS idx_home_telemetry_samples_home_time
+      ON home_telemetry_samples(home_id,observed_at_ms DESC);
+
+    CREATE TABLE IF NOT EXISTS home_telemetry_sync_state (
+      home_id TEXT PRIMARY KEY,
+      history_cursor_at_ms INTEGER,
+      last_attempt_at_ms INTEGER,
+      last_success_at_ms INTEGER,
+      last_error_code TEXT,
+      CHECK (length(home_id) BETWEEN 1 AND 128)
+    );
+  `);
+}
+
+function ensureLightingIntentMaximumModeSchema(db: Database.Database): void {
+  const table = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'home_lighting_intents'")
+    .get() as { sql?: string } | undefined;
+  if (table?.sql?.includes("'maximum'")) return;
+
+  db.exec(`
+    ALTER TABLE home_lighting_intents RENAME TO home_lighting_intents_v17;
+    CREATE TABLE home_lighting_intents (
+      room_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL CHECK (mode IN ('on','maximum','dimmed','off')),
+      target_json TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+    INSERT INTO home_lighting_intents(room_id,mode,target_json,updated_at_ms)
+      SELECT room_id,mode,target_json,updated_at_ms FROM home_lighting_intents_v17;
+    DROP TABLE home_lighting_intents_v17;
+  `);
+}
+
+function ensureVoiceArtifactArchiveSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS voice_artifacts (
+      voice_turn_id TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('input','output')),
+      thread_id TEXT,
+      owner_user_id TEXT,
+      owner_service_id TEXT,
+      transcript TEXT,
+      engine_id TEXT,
+      source_content_type TEXT NOT NULL,
+      source_byte_length INTEGER NOT NULL CHECK (source_byte_length > 0),
+      mp3_audio BLOB NOT NULL,
+      mp3_byte_length INTEGER NOT NULL CHECK (mp3_byte_length > 0),
+      latency_ms INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (voice_turn_id, direction),
+      CHECK (length(voice_turn_id) BETWEEN 8 AND 160),
+      CHECK (owner_user_id IS NULL OR owner_service_id IS NULL),
+      FOREIGN KEY(thread_id) REFERENCES conversation_threads(thread_id) ON DELETE CASCADE,
+      FOREIGN KEY(owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_artifacts_thread_created
+      ON voice_artifacts(thread_id, created_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_voice_artifacts_created
+      ON voice_artifacts(created_at_ms DESC);
+  `);
+}
 
 function ensureDurableHomeAndRecurrenceSchema(db: Database.Database): void {
   db.exec(`
@@ -910,6 +1019,12 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:15');
   if (applied.get(16) && applied.get(16) !== RESPONSE_DECISION_AUDIT_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:16');
+  if (applied.get(17) && applied.get(17) !== VOICE_ARTIFACT_ARCHIVE_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:17');
+  if (applied.get(18) && applied.get(18) !== LIGHTING_INTENT_MAXIMUM_MODE_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:18');
+  if (applied.get(19) && applied.get(19) !== HOME_TELEMETRY_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:19');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -1006,6 +1121,24 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (16, ?, ?, ?)'
       ).run('response_decision_audit', RESPONSE_DECISION_AUDIT_CHECKSUM, Date.now());
+    }
+    ensureVoiceArtifactArchiveSchema(db);
+    if (!applied.has(17)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (17, ?, ?, ?)'
+      ).run('voice_artifact_archive', VOICE_ARTIFACT_ARCHIVE_CHECKSUM, Date.now());
+    }
+    ensureLightingIntentMaximumModeSchema(db);
+    if (!applied.has(18)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (18, ?, ?, ?)'
+      ).run('lighting_intent_maximum_mode', LIGHTING_INTENT_MAXIMUM_MODE_CHECKSUM, Date.now());
+    }
+    ensureHomeTelemetrySchema(db);
+    if (!applied.has(19)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (19, ?, ?, ?)'
+      ).run('durable_home_telemetry', HOME_TELEMETRY_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();

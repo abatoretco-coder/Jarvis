@@ -270,12 +270,26 @@ export class HomeAssistantClient {
   }
 
   async getHistory(entityId: string, start: Date, end: Date): Promise<unknown> {
+    return this.getHistoryForEntities([entityId], start, end, false);
+  }
+
+  async getHistoryForEntities(
+    entityIds: string[],
+    start: Date,
+    end: Date,
+    includeAttributes = true
+  ): Promise<unknown> {
+    if (entityIds.length === 0 || entityIds.length > 200) {
+      throw new Error('Home Assistant history entity count must be between 1 and 200');
+    }
     const query = new URLSearchParams({
-      filter_entity_id: entityId,
+      filter_entity_id: entityIds.join(','),
       end_time: end.toISOString(),
-      minimal_response: '',
-      no_attributes: '',
     });
+    if (!includeAttributes) {
+      query.set('minimal_response', '');
+      query.set('no_attributes', '');
+    }
     const url = `${this.baseUrl}/api/history/period/${encodeURIComponent(start.toISOString())}?${query.toString()}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);

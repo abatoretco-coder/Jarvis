@@ -132,7 +132,7 @@ function Initialize-FullProfile() {
     'LLM_PROVIDER=openai',
     'TTS_PROVIDER=none',
     'OPENAI_TTS_VOICE=cedar',
-    'OPENAI_TTS_INSTRUCTIONS=Parle en francais de France avec une voix masculine adulte, naturelle, chaleureuse et fluide. Garde un timbre masculin pose, une intonation souple et des pauses legeres. Reste simple, clair et en tutoiement.',
+    'OPENAI_TTS_INSTRUCTIONS=Parle exclusivement en francais de France avec une voix d''homme adulte, baryton, naturelle et chaleureuse. Adopte une prononciation francaise metropolitaine native, sans accent anglophone. Garde un timbre grave et nettement masculin, une intonation souple et des pauses legeres. Reste simple, clair et en tutoiement.',
     'NAS_STATUS_ENABLED=false',
     'CULTURE_ENABLED=false',
     "OAUTH_TOKEN_ENCRYPTION_KEY=$oauthKey",

@@ -39,7 +39,7 @@ flowchart TD
 - Condition: payload contient `domain=spotify` + `action` valide.
 - Route: `explicit_contract`.
 - Effet: execute directement `executeSpotifyCapability(...)` sans passer par le routeur LLM/HA.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L956).
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts).
 
 2. Sinon, entree textuelle
 - Jarvis tente d'abord la voie semantique (E2/E1) puis le routeur LLM.
@@ -47,9 +47,9 @@ flowchart TD
   - `router_direct` si action directe exploitable (et cas special `search_and_play` avec query deja presente).
   - `music_planner` sinon (planificateur musique OpenAI).
 - References:
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L1998)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2006)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2246)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 3. Construction de la reponse uniforme
 - Reponse Spotify normalisee via `buildSpotifyIngestPayload(...)`.
@@ -59,29 +59,29 @@ flowchart TD
   - `replyMeta.fallbackReason = execution_error` si statut error
   - `music.routing.path = explicit_contract | router_direct | music_planner`
   - `music.execution.status = success | need_clarification | error`
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L208).
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts).
 
 ## 2) Determinisme (ce qui est stable et non ambigu)
 
 1. Determinisme de priorite
 - Le contrat explicite Spotify gagne toujours sur tout le reste.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L956).
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts).
 
 2. Determinisme de decision semantique
 - E2: actions directes sans planner.
 - E1: actions qui passent par planner quand elles viennent du semantique.
 - Reference:
-  - [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L58)
-  - [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L225)
+  - [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
+  - [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
 
 3. Determinisme de fallback textuel Spotify
 - `search_and_play` sans query exploitable: bascule planner.
 - `search_and_play` sans cible resolue: gate de reprise generique (`play`) sinon clarification.
-- Reference: [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L897).
+- Reference: [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts).
 
 4. Determinisme d execution (no-op / messages fixes)
 - Plusieurs actions ont des reponses no-op stables (ex: deja en pause, deja au volume cible).
-- Reference: [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L348).
+- Reference: [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts).
 
 ## 3) Mapping action par action
 
@@ -107,8 +107,8 @@ Legende:
   - `EXEC_ACK`: `En pause.`
   - ou no-op informatif: `Deja en pause.` / `Rien ne joue actuellement.`
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L17)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L348)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `play`
 - Detection:
@@ -120,40 +120,40 @@ Legende:
   - `EXEC_ACK`: `Lecture reprise.`
   - erreur contexte device possible (`spotify n est pas ouvert...`)
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L26)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L380)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `next`
 - Detection: explicite ou E2 `spotify.next`
 - Execution: `next(deviceId?)`
 - Reponse: `EXEC_ACK` (`Piste suivante.`)
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L35)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L403)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `previous`
 - Detection: explicite ou E2 `spotify.previous`
 - Execution: `previous(deviceId?)`
 - Reponse: `EXEC_ACK` (`Piste precedente.`)
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L44)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L411)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `now_playing`
 - Detection: explicite ou E2 `spotify.now_playing`
 - Execution: `getNowPlaying()`
 - Reponse: `INFO` (`En cours : <titre>.`) + payload `now_playing`
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L53)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L328)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `list_devices`
 - Detection: explicite ou E2 `spotify.list_devices`
 - Execution: `listDevicesPublic()`
 - Reponse: `INFO` (`<n> appareil(s) disponible(s).`) + liste devices
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L62)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L311)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `clear_queue`
 - Detection: explicite ou E2 `spotify.clear_queue`
@@ -162,8 +162,8 @@ Legende:
   - `EXEC_ACK` (`x titres retires de la file.`)
   - no-op possible (`File deja vide.`)
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L71)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L1012)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 ### 3.2 E1 (planner requis en semantique)
 
@@ -177,8 +177,8 @@ Legende:
   - `INFO`: resume resultats + options + grouped results
   - `CLARIFY` si query absente
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L80)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L497)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `search_and_play`
 - Detection:
@@ -193,9 +193,9 @@ Legende:
   - `EXEC_ACK`: `Lecture de ...`
   - `CLARIFY` si cible manquante
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L89)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L1989)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L849)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `queue_add`
 - Detection: explicite ou E1 `spotify.queue_add` + planner
@@ -206,8 +206,8 @@ Legende:
   - `EXEC_ACK`: `Ajoute a la file.`
   - `CLARIFY` si query manquante
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L98)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L683)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `transfer`
 - Detection: explicite ou E1 `spotify.transfer` + planner
@@ -220,8 +220,8 @@ Legende:
   - `EXEC_ACK`: `Lecture transferee.` / `Lecture lancee.`
   - no-op: `Deja en lecture sur cet appareil.`
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L107)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L612)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `add_to_playlist`
 - Detection: explicite ou E1 `spotify.add_to_playlist` + planner
@@ -233,8 +233,8 @@ Legende:
   - `EXEC_ACK`: `Ajoute a la playlist.`
   - `CLARIFY` si playlist/titre manquant
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L116)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L778)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 #### Action: `volume_set`
 - Detection: explicite ou E1 `spotify.volume_set` + planner
@@ -248,8 +248,8 @@ Legende:
   - no-op: `Volume deja a X%.`
   - `CLARIFY/ERROR` si contexte insuffisant
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L125)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L419)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 ### 3.3 Non semantique
 
@@ -262,8 +262,8 @@ Legende:
 - Reponse:
   - `EXEC_ACK`: `Ajoute aux favoris.` / `Retire des favoris.`
 - References:
-  - [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts#L134)
-  - [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L764)
+  - [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+  - [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 ## 4) Ce qui est "execution pure" vs "retour info"
 
@@ -275,9 +275,9 @@ Actions principalement informatives (`INFO`):
 
 ## 5) Ou regarder dans le code
 
-- Contrat actions: [src/spotify/contracts.ts](src/spotify/contracts.ts#L3)
-- Registry capability: [src/spotify/capabilityRegistry.ts](src/spotify/capabilityRegistry.ts)
-- Matrix detection/routing: [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts)
-- Routes semantiques E2/E1: [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L58)
-- Execution par action: [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L311)
-- Construction payload final: [src/routes/ingest.ts](src/routes/ingest.ts#L208)
+- Contrat actions: [src/spotify/contracts.ts](../src/spotify/contracts.ts)
+- Registry capability: [src/spotify/capabilityRegistry.ts](../src/spotify/capabilityRegistry.ts)
+- Matrix detection/routing: [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
+- Routes semantiques E2/E1: [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
+- Execution par action: [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
+- Construction payload final: [src/routes/ingest.ts](../src/routes/ingest.ts)

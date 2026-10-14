@@ -23,28 +23,28 @@ Companion architecture steps:
 
 1. Entree explicite Spotify
 - Si domain=spotify et action valide: passage direct Spotify, sans routeur general.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L956)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 2. Entree texte
 - Jarvis active d abord le semantic router (si active), puis le routeur LLM orchestrateur.
 - Semantic E2/E1 peut activer directement certaines routes.
 - Sinon routeUserRequest choisit des cibles depuis HA_AGENT_MAP + agents internes (spotify, weather).
 - References:
-  - [src/routing/semanticRouter.ts](src/routing/semanticRouter.ts)
-  - [src/routing/routeDecision.ts](src/routing/routeDecision.ts)
-  - [src/conversation/orchestratorRouter.ts](src/conversation/orchestratorRouter.ts)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L1040)
+  - [src/routing/semanticRouter.ts](../src/routing/semanticRouter.ts)
+  - [src/routing/routeDecision.ts](../src/routing/routeDecision.ts)
+  - [src/conversation/orchestratorRouter.ts](../src/conversation/orchestratorRouter.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 3. Execution specialisee
 - Chaque cible est executee dans un task specialise.
 - Si plusieurs cibles repondent: synthese multi-agent.
 - Si aucune cible exploitable: fallback HA general.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L1951)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 4. Construction de reponse
 - Spotify seul: payload Spotify enrichi (status, music.routing, planner, etc.).
 - Autres agents: payload general avec replyMeta kind/source/routeKey.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2296)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 2) Agent Spotify
 
@@ -52,15 +52,15 @@ Detection
 - Explicite: domain spotify + action.
 - Semantique E2 direct: pause, play, next, previous, now_playing, list_devices, clear_queue.
 - Semantique E1 planner: search, search_and_play, queue_add, transfer, add_to_playlist, volume_set.
-- Matrix: [src/spotify/musicRoutingMatrix.ts](src/spotify/musicRoutingMatrix.ts)
+- Matrix: [src/spotify/musicRoutingMatrix.ts](../src/spotify/musicRoutingMatrix.ts)
 
 Routing
 - Paths: explicit_contract, router_direct, music_planner.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L199)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Execution
 - executeSpotifyCapability action par action.
-- Reference: [src/spotify/spotifyExecutor.ts](src/spotify/spotifyExecutor.ts#L311)
+- Reference: [src/spotify/spotifyExecutor.ts](../src/spotify/spotifyExecutor.ts)
 
 Reponse
 - Payload Spotify dedie avec:
@@ -68,39 +68,39 @@ Reponse
   - replyMeta.routeKey=spotify.action
   - music.routing.path
   - music.execution.status
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L208)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Doc detaillee deja produite
-- [docs/MUSIC_ACTION_EXECUTION_VIEW.md](docs/MUSIC_ACTION_EXECUTION_VIEW.md)
+- [docs/MUSIC_ACTION_EXECUTION_VIEW.md](MUSIC_ACTION_EXECUTION_VIEW.md)
 
 ## 3) Agent Search (search.news, search.web, search.deep)
 
 Detection
 - HA_AGENT_MAP key search ou prefix search.
 - Helper de detection: isSearchAgentKey.
-- Reference: [src/search/agents.ts](src/search/agents.ts#L132)
+- Reference: [src/search/agents.ts](../src/search/agents.ts)
 
 Routing
 - E2 live routes search.news.external_weather, live_sport, current_news, search.web.definition, quick_lookup.
 - Dispatcher E2: dispatchAcceptedSearchE2Route.
 - Reference:
-  - [src/routing/routeDispatcher.ts](src/routing/routeDispatcher.ts)
-  - [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L128)
+  - [src/routing/routeDispatcher.ts](../src/routing/routeDispatcher.ts)
+  - [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
 
 Execution
 - callSearchAgent avec config par agent (model, temperature, recency filter).
 - Search agents bypass HA completement.
 - Reference:
-  - [src/search/agents.ts](src/search/agents.ts)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2079)
+  - [src/search/agents.ts](../src/search/agents.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Reponse
 - Texte direct du search agent.
 - En cas multi-agent, texte fusionne par synthese.
 - Response domain final: search.
 - References:
-  - [src/conversation/orchestratorRouter.ts](src/conversation/orchestratorRouter.ts#L193)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2270)
+  - [src/conversation/orchestratorRouter.ts](../src/conversation/orchestratorRouter.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 4) Agent Weather (local Home Assistant)
 
@@ -110,66 +110,66 @@ Detection
   2) Injection locale heuristique (isLikelyLocalWeatherQuery)
   3) Routeur LLM cible weather
 - References:
-  - [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L186)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L555)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L1896)
+  - [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Routing
 - En cas requete meteo externe, Jarvis privilegie search.news.external_weather.
 - En cas meteo locale mono-intent, Jarvis retire les cibles search pour verrouiller local.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L1877)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Execution
 - Lecture etats HA, build snapshot meteo.
 - Deterministe d abord pour requetes simples (temperature, humidite, pluie, condition actuelle).
 - Sinon synthese OpenAI a partir du snapshot.
 - References:
-  - [src/weather/weatherSnapshot.ts](src/weather/weatherSnapshot.ts)
-  - [src/weather/deterministicWeatherReply.ts](src/weather/deterministicWeatherReply.ts)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2148)
+  - [src/weather/weatherSnapshot.ts](../src/weather/weatherSnapshot.ts)
+  - [src/weather/deterministicWeatherReply.ts](../src/weather/deterministicWeatherReply.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Reponse
 - Texte meteo local concis.
 - Response domain final: weather.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2270)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 5) Agent Todo
 
 Detection
 - Key todo ou prefix todo dans HA_AGENT_MAP.
 - Helper: isTodoAgentKey.
-- Reference: [src/todo/todoAgent.ts](src/todo/todoAgent.ts#L996)
+- Reference: [src/todo/todoAgent.ts](../src/todo/todoAgent.ts)
 
 Routing
 - Peut venir du routeur LLM specialise.
 - Peut venir de semantic E1 via dispatcher (route todo.*).
 - Reference:
-  - [src/routing/e1RouteDispatcher.ts](src/routing/e1RouteDispatcher.ts)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2072)
+  - [src/routing/e1RouteDispatcher.ts](../src/routing/e1RouteDispatcher.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Execution
 - callTodoAgent:
   - planner OpenAI vers action todo,
   - execution Microsoft Graph Tasks.
 - Bypass HA complet.
-- Reference: [src/todo/todoAgent.ts](src/todo/todoAgent.ts#L1004)
+- Reference: [src/todo/todoAgent.ts](../src/todo/todoAgent.ts)
 
 Reponse
 - Texte operationnel (cree, liste, coche, supprime, etc.).
 - Response domain final: todo.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2270)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 6) Agent Mail
 
 Detection
 - Key mail ou prefix mail dans HA_AGENT_MAP.
 - Helper: isMailAgentKey.
-- Reference: [src/mail/mailAgent.ts](src/mail/mailAgent.ts#L811)
+- Reference: [src/mail/mailAgent.ts](../src/mail/mailAgent.ts)
 
 Routing
 - Routeur LLM specialise ou semantic E1 route mail.*
 - Dispatcher E1: mail_text.
-- Reference: [src/routing/e1RouteDispatcher.ts](src/routing/e1RouteDispatcher.ts)
+- Reference: [src/routing/e1RouteDispatcher.ts](../src/routing/e1RouteDispatcher.ts)
 
 Execution
 - callMailAgent:
@@ -177,15 +177,15 @@ Execution
   - planner OpenAI action mail,
   - execution Gmail/Outlook.
 - Bypass HA complet.
-- Reference: [src/mail/mailAgent.ts](src/mail/mailAgent.ts#L822)
+- Reference: [src/mail/mailAgent.ts](../src/mail/mailAgent.ts)
 
 Reponse
 - Texte metier mail (liste, lecture, envoi, flag, etc.).
 - Etat voix mail memorise pour follow-up vocal.
 - Response domain final: mail.
 - References:
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2329)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2338)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 7) Agent Executors (home automation)
 
@@ -193,14 +193,14 @@ Detection
 - Cible executors depuis:
   - routeur LLM (action domotique),
   - semantic E1 routes executor.*
-- Reference: [src/routing/semanticRouteCatalog.ts](src/routing/semanticRouteCatalog.ts#L567)
+- Reference: [src/routing/semanticRouteCatalog.ts](../src/routing/semanticRouteCatalog.ts)
 
 Routing
 - Semantic E1 executor est mappe vers une cible HA executors.
 - Cas particulier timer: tentative de traitement direct local avant HA conversation.
 - References:
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L1513)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L633)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Execution
 - Timer direct:
@@ -209,13 +209,13 @@ Execution
   - callService timer.start.
 - Sinon executors passe par conversationService.callHomeAssistantConversation sur agent executors.
 - References:
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2190)
-  - [src/routes/ingest.ts](src/routes/ingest.ts#L2223)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
+  - [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Reponse
 - Texte d action domotique (confirmation ou erreur claire).
 - Response domain final: executor.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2271)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 8) Agent General HA (fallback)
 
@@ -225,21 +225,21 @@ Detection
   - routeur indisponible,
   - aucune cible valide,
   - toutes cibles specialisees echouent ou retournent null.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2296)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Routing
 - Fallback unique vers HA_AGENT_GENERAL.
-- Reference: [src/env.ts](src/env.ts#L167)
+- Reference: [src/env.ts](../src/env.ts)
 
 Execution
 - conversationService.callHomeAssistantConversation avec generalAgentId.
 - OUT_OF_SCOPE force un message deterministe de secours.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2300)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 Reponse
 - Payload standard replyMeta.kind=general.
 - source: ha_general si fallback, sinon semantic_router ou router_or_specialized selon chemin.
-- Reference: [src/routes/ingest.ts](src/routes/ingest.ts#L2343)
+- Reference: [src/routes/ingest.ts](../src/routes/ingest.ts)
 
 ## 9) Regles de construction de reponse (tous agents)
 
@@ -250,11 +250,11 @@ Single agent
 Multi-agent
 - Les sorties sont fusionnees par synthese LLM.
 - Fallback deterministic join si synthese indisponible.
-- Reference: [src/conversation/orchestratorRouter.ts](src/conversation/orchestratorRouter.ts#L193)
+- Reference: [src/conversation/orchestratorRouter.ts](../src/conversation/orchestratorRouter.ts)
 
 Voix
 - Formatage final depend du domaine: mail, todo, search, executor, weather, spotify, general.
-- Reference: [src/conversation/voiceUx.ts](src/conversation/voiceUx.ts)
+- Reference: [src/conversation/voiceUx.ts](../src/conversation/voiceUx.ts)
 
 ## 10) Cache proactif de contexte
 
@@ -279,7 +279,7 @@ Regles
 - General HA reste fallback, pas agent prechauffe.
 
 Source de verite
-- [docs/PROACTIVE_CONTEXT_CACHE.md](docs/PROACTIVE_CONTEXT_CACHE.md)
+- [docs/PROACTIVE_CONTEXT_CACHE.md](PROACTIVE_CONTEXT_CACHE.md)
 
 ## 11) Ce que tu peux decider maintenant facilement
 

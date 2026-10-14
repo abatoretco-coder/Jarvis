@@ -94,6 +94,11 @@ const envSchema = z
     HA_CONVERSATION_RETRY_DELAY_MS: numberFromEnv.default(1200),
     HA_TTS_ENTITY_ID: optionalNonEmptyString,
     HA_TTS_FALLBACK_ENTITY_IDS: optionalNonEmptyString,
+    HOME_TELEMETRY_ENABLED: booleanFromEnv.default(true),
+    HOME_TELEMETRY_SYNC_INTERVAL_MS: numberFromEnv.pipe(z.number().int().min(60_000).max(3_600_000)).default(300_000),
+    HOME_TELEMETRY_INITIAL_LOOKBACK_HOURS: numberFromEnv.pipe(z.number().int().min(1).max(720)).default(336),
+    HOME_TELEMETRY_MAX_CATCHUP_DAYS: numberFromEnv.pipe(z.number().int().min(1).max(30)).default(14),
+    HOME_TELEMETRY_RETENTION_DAYS: numberFromEnv.pipe(z.number().int().min(0).max(36_500)).default(0),
     HOME_CONFIG_ROOT: z.string().default('config/homes'),
     HOME_DATA_ROOT: z.string().default(''),
     ACTIVE_HOME_ID: z
@@ -311,6 +316,11 @@ const envSchema = z
     // Persistent conversation memory (SQLite) - used by ThreadRepository/MessageRepository
     CONVERSATION_DB_PATH: z.string().default('/app/data/conversation-memory.sqlite'),
     CONVERSATION_RECENT_MESSAGES: numberFromEnv.default(10),
+    VOICE_ARCHIVE_ENABLED: booleanFromEnv.default(false),
+    VOICE_ARCHIVE_RETENTION_DAYS: numberFromEnv.pipe(z.number().int().min(0).max(3650)).default(0),
+    VOICE_ARCHIVE_MAX_AUDIO_BYTES: numberFromEnv
+      .pipe(z.number().int().min(65536).max(16777216))
+      .default(8388608),
 
     // Optional: expose a minimal Home Assistant entity index for mapping/disambiguation
     EXPOSE_HA_INDEX: booleanFromEnv.default(false),
