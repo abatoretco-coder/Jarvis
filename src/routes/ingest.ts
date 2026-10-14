@@ -14,6 +14,7 @@ import {
   planCalendarAgentAction,
   prepareCalendarMutationAction,
 } from '../calendar/calendarAgent';
+import { getGoogleCalendarConfigState } from '../calendar/googleCalendarClient';
 import {
   type CapabilityAgent,
   type CapabilityEffect,
@@ -45,6 +46,7 @@ import {
   SqliteMessageRepository,
   SqliteThreadRepository,
 } from '../conversation/repositories/SqliteRepositories';
+import { buildAvailableRouterAgents } from '../conversation/routerAgentCatalog';
 import { SummarizationService } from '../conversation/SummarizationService';
 import {
   buildLastMailSummaryFromState,
@@ -1851,9 +1853,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const planPendingCalendarMutation = async (
     threadId: string,
     inputText: string,
-    channel?: string
+    channel?: string,
+    contextMessages: Array<{ role: 'user' | 'assistant'; content: string }> = []
   ): Promise<string> => {
-    const plan = await planCalendarAgentAction(inputText, buildCalendarEnv());
+    const plan = await planCalendarAgentAction(inputText, buildCalendarEnv(), contextMessages);
     if (!isCalendarMutation(plan)) {
       return executeCalendarAgentAction(plan, buildCalendarEnv());
     }
@@ -4195,14 +4198,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // reminder, alarm, note), but it receives a distinct router identity and
     // must never be selected for TV/light/climate/vacuum actions.
     const configuredAgentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
-    const spotifyEntry = spotifyWebApi().isConfigured()
+    const spotifyEntry = spotifyWebApi().isConfigured() && hasRequestPermission(req, 'music')
       ? {
           agentId: SPOTIFY_AGENT_ID,
           hint: 'Musique streaming Spotify: jouer, pause, suivant, précédent, volume, recherche musicale',
           key: 'spotify' as const,
         }
       : null;
-    const weatherEntry = deps.ha
+    const weatherEntry = deps.ha && hasRequestPermission(req, 'home')
       ? {
           agentId: 'weather',
           routerId: LOCAL_WEATHER_ROUTER_AGENT_ID,
@@ -4222,7 +4225,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         : entry
     );
     const homeControlEntry =
-      deps.homeCatalog && deps.ha
+      deps.homeCatalog && deps.ha && hasRequestPermission(req, 'home')
         ? {
             agentId: HOME_CONTROL_ROUTER_AGENT_ID,
             routerId: HOME_CONTROL_ROUTER_AGENT_ID,
@@ -4231,12 +4234,29 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           }
         : null;
     const executorsEntry = legacyUtilityEntry;
-    const allAgentEntries = [
-      ...(spotifyEntry ? [spotifyEntry] : []),
-      ...(weatherEntry ? [weatherEntry] : []),
-      ...(homeControlEntry ? [homeControlEntry] : []),
-      ...agentEntries,
-    ];
+    const calendarEnv = buildCalendarEnv();
+    const mailEnv = buildMailEnv();
+    const todoEnv = buildTodoEnv();
+    const calendarReady = (await getGoogleCalendarConfigState(calendarEnv)) === 'ready';
+    const allAgentEntries = buildAvailableRouterAgents({
+      availability: {
+        calendar: calendarReady && hasRequestPermission(req, 'calendar'),
+        mail: Boolean(mailEnv.mailAccounts.length > 0 && hasRequestPermission(req, 'mail')),
+        search: Boolean(deps.env.OPENAI_API_KEY && hasRequestPermission(req, 'chat')),
+        todo: Boolean(
+          todoEnv.MICROSOFT_CLIENT_ID &&
+            todoEnv.MICROSOFT_CLIENT_SECRET &&
+            todoEnv.MICROSOFT_REFRESH_TOKEN &&
+            hasRequestPermission(req, 'todo')
+        ),
+      },
+      runtimeEntries: [
+        ...(spotifyEntry ? [spotifyEntry] : []),
+        ...(weatherEntry ? [weatherEntry] : []),
+        ...(homeControlEntry ? [homeControlEntry] : []),
+      ],
+      configuredEntries: agentEntries,
+    });
     const routerEnabled = allAgentEntries.length > 0 && Boolean(deps.env.OPENAI_API_KEY);
     const threshold = deps.env.ROUTER_CONFIDENCE_THRESHOLD;
 
@@ -4849,7 +4869,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                                   return planPendingCalendarMutation(
                                     effectiveThreadId,
                                     assistantInputText,
-                                    clientChannel ?? undefined
+                                    clientChannel ?? undefined,
+                                    recentMessages_
                                   );
                                 }
                                 return callCalendarAgent(
@@ -5629,7 +5650,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               planPendingCalendarMutation(
                 effectiveThreadId,
                 assistantInputText,
-                clientChannel ?? undefined
+                clientChannel ?? undefined,
+                recentMessages
               )
                 .then((txt): SpecializedResult | null => {
                   app.log.info(

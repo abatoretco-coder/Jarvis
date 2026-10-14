@@ -213,6 +213,8 @@ La date et heure actuelles sont : ${dateStr}.
 Date ISO du jour : ${isoDate}.
 
 Analyse la commande en français et retourne un JSON correspondant à UNE seule action calendrier.
+Les messages précédents peuvent préciser une date, un titre ou une action. Lorsqu'une demande est
+une continuation claire, résous ses références à partir de ce contexte sans inventer d'information.
 
 Champ obligatoire "action" parmi :
   list_upcoming | search_events | create_event | delete_event | update_event | remove_from_event
@@ -401,6 +403,7 @@ function preplanSimpleCalendarRead(text: string, isoDate: string): CalendarActio
 async function planCalendarAction(
   text: string,
   env: CalendarAgentEnv,
+  contextMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [],
 ): Promise<CalendarAction> {
   const now = new Date();
   const dateStr = formatParisDateTime(now);
@@ -423,6 +426,10 @@ async function planCalendarAction(
     reasoningEffort: 'none',
     messages: [
       { role: 'system', content: buildPlannerSystemPrompt(dateStr, isoDate) },
+      ...contextMessages.slice(-6).map((message) => ({
+        role: message.role,
+        content: message.content.slice(0, 500),
+      })),
       { role: 'user', content: text },
     ],
   });
@@ -444,6 +451,7 @@ async function planCalendarAction(
 export async function planCalendarAgentAction(
   text: string,
   env: CalendarAgentEnv,
+  contextMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [],
 ): Promise<CalendarAction> {
   const configState = await getGoogleCalendarConfigState(env);
   if (configState !== 'ready') {
@@ -452,7 +460,7 @@ export async function planCalendarAgentAction(
   if (!env.OPENAI_API_KEY?.trim()) {
     throw new Error('calendar_agent_openai_key_missing');
   }
-  return planCalendarAction(text, env);
+  return planCalendarAction(text, env, contextMessages);
 }
 
 // ─── Executor ─────────────────────────────────────────────────────────────────

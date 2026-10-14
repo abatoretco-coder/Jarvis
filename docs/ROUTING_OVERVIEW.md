@@ -25,6 +25,20 @@ This document explains how Jarvis chooses an execution path for each request.
 
 ## 2. Decision Components
 
+## Canonical Capability Catalog
+
+- `SEMANTIC_ROUTES` is the authoritative inventory of routable conversational capabilities.
+- `CAPABILITY_REGISTRY` is computed from that inventory; it does not maintain a second route list.
+- `buildAvailableRouterAgents()` projects the catalog for the current request using runtime integrations and permissions.
+- `HA_AGENT_MAP` only extends the catalog with external or legacy Home Assistant agents. It cannot enable or shadow canonical direct agents.
+- `npm run check:capabilities` and the `Capability architecture` GitHub workflow reject catalog, policy, exposure, or Spotify-matrix drift.
+
+References:
+- src/routing/semanticRouteCatalog.ts
+- src/capabilities/capabilityRegistry.ts
+- src/conversation/routerAgentCatalog.ts
+- docs/adr/0005-canonical-capability-catalog.md
+
 ## Semantic Router
 - Embedding scoring over semantic route catalog.
 - Decision checks:

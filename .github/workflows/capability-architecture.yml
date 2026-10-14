@@ -1,0 +1,49 @@
+name: Capability architecture
+
+on:
+  pull_request:
+    paths:
+      - 'src/capabilities/**'
+      - 'src/conversation/**'
+      - 'src/routing/**'
+      - 'src/routes/ingest.ts'
+      - 'src/spotify/musicRoutingMatrix.ts'
+      - 'scripts/check-capabilities.ts'
+      - 'tests/capabilityRegistry.test.ts'
+      - 'tests/calendarAgent.validation.test.ts'
+      - 'tests/orchestratorPrompt.test.ts'
+      - 'tests/routerAgentCatalog.test.ts'
+      - '.github/workflows/capability-architecture.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/capabilities/**'
+      - 'src/conversation/**'
+      - 'src/routing/**'
+      - 'src/routes/ingest.ts'
+      - 'src/spotify/musicRoutingMatrix.ts'
+      - 'scripts/check-capabilities.ts'
+      - 'tests/capabilityRegistry.test.ts'
+      - 'tests/calendarAgent.validation.test.ts'
+      - 'tests/orchestratorPrompt.test.ts'
+      - 'tests/routerAgentCatalog.test.ts'
+      - '.github/workflows/capability-architecture.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check:capabilities
+      - run: npm run build
+      - run: npm test -- --runInBand tests/capabilityRegistry.test.ts tests/routerAgentCatalog.test.ts tests/orchestratorPrompt.test.ts tests/calendarAgent.validation.test.ts tests/haAgentRouter.test.ts
