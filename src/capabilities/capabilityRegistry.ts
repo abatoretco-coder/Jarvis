@@ -1,4 +1,4 @@
-import { MUSIC_ROUTING_MATRIX } from '../spotify/musicRoutingMatrix';
+import { SEMANTIC_ROUTES } from '../routing/semanticRouteCatalog';
 
 export type CapabilityAgent =
   | 'spotify'
@@ -12,7 +12,7 @@ export type CapabilityAgent =
   | 'culture';
 
 export type CapabilityEffect = 'read' | 'write' | 'destructive';
-export type CapabilitySemanticLevel = 'E2' | 'E1' | 'none';
+export type CapabilitySemanticLevel = 'D0' | 'E2' | 'E1' | 'none';
 export type CapabilityResponseDomain = CapabilityAgent | 'general';
 
 export type CapabilityDefinition = {
@@ -26,69 +26,173 @@ export type CapabilityDefinition = {
   routeKey?: string;
 };
 
-const writeOrDestructive = (effect: CapabilityEffect): boolean => effect === 'write' || effect === 'destructive';
+const DESTRUCTIVE_ACTIONS = new Set([
+  'calendar.delete_event',
+  'mail.trash_email',
+  'todo.delete_checklist_item',
+  'todo.delete_list',
+  'todo.delete_task',
+]);
 
-function define(input: Omit<CapabilityDefinition, 'requiresConfirmation'> & { requiresConfirmation?: boolean }): CapabilityDefinition {
-  const requiresConfirmation = input.requiresConfirmation ?? writeOrDestructive(input.effect);
-  return { ...input, requiresConfirmation };
+const READ_ACTIONS = new Set([
+  'calendar.list_upcoming',
+  'calendar.search_events',
+  'culture.compare_candidates',
+  'culture.discover',
+  'culture.find_occurrences',
+  'culture.find_venues',
+  'culture.get_item',
+  'culture.recommend_candidates',
+  'executor.greeting',
+  'executor.help',
+  'executor.status',
+  'mail.list_inbox',
+  'mail.search_emails',
+  'search.analysis',
+  'search.comparison',
+  'search.current_news',
+  'search.definition',
+  'search.external_weather',
+  'search.history',
+  'search.live_sport',
+  'search.quick_lookup',
+  'spotify.list_devices',
+  'spotify.now_playing',
+  'spotify.search',
+  'todo.list_lists',
+  'todo.list_tasks',
+  'weather.current_conditions',
+  'weather.current_humidity',
+  'weather.current_precipitation',
+  'weather.current_temperature',
+]);
+
+const WRITE_ACTIONS = new Set([
+  'calendar.create_event',
+  'calendar.remove_from_event',
+  'calendar.update_event',
+  'executor.climate_set',
+  'executor.cover_close',
+  'executor.cover_open',
+  'executor.lock',
+  'executor.media_next',
+  'executor.media_play_pause',
+  'executor.media_previous',
+  'executor.mute',
+  'executor.note',
+  'executor.scene_set',
+  'executor.timer',
+  'executor.unlock',
+  'executor.unmute',
+  'executor.vacuum_start',
+  'executor.vacuum_stop',
+  'executor.volume_down',
+  'executor.volume_up',
+  'mail.flag_email',
+  'mail.forward_email',
+  'mail.mark_read',
+  'mail.mark_unread',
+  'mail.reply_email',
+  'mail.send_email',
+  'spotify.add_to_playlist',
+  'spotify.clear_queue',
+  'spotify.next',
+  'spotify.pause',
+  'spotify.play',
+  'spotify.previous',
+  'spotify.queue_add',
+  'spotify.search_and_play',
+  'spotify.transfer',
+  'spotify.volume_set',
+  'todo.add_checklist_item',
+  'todo.add_task',
+  'todo.complete_checklist_item',
+  'todo.complete_task',
+  'todo.create_list',
+  'todo.update_task',
+]);
+
+function capabilityAgentForTarget(targetAgentId: string | undefined): CapabilityAgent {
+  if (targetAgentId === 'executors') return 'executor';
+  if (
+    targetAgentId === 'spotify' ||
+    targetAgentId === 'mail' ||
+    targetAgentId === 'todo' ||
+    targetAgentId === 'calendar' ||
+    targetAgentId === 'weather' ||
+    targetAgentId === 'search' ||
+    targetAgentId === 'culture'
+  ) {
+    return targetAgentId;
+  }
+  throw new Error(`capability_catalog_unknown_target:${targetAgentId ?? 'missing'}`);
 }
 
-const spotifyCapabilities = MUSIC_ROUTING_MATRIX.map((entry) => define({
-  agent: 'spotify' as const,
-  action: entry.action,
-  effect: 'write',
-  semanticLevel: entry.semanticLevel,
-  plannerRequired: entry.plannerRequiredWhenSemantic,
-  responseDomain: 'spotify' as const,
-  routeKey: entry.semanticRouteKey,
-  requiresConfirmation: false,
-}));
+function effectFor(agent: CapabilityAgent, action: string): CapabilityEffect {
+  const key = `${agent}.${action}`;
+  if (DESTRUCTIVE_ACTIONS.has(key)) return 'destructive';
+  if (WRITE_ACTIONS.has(key)) return 'write';
+  if (READ_ACTIONS.has(key)) return 'read';
+  throw new Error(`capability_catalog_unclassified_effect:${key}`);
+}
 
-const coreCapabilities: CapabilityDefinition[] = [
-  define({ agent: 'culture', action: 'discover', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.discover' }),
-  define({ agent: 'culture', action: 'find_occurrences', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.find_occurrences' }),
-  define({ agent: 'culture', action: 'get_item', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.get_item' }),
-  define({ agent: 'culture', action: 'find_venues', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'culture', routeKey: 'culture.find_venues' }),
-  define({ agent: 'culture', action: 'compare_candidates', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'culture', routeKey: 'culture.compare_candidates' }),
-  define({ agent: 'culture', action: 'recommend_candidates', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'culture', routeKey: 'culture.recommend_candidates' }),
-  define({ agent: 'calendar', action: 'list_upcoming', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.list_upcoming' }),
-  define({ agent: 'calendar', action: 'search_events', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.search_events' }),
-  define({ agent: 'calendar', action: 'create_event', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.create_event' }),
-  define({ agent: 'calendar', action: 'delete_event', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.delete_event' }),
-  define({ agent: 'calendar', action: 'update_event', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.update_event' }),
-  define({ agent: 'calendar', action: 'remove_from_event', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'calendar', routeKey: 'calendar.remove_from_event' }),
-  define({ agent: 'mail', action: 'send_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.send_email' }),
-  define({ agent: 'mail', action: 'reply_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.reply_email' }),
-  define({ agent: 'mail', action: 'forward_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.forward_email' }),
-  define({ agent: 'mail', action: 'trash_email', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.trash_email' }),
-  define({ agent: 'mail', action: 'mark_read', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.mark_read' }),
-  define({ agent: 'mail', action: 'mark_unread', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.mark_unread' }),
-  define({ agent: 'mail', action: 'flag_email', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'mail', routeKey: 'mail.flag_email' }),
-  define({ agent: 'todo', action: 'list_tasks', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.list_tasks' }),
-  define({ agent: 'todo', action: 'list_lists', effect: 'read', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.list_lists' }),
-  define({ agent: 'todo', action: 'add_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.add_task' }),
-  define({ agent: 'todo', action: 'complete_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.complete_task' }),
-  define({ agent: 'todo', action: 'delete_task', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_task' }),
-  define({ agent: 'todo', action: 'update_task', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.update_task' }),
-  define({ agent: 'todo', action: 'create_list', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.create_list' }),
-  define({ agent: 'todo', action: 'delete_list', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_list' }),
-  define({ agent: 'todo', action: 'add_checklist_item', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.add_checklist_item' }),
-  define({ agent: 'todo', action: 'complete_checklist_item', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.complete_checklist_item' }),
-  define({ agent: 'todo', action: 'delete_checklist_item', effect: 'destructive', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'todo', routeKey: 'todo.delete_checklist_item' }),
-  define({ agent: 'weather', action: 'current', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'weather', routeKey: 'weather.current_temperature' }),
-  define({ agent: 'search', action: 'query', effect: 'read', semanticLevel: 'E2', plannerRequired: false, responseDomain: 'search' }),
-  define({ agent: 'executor', action: 'timer', effect: 'write', semanticLevel: 'E1', plannerRequired: true, responseDomain: 'executor', routeKey: 'executor.timer' }),
-  define({ agent: 'nas_status', action: 'read', effect: 'read', semanticLevel: 'none', plannerRequired: false, responseDomain: 'nas_status', routeKey: 'nas.status' }),
-];
+function buildCapabilityRegistry(): CapabilityDefinition[] {
+  const routeKeys = new Set<string>();
+  const capabilities = SEMANTIC_ROUTES.map((route): CapabilityDefinition => {
+    if (routeKeys.has(route.key)) throw new Error(`capability_catalog_duplicate_route:${route.key}`);
+    routeKeys.add(route.key);
+    if (!route.directRequest?.action) {
+      throw new Error(`capability_catalog_missing_action:${route.key}`);
+    }
 
-export const CAPABILITY_REGISTRY: CapabilityDefinition[] = [...spotifyCapabilities, ...coreCapabilities];
+    const agent = capabilityAgentForTarget(route.targetAgentId);
+    const effect = effectFor(agent, route.directRequest.action);
+    return {
+      agent,
+      action: route.directRequest.action,
+      effect,
+      semanticLevel: route.level,
+      plannerRequired: route.plannerRequired === true,
+      requiresConfirmation: agent === 'spotify' ? false : effect !== 'read',
+      responseDomain: agent,
+      routeKey: route.key,
+    };
+  });
+
+  // NAS status is direct and non-semantic, but remains in the same exported catalog.
+  capabilities.push({
+    agent: 'nas_status',
+    action: 'read',
+    effect: 'read',
+    semanticLevel: 'none',
+    plannerRequired: false,
+    requiresConfirmation: false,
+    responseDomain: 'nas_status',
+    routeKey: 'nas.status',
+  });
+
+  return capabilities;
+}
+
+/**
+ * Canonical conversational capability catalog.
+ *
+ * Route identity and semantic metadata come from SEMANTIC_ROUTES. Every other
+ * consumer projects from this registry instead of maintaining another route inventory.
+ */
+export const CAPABILITY_REGISTRY: CapabilityDefinition[] = buildCapabilityRegistry();
 
 export function findCapabilityByRouteKey(routeKey: string): CapabilityDefinition | undefined {
   return CAPABILITY_REGISTRY.find((capability) => capability.routeKey === routeKey);
 }
 
-export function findCapability(agent: CapabilityAgent, action: string): CapabilityDefinition | undefined {
-  return CAPABILITY_REGISTRY.find((capability) => capability.agent === agent && capability.action === action);
+export function findCapability(
+  agent: CapabilityAgent,
+  action: string
+): CapabilityDefinition | undefined {
+  return CAPABILITY_REGISTRY.find(
+    (capability) => capability.agent === agent && capability.action === action
+  );
 }
 
 export function requiresCapabilityConfirmation(capability: CapabilityDefinition): boolean {

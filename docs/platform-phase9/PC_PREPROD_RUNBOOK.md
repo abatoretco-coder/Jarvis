@@ -50,6 +50,32 @@ Pour la validation multi-utilisateur locale, remplacer `pc-preprod` par
 
 L’API doit répondre sur `http://127.0.0.1:8090`. `GET /ready` doit retourner `status=ready`.
 
+## Valider et déployer le routage conversationnel
+
+Avant de reconstruire le profil public, valider le catalogue canonique et tous
+les garde-fous du dépôt :
+
+```powershell
+npm run check:capabilities
+npm run lint
+npm run build
+npm run typecheck:test
+npm test -- --runInBand
+```
+
+Créer ensuite une sauvegarde cohérente, reconstruire le profil public et lancer
+ses sondes externes :
+
+```powershell
+npm run pc -- backup -Profile pc-preprod-full
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/https-runtime.ps1 start -Mode public
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/https-runtime.ps1 test -Mode public
+```
+
+Après un changement de capacités, vérifier dans les logs que l'agent attendu est
+exposé au routeur, puis tester une requête directe et une continuation utilisant
+l'historique (par exemple une lecture d'agenda suivie de « ajoute aussi… »).
+
 ## Tester dans Docker
 
 ```powershell

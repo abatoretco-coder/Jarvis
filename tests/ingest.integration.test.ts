@@ -1310,6 +1310,13 @@ describe('/v1/ingest integration', () => {
   });
 
   it('uses OpenAI directly for Android chat when Home Assistant is not configured', async () => {
+    mockedRouteUserRequest.mockResolvedValue({
+      targets: [{ agentId: 'conversation.openai_conversation', confidence: 0.99 }],
+      reason: 'general knowledge',
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      latencyMs: 1,
+    });
     const fetchMock = jest.fn(async (url: string) => {
       expect(url).toBe('https://api.openai.com/v1/responses');
       return new Response(

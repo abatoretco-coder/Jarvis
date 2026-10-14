@@ -19,7 +19,15 @@ export function buildOrchestratorUserPrompt(params: {
   if (params.recentMessages.length > 0) {
     const recent = params.recentMessages
       .slice(-3)
-      .map((m) => `${m.role === 'user' ? 'U' : 'A'}: ${m.content.slice(0, 120)}`)
+      .map((m) => {
+        const decision = m.decisionMetadata;
+        const context = [
+          decision?.kind ? `domaine=${decision.kind}` : '',
+          decision?.routeKey ? `route=${decision.routeKey}` : '',
+          decision?.operationStatus ? `statut=${decision.operationStatus}` : '',
+        ].filter(Boolean);
+        return `${m.role === 'user' ? 'U' : 'A'}${context.length ? ` [${context.join(' ')}]` : ''}: ${m.content.slice(0, 240)}`;
+      })
       .join('\n');
     parts.push(userTemplateData.recent_messages_line.replace('{{RECENT_MESSAGES}}', recent));
   }
