@@ -26,12 +26,26 @@ export type Vm400Capabilities = {
   auth?: {
     requireApiKey: boolean;
   };
+  voice?: {
+    live: {
+      available: boolean;
+      reason?: string;
+      enabled: boolean;
+      desktopEnabled: boolean;
+      androidEnabled: boolean;
+      homeAssistantTtsEnabled: boolean;
+      voice: string;
+      idleTimeoutMs: number;
+      delegationTimeoutMs: number;
+    };
+  };
 };
 
 export function getVm400Capabilities(input: {
   haConfigured: boolean;
   spotifyWebApiConfigured: boolean;
   requireApiKey?: boolean;
+  live?: NonNullable<Vm400Capabilities['voice']>['live'];
 }): Vm400Capabilities {
   const spotifyWebApiActions = new Set<SupportedActionType>([
     // HA-decides contract: these delegated spotify actions remain available
@@ -66,5 +80,6 @@ export function getVm400Capabilities(input: {
     ...(typeof input.requireApiKey === 'boolean'
       ? { auth: { requireApiKey: input.requireApiKey } }
       : {}),
+    ...(input.live ? { voice: { live: input.live } } : {}),
   };
 }
