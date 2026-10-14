@@ -1,4 +1,13 @@
-import type { MessageRecord, MessageRepository, MessageRole } from './MessageRepository';
+import {
+  buildMessageAuditSources,
+  type MessageDecisionMetadata,
+  type MessageRecord,
+  type MessageRepository,
+  type MessageRole,
+  normalizeMessageAuditSources,
+  normalizeMessageDecisionMetadata,
+  normalizeMessageRawContent,
+} from './MessageRepository';
 import type { CommitCandidateResult, ThreadListItem, ThreadRecord, ThreadRepository } from './ThreadRepository';
 
 export class InMemoryThreadRepository implements ThreadRepository {
@@ -139,16 +148,40 @@ export class InMemoryThreadRepository implements ThreadRepository {
 export class InMemoryMessageRepository implements MessageRepository {
   private readonly messagesByThread = new Map<string, MessageRecord[]>();
 
-  async appendMessage(input: { threadId: string; role: MessageRole; content: string; spokenContent?: string; createdAtMs?: number }): Promise<number> {
+  async appendMessage(input: {
+    threadId: string;
+    role: MessageRole;
+    content: string;
+    spokenContent?: string;
+    rawContent?: string;
+    sources?: string[];
+    decisionMetadata?: MessageDecisionMetadata;
+    createdAtMs?: number;
+  }): Promise<number> {
     const list = this.messagesByThread.get(input.threadId) ?? [];
     const seq = (list.at(-1)?.seq ?? 0) + 1;
+    const createdAtMs = input.createdAtMs ?? Date.now();
     const row: MessageRecord = {
       threadId: input.threadId,
       seq,
       role: input.role,
       content: input.content,
       ...(input.spokenContent ? { spokenContent: input.spokenContent } : {}),
-      createdAtMs: input.createdAtMs ?? Date.now(),
+      ...(input.rawContent ? { rawContent: normalizeMessageRawContent(input.rawContent) } : {}),
+      ...(input.sources?.length
+        ? {
+            sources: normalizeMessageAuditSources(input.sources),
+            sourceDetails: buildMessageAuditSources(
+              input.sources,
+              input.decisionMetadata,
+              createdAtMs
+            ),
+          }
+        : {}),
+      ...(input.decisionMetadata
+        ? { decisionMetadata: normalizeMessageDecisionMetadata(input.decisionMetadata) }
+        : {}),
+      createdAtMs,
     };
     list.push(row);
     this.messagesByThread.set(input.threadId, list);

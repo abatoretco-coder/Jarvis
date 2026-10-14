@@ -53,12 +53,9 @@ function setup(
       automation: {
         ...(adaptiveLightingConfigured ? { adaptiveLighting: {
           enabled: true,
-          sunEntityId: 'sun.sun',
-          weatherEntityId: 'weather.home',
           pollSeconds: 30,
           manualOverrideMinutes: 120,
           transitionSeconds: 20,
-          weather: { maxBrightnessAdjustment: 12, maxColorTemperatureAdjustmentKelvin: 300 },
           rooms: [{
             roomId: 'living',
             deviceIds: ['living-light'],
@@ -339,13 +336,13 @@ function setup(
 }
 
 describe('home routes', () => {
-  test('exposes and changes the three room-wide lighting modes for household members', async () => {
+  test('exposes and changes the four room-wide lighting modes for household members', async () => {
     const { app, callService } = setup('resident', ['home'], false, true, undefined, true);
 
     const initial = await app.inject({ method: 'GET', url: '/v1/home/lighting/rooms' });
     expect(initial.statusCode).toBe(200);
     expect(initial.json().rooms).toEqual([
-      expect.objectContaining({ roomId: 'living', mode: 'manual', available: true }),
+      expect.objectContaining({ roomId: 'living', mode: 'mixed', available: true }),
     ]);
 
     callService.mockClear();
@@ -360,6 +357,17 @@ describe('home routes', () => {
       service: 'turn_on',
       serviceData: expect.objectContaining({ brightness_pct: expect.any(Number), color_temp_kelvin: expect.any(Number) }),
     }));
+
+    const maximum = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'maximum' },
+    });
+    expect(maximum.statusCode).toBe(200);
+    expect(maximum.json()).toMatchObject({
+      mode: 'maximum',
+      target: { brightnessPercent: 100 },
+    });
 
     const on = await app.inject({
       method: 'PUT',

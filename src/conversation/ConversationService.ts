@@ -1,5 +1,9 @@
 import { toSingleParagraphPlainText } from './plainText';
-import type { MessageRepository } from './repositories/MessageRepository';
+import {
+  MESSAGE_AUDIT_SCHEMA_VERSION,
+  type MessageDecisionMetadata,
+  type MessageRepository,
+} from './repositories/MessageRepository';
 import type { ThreadRepository } from './repositories/ThreadRepository';
 
 export type ConversationServiceOptions = {
@@ -149,7 +153,12 @@ export class ConversationService {
     threadId: string,
     userText: string,
     assistantText: string,
-    options: { spokenText?: string } = {}
+    options: {
+      spokenText?: string;
+      rawText?: string;
+      sources?: string[];
+      decisionMetadata?: MessageDecisionMetadata;
+    } = {}
   ): Promise<void> {
     const now = Date.now();
     await this.threadRepository.getOrCreate(threadId);
@@ -166,6 +175,11 @@ export class ConversationService {
       ...(options.spokenText
         ? { spokenContent: toSingleParagraphPlainText(options.spokenText) }
         : {}),
+      rawContent: options.rawText ?? assistantText,
+      ...(options.sources?.length ? { sources: options.sources } : {}),
+      decisionMetadata: options.decisionMetadata ?? {
+        schemaVersion: MESSAGE_AUDIT_SCHEMA_VERSION,
+      },
       createdAtMs: now + 1,
     });
     const interactionCount = await this.threadRepository.incrementInteractionCount(threadId);

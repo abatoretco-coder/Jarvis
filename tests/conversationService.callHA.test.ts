@@ -329,6 +329,44 @@ describe('persistMessages', () => {
     expect(messages[1]?.spokenContent).toBe('Première information.');
   });
 
+  test('stores the raw assistant response and structured sources for later audit', async () => {
+    const { service, msgRepo } = makeService();
+    const raw = 'Résultat utile.\nSource : web.';
+
+    await service.persistMessages('thread-source-audit', 'Cherche cela', 'Résultat utile.', {
+      spokenText: 'Résultat utile.',
+      rawText: raw,
+      sources: ['https://example.com/source', 'javascript:alert(1)'],
+      decisionMetadata: {
+        schemaVersion: 1,
+        requestId: 'request-audit-1',
+        source: 'semantic_router',
+        routeKey: 'search.web.definition',
+        semanticDecision: 'activated',
+        proposalId: 'proposal-audit-1',
+      },
+    });
+
+    const messages = await msgRepo.getRecentMessages('thread-source-audit', 10);
+    expect(messages[1]?.rawContent).toBe(raw);
+    expect(messages[1]?.sources).toEqual(['https://example.com/source']);
+    expect(messages[1]?.sourceDetails).toEqual([
+      {
+        url: 'https://example.com/source',
+        title: 'example.com',
+        provider: 'semantic_router',
+        capturedAtMs: expect.any(Number),
+      },
+    ]);
+    expect(messages[1]?.decisionMetadata).toMatchObject({
+      schemaVersion: 1,
+      requestId: 'request-audit-1',
+      routeKey: 'search.web.definition',
+      semanticDecision: 'activated',
+      proposalId: 'proposal-audit-1',
+    });
+  });
+
   test('increments interaction count on the thread', async () => {
     const { service, threadRepo } = makeService();
 

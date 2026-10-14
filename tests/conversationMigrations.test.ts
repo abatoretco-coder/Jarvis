@@ -9,7 +9,11 @@ import {
   CONVERSATION_SCHEMA_VERSION,
   runConversationMigrations,
 } from '../src/conversation/repositories/conversationMigrations';
-import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
+import {
+  createConversationDb,
+  SqliteMessageRepository,
+  SqliteThreadRepository,
+} from '../src/conversation/repositories/SqliteRepositories';
 
 const directories: string[] = [];
 
@@ -43,12 +47,14 @@ describe('conversation database migrations', () => {
       { version: 12, name: 'spoken_response_audit' },
       { version: 13, name: 'durable_mutation_idempotency' },
       { version: 14, name: 'durable_home_and_recurrence_state' },
+      { version: 15, name: 'response_provenance_audit' },
+      { version: 16, name: 'response_decision_audit' },
     ]);
     first.close();
 
     const reopened = createConversationDb(databasePath);
     expect(reopened.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({
-      count: 14,
+      count: 16,
     });
     reopened.close();
   });
@@ -90,6 +96,83 @@ describe('conversation database migrations', () => {
       ])
     );
     legacy.close();
+  });
+
+  test('adds response audit columns to a populated version 14 database without losing messages', () => {
+    const database = createConversationDb(':memory:');
+    database.exec(`
+      INSERT INTO conversation_threads(
+        thread_id,title,summary,summary_upto_seq,summary_version,summary_status,
+        interaction_count,created_at_ms,updated_at_ms
+      ) VALUES ('audit-upgrade','Avant migration','',0,0,'idle',1,1,1);
+      INSERT INTO conversation_messages(thread_id,seq,role,content,created_at_ms)
+      VALUES ('audit-upgrade',1,'assistant','Message conservé',2);
+      ALTER TABLE conversation_messages DROP COLUMN decision_metadata_json;
+      ALTER TABLE conversation_messages DROP COLUMN sources_json;
+      ALTER TABLE conversation_messages DROP COLUMN raw_content;
+      DELETE FROM schema_migrations WHERE version IN (15,16);
+      PRAGMA user_version=14;
+    `);
+
+    runConversationMigrations(database);
+
+    expect(
+      database
+        .prepare('SELECT content FROM conversation_messages WHERE thread_id = ? AND seq = 1')
+        .get('audit-upgrade')
+    ).toEqual({ content: 'Message conservé' });
+    const columns = database.prepare('PRAGMA table_info(conversation_messages)').all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(['raw_content', 'sources_json', 'decision_metadata_json'])
+    );
+    expect(database.pragma('user_version', { simple: true })).toBe(16);
+    database.close();
+  });
+
+  test('round-trips structured sources and still reads the legacy URL array', async () => {
+    const database = createConversationDb(':memory:');
+    const threads = new SqliteThreadRepository(database);
+    const messages = new SqliteMessageRepository(database);
+    await threads.getOrCreate('source-audit');
+
+    await messages.appendMessage({
+      threadId: 'source-audit',
+      role: 'assistant',
+      content: 'Réponse sourcée',
+      sources: ['https://example.com/article'],
+      decisionMetadata: { schemaVersion: 1, llmProvider: 'openai' },
+      createdAtMs: 42,
+    });
+
+    expect((await messages.getRecentMessages('source-audit', 10))[0]).toMatchObject({
+      sources: ['https://example.com/article'],
+      sourceDetails: [
+        {
+          url: 'https://example.com/article',
+          title: 'example.com',
+          provider: 'openai',
+          capturedAtMs: 42,
+        },
+      ],
+    });
+
+    database
+      .prepare('UPDATE conversation_messages SET sources_json = ? WHERE thread_id = ?')
+      .run(JSON.stringify(['https://legacy.example/source']), 'source-audit');
+    expect((await messages.getRecentMessages('source-audit', 10))[0]).toMatchObject({
+      sources: ['https://legacy.example/source'],
+      sourceDetails: [
+        {
+          url: 'https://legacy.example/source',
+          title: 'legacy.example',
+          provider: 'unknown',
+          capturedAtMs: 0,
+        },
+      ],
+    });
+    database.close();
   });
 
   test('refuses a database created by a newer runtime', () => {

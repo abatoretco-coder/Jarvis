@@ -18,6 +18,8 @@ export function inferSpotifyRoutingPath(musicPlanReason?: string): SpotifyRoutin
 export function buildSpotifyIngestPayload(input: {
   threadId: string;
   responseText: string;
+  displayText?: string;
+  spokenText?: string;
   spotify: SpotifyResponseShape;
   action: string;
   routingPath: SpotifyRoutingPath;
@@ -34,6 +36,8 @@ export function buildSpotifyIngestPayload(input: {
   return {
     threadId: input.threadId,
     responseText: input.responseText,
+    displayText: input.displayText ?? input.responseText,
+    spokenText: input.spokenText ?? input.responseText,
     status: input.spotify.status,
     ...(input.spotify.data ? { data: input.spotify.data } : {}),
     ...(input.spotify.options ? { options: input.spotify.options } : {}),

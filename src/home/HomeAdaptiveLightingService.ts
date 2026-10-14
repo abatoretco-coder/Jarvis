@@ -8,7 +8,7 @@ import { executeCatalogHomeAction, executeCatalogLightProfile } from './HomeActi
 import type { AdaptiveLightingRoomConfig, HomeActionName, HomeCatalog } from './HomeCatalog';
 import type { HomeRuntimeStateRepository } from './HomeRuntimeStateRepository';
 
-export type HomeLightingRoomMode = 'on' | 'dimmed' | 'off';
+export type HomeLightingRoomMode = 'on' | 'maximum' | 'dimmed' | 'off';
 export type HomeLightingRoomObservedMode = HomeLightingRoomMode | 'manual' | 'mixed';
 export type HomeLightingRoomState = {
   roomId: string;
@@ -128,17 +128,20 @@ export class HomeAdaptiveLightingService {
   private target(
     room: AdaptiveLightingRoomConfig,
     mode: Exclude<HomeLightingRoomMode, 'off'>,
-    weather: unknown,
     now: Date
   ): AdaptiveLightingTarget {
-    const config = this.catalog.getAdaptiveLightingConfig()!;
-    return resolveAdaptiveLightingTarget({
+    const target = resolveAdaptiveLightingTarget({
       room,
-      mode,
-      weatherConfig: config.weather,
-      ...(isHassState(weather) ? { weather } : {}),
+      mode: mode === 'maximum' ? 'on' : mode,
       now,
     });
+    return mode === 'maximum'
+      ? { ...target, brightnessPercent: 100 }
+      : target;
+  }
+
+  private deviceShouldBeOn(room: AdaptiveLightingRoomConfig, deviceId: string, mode: HomeLightingRoomMode): boolean {
+    return mode !== 'off' && (mode !== 'dimmed' || !room.dimmedOffDeviceIds?.includes(deviceId));
   }
 
   private applyRoomProfile(
@@ -204,8 +207,6 @@ export class HomeAdaptiveLightingService {
         .filter(isHassState)
         .map((state) => [state.entity_id, state] as const)
     );
-    const weather = states.get(config.weatherEntityId);
-
     return config.rooms.map((room) => {
       const deviceIds = this.roomDeviceIds(room);
       const lights = deviceIds.flatMap((deviceId) => {
@@ -214,33 +215,40 @@ export class HomeAdaptiveLightingService {
         return current ? [{ deviceId, current }] : [];
       });
       const availableLights = lights.filter(({ current }) => !['unavailable', 'unknown'].includes(current.state));
-      const allOff = availableLights.length > 0 && availableLights.every(({ current }) => current.state !== 'on');
-      const allOn = availableLights.length > 0 && availableLights.every(({ current }) => current.state === 'on');
-      const onTarget = this.target(room, 'on', weather, now);
-      const dimmedTarget = this.target(room, 'dimmed', weather, now);
+      const matchesMode = (mode: HomeLightingRoomMode, target?: AdaptiveLightingTarget) => availableLights.length > 0
+        && availableLights.every(({ deviceId, current }) => this.deviceShouldBeOn(room, deviceId, mode)
+          ? current.state === 'on' && (!target || matchesTarget(current, target))
+          : current.state !== 'on');
+      const allOff = matchesMode('off');
+      const onTarget = this.target(room, 'on', now);
+      const maximumTarget = this.target(room, 'maximum', now);
+      const dimmedTarget = this.target(room, 'dimmed', now);
       const desired = this.desiredRooms.get(room.roomId);
-      const matchesOn = allOn && availableLights.every(({ current }) => matchesTarget(current, onTarget));
-      const matchesDimmed = allOn && availableLights.every(({ current }) => matchesTarget(current, dimmedTarget));
+      const matchesOn = matchesMode('on', onTarget);
+      const matchesMaximum = matchesMode('maximum', maximumTarget);
+      const matchesDimmed = matchesMode('dimmed', dimmedTarget);
       const desiredMatches = desired?.mode === 'off'
         ? allOff
         : desired?.target
-          ? allOn && availableLights.every(({ current }) => matchesTarget(current, desired.target!))
+          ? matchesMode(desired.mode, desired.target)
           : false;
       const mode: HomeLightingRoomObservedMode = desired && desiredMatches
         ? desired.mode
         : allOff
           ? 'off'
-          : !allOn
-            ? 'mixed'
-            : matchesDimmed
+          : matchesDimmed
               ? 'dimmed'
+              : matchesMaximum
+                ? 'maximum'
               : matchesOn
                 ? 'on'
-                : 'manual';
+                : 'mixed';
       const target = desired?.mode !== 'off' && desired?.target
         ? desired.target
         : mode === 'dimmed'
           ? dimmedTarget
+          : mode === 'maximum'
+            ? maximumTarget
           : mode === 'on'
             ? onTarget
             : undefined;
@@ -276,8 +284,8 @@ export class HomeAdaptiveLightingService {
       const current = entityId ? observedLight(states.get(entityId)) : undefined;
       if (current) this.lastObservedStates.set(deviceId, observedFingerprint(current));
     }
-    const target = mode === 'off' ? undefined : this.target(room, mode, states.get(config.weatherEntityId), now);
-    const results = await Promise.all(deviceIds.map((deviceId) => mode === 'off'
+    const target = mode === 'off' ? undefined : this.target(room, mode, now);
+    const results = await Promise.all(deviceIds.map((deviceId) => !this.deviceShouldBeOn(room, deviceId, mode)
       ? executeCatalogHomeAction({
           catalog: this.catalog,
           ha: this.ha,
@@ -382,12 +390,13 @@ export class HomeAdaptiveLightingService {
           continue;
         }
 
-        const shouldRestoreOff = desired.mode === 'off' && reconnected;
-        const shouldRestoreProfile = desired.mode !== 'off' && desired.target && reconnected
+        const shouldBeOn = this.deviceShouldBeOn(room, deviceId, desired.mode);
+        const shouldRestoreOff = !shouldBeOn && reconnected;
+        const shouldRestoreProfile = shouldBeOn && desired.target && reconnected
           && !matchesTarget(current, desired.target);
         if (!shouldRestoreOff && !shouldRestoreProfile) continue;
 
-        const result = desired.mode === 'off'
+        const result = !shouldBeOn
           ? await executeCatalogHomeAction({
               catalog: this.catalog,
               ha: this.ha,

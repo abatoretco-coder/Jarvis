@@ -131,6 +131,8 @@ function Initialize-FullProfile() {
     "OPENAI_API_KEY=$($env:OPENAI_API_KEY)",
     'LLM_PROVIDER=openai',
     'TTS_PROVIDER=none',
+    'OPENAI_TTS_VOICE=cedar',
+    'OPENAI_TTS_INSTRUCTIONS=Parle en francais de France avec une voix masculine adulte, naturelle, chaleureuse et fluide. Garde un timbre masculin pose, une intonation souple et des pauses legeres. Reste simple, clair et en tutoiement.',
     'NAS_STATUS_ENABLED=false',
     'CULTURE_ENABLED=false',
     "OAUTH_TOKEN_ENCRYPTION_KEY=$oauthKey",

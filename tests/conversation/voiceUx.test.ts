@@ -15,6 +15,8 @@ import {
 describe('voiceUx', () => {
   it('keeps quick-action acknowledgements sharp and non-technical', () => {
     expect(formatQuickActionVoiceResponse('success')).toBe("C'est fait.");
+    expect(formatQuickActionVoiceResponse('accepted')).toBe('Commande envoyée.');
+    expect(formatQuickActionVoiceResponse('uncertain')).toBe('Commande envoyée, sans confirmation.');
     expect(formatQuickActionVoiceResponse('partial')).toBe("Je n'ai pas pu tout faire.");
     expect(formatQuickActionVoiceResponse('failure')).toBe("Je n'ai pas pu le faire.");
   });
@@ -81,6 +83,17 @@ describe('voiceUx', () => {
     expect(out).not.toContain('dernière phrase');
   });
 
+  it('keeps an important later sentence in the spoken email summary', () => {
+    const out = formatVoiceResponse({
+      text: 'Email de Alice, objet "Livraison" : Le colis est préparé. Le transporteur passera mardi. Attention, le code doit être transmis avant 8 heures.',
+      domain: 'mail',
+      mode: 'normal',
+    });
+    expect(out).toContain('Le colis est préparé.');
+    expect(out).toContain('Attention, le code doit être transmis avant 8 heures.');
+    expect(out).not.toContain('transporteur passera');
+  });
+
   it('removes web source labels outside the search agent', () => {
     const out = formatVoiceResponse({
       text: 'La tache est creee. Source : web.',
@@ -126,6 +139,15 @@ describe('voiceUx', () => {
     expect(sanitizeResponseAttribution('Resultat trouve. Source: https://example.com/info', 'search')).toBe('Resultat trouve.');
   });
 
+  it('preserves written formatting and emoji while removing source labels', () => {
+    const out = sanitizeResponseAttribution(
+      'Résumé :\n- Premier point ✅\n- Deuxième point\nSource : https://example.com/info',
+      'search'
+    );
+    expect(out).toContain('\n- Premier point ✅\n- Deuxième point');
+    expect(out).not.toContain('Source :');
+  });
+
   it('normalizes common vouvoiement forms into tutoiement for voice replies', () => {
     const out = formatVoiceResponse({
       text: 'Vous pouvez continuer. Je peux vous aider si vous voulez.',
@@ -145,6 +167,35 @@ describe('voiceUx', () => {
     });
     expect(out).toContain('Résultat partiel');
     expect(out).toContain('22 degrés');
+  });
+
+  it('drops conversational filler and keeps a later critical fact', () => {
+    const out = formatVoiceResponse({
+      text: 'Je regarde cela. La température est de 18 degrés. Il va pleuvoir à partir de 16 heures.',
+      domain: 'general',
+      mode: 'normal',
+    });
+    expect(out).toBe('La température est de 18 degrés. Il va pleuvoir à partir de 16 heures.');
+  });
+
+  it('prioritizes a warning over a non-critical middle sentence', () => {
+    const out = formatVoiceResponse({
+      text: 'Le trajet dure trente minutes. Le départ se fait depuis République. Attention, la ligne est interrompue après 22 heures.',
+      domain: 'general',
+      mode: 'normal',
+    });
+    expect(out).toContain('Le trajet dure trente minutes.');
+    expect(out).toContain('Attention, la ligne est interrompue');
+    expect(out).not.toContain('République');
+  });
+
+  it('keeps an cancellation warning over an earlier date mention', () => {
+    const out = formatVoiceResponse({
+      text: 'Le dossier est prêt. La réunion est demain. Attention, elle est annulée.',
+      domain: 'general',
+      mode: 'normal',
+    });
+    expect(out).toBe('Le dossier est prêt. Attention, elle est annulée.');
   });
 
   it('keeps calendar warnings and bounds event lists in short mode', () => {

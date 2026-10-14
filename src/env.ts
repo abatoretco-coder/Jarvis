@@ -211,7 +211,7 @@ const envSchema = z
     OPENAI_STT_MODEL: z.string().default('gpt-transcribe'),
     OPENAI_STT_LANGUAGE: optionalNonEmptyString,
     OPENAI_TTS_MODEL: z.string().default('gpt-realtime-2.1-mini'),
-    OPENAI_TTS_VOICE: z.string().default('marin'),
+    OPENAI_TTS_VOICE: z.string().default('cedar'),
     OPENAI_TTS_FORMAT: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).default('mp3'),
     // Optional speaking-style instructions for the configured OpenAI speech model.
     OPENAI_TTS_INSTRUCTIONS: optionalNonEmptyString,

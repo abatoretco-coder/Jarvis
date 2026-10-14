@@ -1,25 +1,8 @@
-import type {
-  AdaptiveLightingConfig,
-  AdaptiveLightingLevel,
-  AdaptiveLightingPhase,
-  AdaptiveLightingRoomConfig,
-} from './HomeCatalog';
-
-export type AdaptiveLightingState = {
-  state?: string;
-  attributes?: Record<string, unknown>;
-};
+import type { AdaptiveLightingLevel, AdaptiveLightingPhase, AdaptiveLightingRoomConfig } from './HomeCatalog';
 
 export type AdaptiveLightingTarget = AdaptiveLightingLevel & {
   phase: AdaptiveLightingPhase;
-  weatherBrightnessAdjustment: number;
-  weatherColorTemperatureAdjustmentKelvin: number;
 };
-
-function finiteNumber(value: unknown): number | undefined {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
@@ -50,51 +33,17 @@ export function resolveLightingPhase(now = new Date()): AdaptiveLightingPhase {
   return 'dusk';
 }
 
-function weatherCloudCoverage(weather: AdaptiveLightingState | undefined): number | undefined {
-  const coverage = finiteNumber(weather?.attributes?.cloud_coverage);
-  if (coverage !== undefined) return clamp(coverage, 0, 100);
-  const condition = String(weather?.state ?? '').toLowerCase();
-  if (/sunny|clear/u.test(condition)) return 0;
-  if (/partlycloudy|partly.cloudy/u.test(condition)) return 50;
-  if (/cloudy|rain|pouring|snow|fog|hail|lightning/u.test(condition)) return 100;
-  return undefined;
-}
-
-export function resolveWeatherAdjustment(
-  weather: AdaptiveLightingState | undefined,
-  config: AdaptiveLightingConfig['weather']
-): { brightness: number; colorTemperatureKelvin: number } {
-  const cloudCoverage = weatherCloudCoverage(weather);
-  if (cloudCoverage === undefined) return { brightness: 0, colorTemperatureKelvin: 0 };
-  const daylightFactor = clamp((50 - cloudCoverage) / 50, -1, 1);
-  return {
-    brightness: Math.round(daylightFactor * config.maxBrightnessAdjustment),
-    colorTemperatureKelvin: 0,
-  };
-}
-
 export function resolveAdaptiveLightingTarget(input: {
   room: AdaptiveLightingRoomConfig;
   mode?: 'on' | 'dimmed';
-  weatherConfig: AdaptiveLightingConfig['weather'];
-  weather?: AdaptiveLightingState;
   now?: Date;
 }): AdaptiveLightingTarget {
   const phase = resolveLightingPhase(input.now);
   const mode = input.mode ?? 'on';
-  const adjustment = mode === 'on' && phase === 'day'
-    ? resolveWeatherAdjustment(input.weather, input.weatherConfig)
-    : { brightness: 0, colorTemperatureKelvin: 0 };
   const base = (mode === 'dimmed' ? input.room.dimmedPhases : input.room.phases)[phase];
   return {
     phase,
-    brightnessPercent: Math.round(clamp(base.brightnessPercent + adjustment.brightness, 1, 100)),
-    colorTemperatureKelvin: Math.round(clamp(
-      base.colorTemperatureKelvin + adjustment.colorTemperatureKelvin,
-      2_000,
-      6_500
-    )),
-    weatherBrightnessAdjustment: adjustment.brightness,
-    weatherColorTemperatureAdjustmentKelvin: adjustment.colorTemperatureKelvin,
+    brightnessPercent: Math.round(clamp(base.brightnessPercent, 1, 100)),
+    colorTemperatureKelvin: Math.round(clamp(base.colorTemperatureKelvin, 2_000, 6_500)),
   };
 }

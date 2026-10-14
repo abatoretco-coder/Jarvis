@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 14;
+export const CONVERSATION_SCHEMA_VERSION = 16;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -30,6 +30,10 @@ const MUTATION_IDEMPOTENCY_CHECKSUM =
   'sha256:27a69258706ff7a2730f120f30abf92046eaa9fe0f89e99c414e9052edc78f85';
 const DURABLE_HOME_AND_RECURRENCE_CHECKSUM =
   'sha256:3b63fd8c772ddd3eadc6cf3b55aa6af2264d4728931240f51c82d6b60a7f0ea8';
+const RESPONSE_PROVENANCE_AUDIT_CHECKSUM =
+  'sha256:612eae8e9dd8f345831c829a772c9f195a4edc8beb6074c23af43b8c89230f70';
+const RESPONSE_DECISION_AUDIT_CHECKSUM =
+  'sha256:d4ddcd6379a4b488881253f937c176b5bf4a0ef46bd8e09b037c0e9ed6774706';
 
 function ensureDurableHomeAndRecurrenceSchema(db: Database.Database): void {
   db.exec(`
@@ -97,6 +101,21 @@ function ensureMutationIdempotencySchema(db: Database.Database): void {
 function ensureSpokenResponseAuditSchema(db: Database.Database): void {
   if (!hasColumn(db, 'conversation_messages', 'spoken_content')) {
     db.exec('ALTER TABLE conversation_messages ADD COLUMN spoken_content TEXT;');
+  }
+}
+
+function ensureResponseProvenanceAuditSchema(db: Database.Database): void {
+  if (!hasColumn(db, 'conversation_messages', 'raw_content')) {
+    db.exec('ALTER TABLE conversation_messages ADD COLUMN raw_content TEXT;');
+  }
+  if (!hasColumn(db, 'conversation_messages', 'sources_json')) {
+    db.exec('ALTER TABLE conversation_messages ADD COLUMN sources_json TEXT;');
+  }
+}
+
+function ensureResponseDecisionAuditSchema(db: Database.Database): void {
+  if (!hasColumn(db, 'conversation_messages', 'decision_metadata_json')) {
+    db.exec('ALTER TABLE conversation_messages ADD COLUMN decision_metadata_json TEXT;');
   }
 }
 
@@ -675,6 +694,9 @@ function ensureInitialSchema(db: Database.Database): void {
       role TEXT NOT NULL CHECK (role IN ('user','assistant')),
       content TEXT NOT NULL,
       spoken_content TEXT,
+      raw_content TEXT,
+      sources_json TEXT,
+      decision_metadata_json TEXT,
       created_at_ms INTEGER NOT NULL,
       PRIMARY KEY (thread_id, seq),
       FOREIGN KEY(thread_id) REFERENCES conversation_threads(thread_id) ON DELETE CASCADE
@@ -884,6 +906,10 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:13');
   if (applied.get(14) && applied.get(14) !== DURABLE_HOME_AND_RECURRENCE_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:14');
+  if (applied.get(15) && applied.get(15) !== RESPONSE_PROVENANCE_AUDIT_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:15');
+  if (applied.get(16) && applied.get(16) !== RESPONSE_DECISION_AUDIT_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:16');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -968,6 +994,18 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (14, ?, ?, ?)'
       ).run('durable_home_and_recurrence_state', DURABLE_HOME_AND_RECURRENCE_CHECKSUM, Date.now());
+    }
+    ensureResponseProvenanceAuditSchema(db);
+    if (!applied.has(15)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (15, ?, ?, ?)'
+      ).run('response_provenance_audit', RESPONSE_PROVENANCE_AUDIT_CHECKSUM, Date.now());
+    }
+    ensureResponseDecisionAuditSchema(db);
+    if (!applied.has(16)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (16, ?, ?, ?)'
+      ).run('response_decision_audit', RESPONSE_DECISION_AUDIT_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();

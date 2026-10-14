@@ -4,7 +4,7 @@ import type { AdaptiveLightingTarget } from './AdaptiveLightingPolicy';
 
 export type PersistedLightingIntent = {
   roomId: string;
-  mode: 'on' | 'dimmed' | 'off';
+  mode: 'on' | 'maximum' | 'dimmed' | 'off';
   target?: AdaptiveLightingTarget;
   updatedAtMs: number;
 };
@@ -28,15 +28,11 @@ function parseTarget(value: string | null): AdaptiveLightingTarget | undefined {
       typeof parsed.brightnessPercent !== 'number'
       || typeof parsed.colorTemperatureKelvin !== 'number'
       || !['dawn', 'day', 'dusk', 'night'].includes(String(parsed.phase))
-      || typeof parsed.weatherBrightnessAdjustment !== 'number'
-      || typeof parsed.weatherColorTemperatureAdjustmentKelvin !== 'number'
     ) return undefined;
     return {
       brightnessPercent: parsed.brightnessPercent,
       colorTemperatureKelvin: parsed.colorTemperatureKelvin,
       phase: parsed.phase as AdaptiveLightingTarget['phase'],
-      weatherBrightnessAdjustment: parsed.weatherBrightnessAdjustment,
-      weatherColorTemperatureAdjustmentKelvin: parsed.weatherColorTemperatureAdjustmentKelvin,
     };
   } catch {
     return undefined;

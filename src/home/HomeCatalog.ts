@@ -44,7 +44,7 @@ export type HomeActionName = (typeof HOME_ACTION_NAMES)[number];
 export type HomeQuickAction = {
   quickActionId: string;
   name: string;
-  icon: 'light' | 'climate' | 'media' | 'vacuum' | 'home';
+  icon: 'light' | 'climate' | 'media' | 'vacuum' | 'home' | 'away-night';
   deviceId: string;
   action: HomeActionName;
   value?: number;
@@ -87,20 +87,15 @@ export type AdaptiveLightingLevel = {
 export type AdaptiveLightingRoomConfig = {
   roomId: string;
   deviceIds: string[];
+  dimmedOffDeviceIds?: string[];
   phases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
   dimmedPhases: Record<AdaptiveLightingPhase, AdaptiveLightingLevel>;
 };
 export type AdaptiveLightingConfig = {
   enabled: boolean;
-  sunEntityId: string;
-  weatherEntityId: string;
   pollSeconds: number;
   manualOverrideMinutes: number;
   transitionSeconds: number;
-  weather: {
-    maxBrightnessAdjustment: number;
-    maxColorTemperatureAdjustmentKelvin: number;
-  };
   rooms: AdaptiveLightingRoomConfig[];
 };
 export type UpdateAdaptiveLightingRoomProfile = {
@@ -379,7 +374,7 @@ const entityIdPattern = /^[a-z_]+\.[a-z0-9_]+$/u;
 const homeAssistantAreaIdPattern = /^[a-z0-9_]{1,64}$/u;
 const deviceIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const quickActionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
-const quickActionIcons = new Set(['light', 'climate', 'media', 'vacuum', 'home']);
+const quickActionIcons = new Set(['light', 'climate', 'media', 'vacuum', 'home', 'away-night']);
 const homeDeviceIcons = new Set<string>(HOME_DEVICE_ICON_KEYS);
 const quickActionNames = new Set<HomeActionName>(HOME_ACTION_NAMES);
 
@@ -602,7 +597,7 @@ function normalizeScene(value: HomeScene): HomeScene | null {
     !Array.isArray(value.steps) ||
     value.steps.length < 2 ||
     value.steps.length > 20 ||
-    voicePhrases.length > 5 ||
+    voicePhrases.length > 6 ||
     voicePhrases.some((phrase) => phrase.length < 2 || phrase.length > 80) ||
     !Number.isInteger(value.sortOrder) ||
     value.sortOrder < 0 ||
@@ -878,10 +873,6 @@ function normalizeAdaptiveLighting(
   const phases: AdaptiveLightingPhase[] = ['dawn', 'day', 'dusk', 'night'];
   if (
     typeof value.enabled !== 'boolean'
-    || !entityIdPattern.test(value.sunEntityId)
-    || value.sunEntityId.split('.')[0] !== 'sun'
-    || !entityIdPattern.test(value.weatherEntityId)
-    || value.weatherEntityId.split('.')[0] !== 'weather'
     || !Number.isInteger(value.pollSeconds)
     || value.pollSeconds < 15
     || value.pollSeconds > 900
@@ -891,12 +882,6 @@ function normalizeAdaptiveLighting(
     || !Number.isFinite(value.transitionSeconds)
     || value.transitionSeconds < 0
     || value.transitionSeconds > 300
-    || !Number.isFinite(value.weather?.maxBrightnessAdjustment)
-    || value.weather.maxBrightnessAdjustment < 0
-    || value.weather.maxBrightnessAdjustment > 30
-    || !Number.isFinite(value.weather?.maxColorTemperatureAdjustmentKelvin)
-    || value.weather.maxColorTemperatureAdjustmentKelvin < 0
-    || value.weather.maxColorTemperatureAdjustmentKelvin > 1_000
     || !Array.isArray(value.rooms)
     || value.rooms.length === 0
   ) throw new Error('home_config_invalid');
@@ -921,6 +906,11 @@ function normalizeAdaptiveLighting(
       || !Array.isArray(room.deviceIds)
       || room.deviceIds.length === 0
       || new Set(room.deviceIds).size !== room.deviceIds.length
+      || (room.dimmedOffDeviceIds !== undefined && (
+        !Array.isArray(room.dimmedOffDeviceIds)
+        || new Set(room.dimmedOffDeviceIds).size !== room.dimmedOffDeviceIds.length
+        || room.dimmedOffDeviceIds.some((deviceId) => !room.deviceIds.includes(deviceId))
+      ))
       || !validLevels(room.phases)
       || !validLevels(room.dimmedPhases)
       || room.deviceIds.some((deviceId) => {

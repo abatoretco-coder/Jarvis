@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import { ConversationService } from '../src/conversation/ConversationService';
 import { routeUserRequest } from '../src/conversation/orchestratorRouter';
 import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
 import type { Env } from '../src/env';
@@ -177,6 +178,42 @@ describe('/v1/ingest integration', () => {
   afterEach(async () => {
     await app.close();
     (global as { fetch?: unknown }).fetch = undefined;
+    jest.restoreAllMocks();
+  });
+
+  it('does not report success when the durable response audit cannot be written', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'));
+    jest
+      .spyOn(ConversationService.prototype, 'persistMessages')
+      .mockRejectedValue(new Error('sqlite_write_failed'));
+    registerIngestRoute(app, makeDeps(env, []));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      payload: {
+        threadId: 'thread-audit-failure',
+        text: 'Bonjour Jarvis',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: 'response_audit_failed' });
+
+    const streamResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest?sse=1',
+      headers: { accept: 'text/event-stream' },
+      payload: {
+        threadId: 'thread-audit-failure-sse',
+        text: 'Bonjour Jarvis',
+        clientContext: { channel: 'desktop' },
+      },
+    });
+    expect(streamResponse.body).toContain('event: error');
+    expect(streamResponse.body).toContain('response_audit_failed');
+    expect(streamResponse.body).not.toContain('event: response');
   });
 
   it('keeps a personal voice request pending until a household member names themself', async () => {
@@ -425,7 +462,9 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      responseText: "C'est fait.",
+      responseText: 'Commande envoyée.',
+      spokenText: 'Commande envoyée.',
+      displayText: "Lumière salon a été acceptée, sans confirmation de l'équipement.",
       replyMeta: { source: 'quick_action', semanticDecision: 'accepted' },
     });
     expect(callService).toHaveBeenCalledWith({
@@ -594,7 +633,8 @@ describe('/v1/ingest integration', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      responseText: "C'est fait.",
+      responseText: 'Commande envoyée.',
+      spokenText: 'Commande envoyée.',
       replyMeta: { source: 'scene', semanticDecision: 'accepted' },
     });
     expect(callService).toHaveBeenCalledTimes(2);
@@ -2089,7 +2129,10 @@ describe('/v1/ingest integration', () => {
   });
 
   it('semantic activation: definition E2 live bypasses LLM router', async () => {
-    const searchReply = 'Une ZTL est une zone à trafic limité réservée à certains véhicules.';
+    const searchReply = [
+      'Une ZTL est une zone à trafic limité réservée à certains véhicules.',
+      '- L’accès dépend des règles locales. Source : web.',
+    ].join('\n');
     mockedTrySemanticRouter.mockResolvedValue({
       accepted: true,
       decision: 'accepted_e2',
@@ -2155,10 +2198,56 @@ describe('/v1/ingest integration', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    const payload = res.json() as { responseText: string; sources?: string[] };
+    const payload = res.json() as {
+      responseText: string;
+      displayText?: string;
+      spokenText?: string;
+      sources?: string[];
+    };
     expect(payload.responseText).toContain('zone à trafic limité');
     expect(payload.responseText).not.toContain('https://example.com/ztl');
+    expect(payload.responseText).not.toContain('\n');
+    expect(payload.displayText).toContain('\n- L’accès dépend des règles locales.');
+    expect(payload.spokenText).not.toContain('\n');
     expect(payload.sources).toEqual(['https://example.com/ztl']);
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/v1/threads/thread-semantic-search-definition/history?limit=10',
+    });
+    const assistant = (history.json() as {
+      messages: Array<{
+        role: string;
+        text: string;
+        rawText?: string;
+        sources?: string[];
+        sourceDetails?: Array<{
+          url: string;
+          title: string;
+          provider: string;
+          capturedAtMs: number;
+        }>;
+        decision?: Record<string, unknown>;
+      }>;
+    }).messages.find((message) => message.role === 'assistant');
+    expect(assistant?.text).not.toContain('Source : web');
+    expect(assistant?.rawText).toContain('Source : web');
+    expect(assistant?.sources).toEqual(['https://example.com/ztl']);
+    expect(assistant?.sourceDetails).toEqual([
+      {
+        url: 'https://example.com/ztl',
+        title: 'example.com',
+        provider: 'semantic_router',
+        capturedAtMs: expect.any(Number),
+      },
+    ]);
+    expect(assistant?.decision).toMatchObject({
+      schemaVersion: 1,
+      kind: 'search',
+      source: 'semantic_router',
+      routeKey: 'search.web.definition',
+      semanticDecision: 'activated',
+    });
     expect(mockedRouteUserRequest).not.toHaveBeenCalled();
     expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
   });

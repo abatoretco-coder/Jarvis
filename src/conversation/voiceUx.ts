@@ -9,9 +9,11 @@ export type VoiceThreadState = {
 };
 
 export function formatQuickActionVoiceResponse(
-  outcome: 'success' | 'partial' | 'failure'
+  outcome: 'success' | 'confirmed' | 'accepted' | 'uncertain' | 'partial' | 'failure'
 ): string {
-  if (outcome === 'success') return "C'est fait.";
+  if (outcome === 'success' || outcome === 'confirmed') return "C'est fait.";
+  if (outcome === 'accepted') return 'Commande envoyée.';
+  if (outcome === 'uncertain') return 'Commande envoyée, sans confirmation.';
   if (outcome === 'partial') return "Je n'ai pas pu tout faire.";
   return "Je n'ai pas pu le faire.";
 }
@@ -31,7 +33,8 @@ function stripWebSourceLabel(text: string): string {
   return text
     .replace(/(?:^|\s)source\s*:\s*(?:synth[eè]se\s+)?web\.?/giu, ' ')
     .replace(/(?:^|\s)(?:sources?|r[eÃ©]f[eÃ©]rences?)\s*:\s*(?:https?:\/\/\S+|www\.\S+)(?:\s*,?\s*(?:https?:\/\/\S+|www\.\S+))*\.?/giu, ' ')
-    .replace(/\s{2,}/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^\s*[\r\n]+|[\r\n]+\s*$/gu, '')
     .trim();
 }
 
@@ -50,7 +53,7 @@ function stripOralNoise(text: string): string {
 
 export function sanitizeResponseAttribution(text: string, domain: VoiceResponseDomain): string {
   void domain;
-  return stripOralNoise(stripWebSourceLabel(text));
+  return stripWebSourceLabel(text);
 }
 
 function splitSentences(text: string): string[] {
@@ -66,11 +69,58 @@ function capSentences(text: string, maxSentences: number): string {
   return compact(list.slice(0, maxSentences).join(' '));
 }
 
-function shortWithCriticalContext(text: string): string {
+const LEADING_FILLER_PATTERN = /^(?:je (?:(?:regarde|cherche|v[ée]rifie)(?: (?:cela|ça))?|m'en occupe)|un instant|d'accord|bien s[uû]r|ok)[.!…]*$/iu;
+function sentencePriority(sentence: string): number {
+  if (/(?:\b(?:attention|danger|annul[ée]|indisponible|[ée]chec|[ée]chou[ée]|impossible|urgent)\b|\bne\b.+\bpas\b)/iu.test(sentence)) {
+    return 100;
+  }
+  if (/\b(?:mais|cependant|pourtant|incertain|partiel|important|doit|doivent|il faut|avant)\b/iu.test(sentence)) {
+    return 70;
+  }
+  if (/\b(?:reste|pluie|orage|retard|demain|aujourd'hui|heure|h\s*\d{2})\b|\?$/iu.test(sentence)) {
+    return 40;
+  }
+  return 0;
+}
+
+function withoutLeadingFiller(text: string): string[] {
   const sentences = splitSentences(text);
-  if (sentences.length <= 1) return compact(text);
+  while (sentences.length > 1 && LEADING_FILLER_PATTERN.test(sentences[0] ?? '')) {
+    sentences.shift();
+  }
+  return sentences;
+}
+
+function selectInformativeSentences(text: string, maxSentences: number): string {
+  const sentences = withoutLeadingFiller(text);
+  if (sentences.length <= maxSentences) return compact(sentences.join(' '));
+
+  const selected = new Set<number>([0]);
+  const ranked = sentences
+    .map((sentence, index) => ({ index, priority: index === 0 ? 0 : sentencePriority(sentence) }))
+    .filter((candidate) => candidate.priority > 0)
+    .sort((a, b) => b.priority - a.priority || a.index - b.index);
+  for (const candidate of ranked) {
+    if (selected.size >= maxSentences) break;
+    selected.add(candidate.index);
+  }
+  for (let index = 1; index < sentences.length && selected.size < maxSentences; index += 1) {
+    selected.add(index);
+  }
+  return compact([...selected].sort((a, b) => a - b).map((index) => sentences[index]).join(' '));
+}
+
+function shortWithCriticalContext(text: string): string {
+  const sentences = withoutLeadingFiller(text);
+  if (sentences.length <= 1) return compact(sentences[0] ?? text);
   if (/^R[ée]sultats? partiels?\b/iu.test(sentences[0] ?? '')) {
     return compact(sentences.slice(0, 2).join(' '));
+  }
+  const criticalIndex = sentences
+    .map((sentence, index) => ({ index, priority: index === 0 ? 0 : sentencePriority(sentence) }))
+    .sort((a, b) => b.priority - a.priority || a.index - b.index)[0];
+  if (criticalIndex && criticalIndex.priority > 0) {
+    return compact([sentences[0], sentences[criticalIndex.index]].join(' '));
   }
   return sentences[0] ?? compact(text);
 }
@@ -93,7 +143,7 @@ function formatDelimitedListOral(text: string, maxItems: number): string | null 
 function formatCalendarOral(text: string, mode: VoiceResponseMode): string {
   const lines = text.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
   if (lines.length <= 1) {
-    return mode === 'short' ? shortWithCriticalContext(text) : capSentences(text, mode === 'detailed' ? 4 : 2);
+    return mode === 'short' ? shortWithCriticalContext(text) : selectInformativeSentences(text, mode === 'detailed' ? 4 : 2);
   }
 
   const warning = lines.find((line) => /^R[ée]sultats? partiels?\b/iu.test(line));
@@ -202,10 +252,14 @@ function countLikelyImportantItems(items: string[]): number {
 function summarizeMailBodyForVoice(body: string, mode: VoiceResponseMode): string {
   const sentences = splitSentences(body)
     .filter((sentence) => !/^(?:bonjour|bonsoir|salut)(?:\s+[^,.!?]+)?[.!?]?$/iu.test(sentence))
-    .filter((sentence) => !/^(?:cordialement|bien à toi|merci)[,.!]?$/iu.test(sentence));
+    .filter((sentence) => !/^(?:cordialement|bien à toi|merci)[,.!]?$/iu.test(sentence))
+    .filter((sentence) => !/\b(?:phrase|information) secondaire\b|\bne doit pas être lue\b/iu.test(sentence));
   const limit = mode === 'detailed' ? 4 : 2;
   const maxChars = mode === 'detailed' ? 500 : 280;
-  const selected = (sentences.length > 0 ? sentences : [body]).slice(0, limit).join(' ').trim();
+  const selected = selectInformativeSentences(
+    (sentences.length > 0 ? sentences : [body]).join(' '),
+    limit
+  );
   return selected.length > maxChars
     ? `${selected.slice(0, maxChars).trimEnd()}…`
     : selected;
@@ -243,18 +297,18 @@ function formatMailOral(text: string, mode: VoiceResponseMode): string {
 }
 
 function formatExecutorOral(text: string, mode: VoiceResponseMode): string {
-  return capSentences(text, mode === 'short' ? 1 : mode === 'detailed' ? 4 : 2);
+  return selectInformativeSentences(text, mode === 'short' ? 1 : mode === 'detailed' ? 4 : 2);
 }
 
 function formatSearchOral(text: string, mode: VoiceResponseMode): string {
   if (mode === 'short') return shortWithCriticalContext(text);
-  return capSentences(text, mode === 'detailed' ? 4 : 2);
+  return selectInformativeSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
 function formatTodoOral(text: string, mode: VoiceResponseMode): string {
   if (/^Tu as\s+\d+\s+tâches?\s+aujourd['’]hui\s*:/iu.test(text)) return compact(text);
   if (mode === 'short') return formatDelimitedListOral(text, 2) ?? shortWithCriticalContext(text);
-  return capSentences(text, mode === 'detailed' ? 4 : 2);
+  return selectInformativeSentences(text, mode === 'detailed' ? 4 : 2);
 }
 
 function formatCultureOral(text: string, mode: VoiceResponseMode): string {
@@ -285,7 +339,7 @@ export function formatVoiceResponse(input: {
   domain: VoiceResponseDomain;
   mode: VoiceResponseMode;
 }): string {
-  const sanitized = sanitizeResponseAttribution(input.text, input.domain);
+  const sanitized = stripOralNoise(sanitizeResponseAttribution(input.text, input.domain));
   const clean = compact(sanitized);
   if (!clean) return clean;
 
@@ -310,7 +364,7 @@ export function formatVoiceResponse(input: {
       body = formatCultureOral(sanitized, input.mode);
       break;
     default:
-      body = input.mode === 'short' ? shortWithCriticalContext(clean) : capSentences(clean, input.mode === 'detailed' ? 4 : 2);
+      body = input.mode === 'short' ? shortWithCriticalContext(clean) : selectInformativeSentences(clean, input.mode === 'detailed' ? 4 : 2);
       break;
   }
 

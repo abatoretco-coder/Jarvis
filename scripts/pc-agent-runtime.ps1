@@ -15,7 +15,6 @@ $stdoutPath = Join-Path $runtimeRoot 'pc-agent.stdout.log'
 $stderrPath = Join-Path $runtimeRoot 'pc-agent.stderr.log'
 $secretPath = Join-Path $runtimeRoot 'secrets\pc-agent-api-key.dpapi'
 $edgeEnvPath = Join-Path $repositoryRoot 'ops\edge\pc-edge.env'
-$startupPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Jarvis PC Agent.cmd'
 
 function Read-ProtectedSecret([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw 'PC agent secret is missing.' }
@@ -67,11 +66,8 @@ function Start-Agent {
 
 switch ($Command) {
   'install' {
-    $escapedScript = $PSCommandPath.Replace('"', '""')
-    $content = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$escapedScript`" start`r`n"
-    [IO.File]::WriteAllText($startupPath, $content, [Text.UTF8Encoding]::new($false))
     Start-Agent
-    Write-Host 'Jarvis PC agent installed for the current user.' -ForegroundColor Green
+    Write-Host 'Jarvis PC agent started. Session startup is owned by startup-runtime.ps1.' -ForegroundColor Green
   }
   'start' { Start-Agent; Write-Host 'Jarvis PC agent started.' -ForegroundColor Green }
   'stop' { Stop-Agent; Write-Host 'Jarvis PC agent stopped.' -ForegroundColor Green }

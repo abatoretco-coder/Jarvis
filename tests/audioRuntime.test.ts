@@ -15,7 +15,7 @@ describe('Phase 1 cloud TTS runtime', () => {
       apiKey: 'primary-key',
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-realtime-2.1-mini',
-      voice: 'marin',
+      voice: 'cedar',
     });
   });
 

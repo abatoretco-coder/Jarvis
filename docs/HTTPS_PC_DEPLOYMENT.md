@@ -58,11 +58,16 @@ Jarvis expose toujours la cible logique `PC` dans l'interface Musique. Si Spotif
 L'agent n'ouvre aucun port entrant. Il interroge uniquement l'API Jarvis en HTTPS avec une identité de service dédiée, limitée à la permission `music`, et n'accepte que la commande fermée `open_spotify`. Son secret est chiffré par DPAPI dans le répertoire d'exécution ignoré par Git.
 
 ```powershell
-.\scripts\pc-agent-runtime.ps1 install
 .\scripts\pc-agent-runtime.ps1 status
 ```
 
-`install` inscrit aussi l'agent au démarrage de la session Windows. En cas d'indisponibilité temporaire du registre Docker, une image locale déjà reconstruite peut être redéployée avec `https-runtime.ps1 start -Mode public -NoBuild`.
+L'agent ne possède pas de démarrage Windows autonome : il est lancé après la disponibilité du proxy public par le bootstrap unique. Installer ce bootstrap pour l'utilisateur courant avec :
+
+```powershell
+.\scripts\startup-runtime.ps1 install
+```
+
+Cette commande sauvegarde les anciennes entrées de démarrage, désactive le lancement direct concurrent de Docker Desktop et installe `Jarvis Runtime.cmd`. À l'ouverture de session, le bootstrap attend Docker, exécute `https-runtime.ps1 start -Mode public -NoBuild`, vérifie l'origine HTTPS et démarre l'agent PC dans cet ordre.
 
 ## Lecteur Spotify et téléphone
 

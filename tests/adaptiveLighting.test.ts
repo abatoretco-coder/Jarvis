@@ -49,28 +49,24 @@ describe('room lighting target policy', () => {
     expect(resolveLightingPhase(new Date('2026-01-17T09:00:00.000Z'))).toBe('day');
   });
 
-  test('weather changes only the daytime on profile', () => {
-    const clear = resolveAdaptiveLightingTarget({
+  test('uses only the configured room curves', () => {
+    const on = resolveAdaptiveLightingTarget({
       room,
       mode: 'on',
-      weatherConfig: { maxBrightnessAdjustment: 12, maxColorTemperatureAdjustmentKelvin: 0 },
-      weather: { state: 'sunny', attributes: { cloud_coverage: 0 } },
       now: new Date('2026-01-15T12:00:00.000Z'),
     });
     const dimmed = resolveAdaptiveLightingTarget({
       room,
       mode: 'dimmed',
-      weatherConfig: { maxBrightnessAdjustment: 12, maxColorTemperatureAdjustmentKelvin: 0 },
-      weather: { state: 'sunny', attributes: { cloud_coverage: 0 } },
       now: new Date('2026-01-15T12:00:00.000Z'),
     });
 
-    expect(clear).toMatchObject({ brightnessPercent: 67, colorTemperatureKelvin: 3_900 });
+    expect(on).toEqual({ phase: 'day', brightnessPercent: 55, colorTemperatureKelvin: 3_900 });
     expect(dimmed).toMatchObject({ brightnessPercent: 20, colorTemperatureKelvin: 2_800 });
   });
 });
 
-function fixture(includeFutureLight = false, includeSmartPlugLamp = false): HomeCatalog {
+function fixture(includeFutureLight = false, includeSmartPlugLamp = false, dimmedOffDeviceIds: string[] = []): HomeCatalog {
   const root = mkdtempSync(join(tmpdir(), 'jarvis-room-lighting-'));
   roots.push(root);
   const folder = join(root, 'home-test');
@@ -103,13 +99,10 @@ function fixture(includeFutureLight = false, includeSmartPlugLamp = false): Home
       }],
       adaptiveLighting: {
         enabled: true,
-        sunEntityId: 'sun.sun',
-        weatherEntityId: 'weather.home',
         pollSeconds: 30,
         manualOverrideMinutes: 120,
         transitionSeconds: 20,
-        weather: { maxBrightnessAdjustment: 12, maxColorTemperatureAdjustmentKelvin: 0 },
-        rooms: [{ ...room, deviceIds: includeSmartPlugLamp ? [...room.deviceIds, 'living-plug-lamp'] : room.deviceIds }],
+        rooms: [{ ...room, deviceIds: includeSmartPlugLamp ? [...room.deviceIds, 'living-plug-lamp'] : room.deviceIds, dimmedOffDeviceIds }],
       },
     },
   }));
@@ -136,7 +129,7 @@ describe('room lighting modes', () => {
     expect(fixture(true).getRoomLightDeviceIds('living')).toEqual(['living-light', 'living-wall-light']);
   });
 
-  test('applies dimmed, on and off through the same room service', async () => {
+  test('applies dimmed, maximum, on and off through the same room service', async () => {
     const states = [
       { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
       lightState(),
@@ -162,6 +155,11 @@ describe('room lighting modes', () => {
     expect(callService).toHaveBeenLastCalledWith(expect.objectContaining({
       service: 'turn_on',
       serviceData: expect.objectContaining({ brightness_pct: 55, color_temp_kelvin: 3_900 }),
+    }));
+    await service.setRoomMode('living', 'maximum', noon);
+    expect(callService).toHaveBeenLastCalledWith(expect.objectContaining({
+      service: 'turn_on',
+      serviceData: expect.objectContaining({ brightness_pct: 100, color_temp_kelvin: 3_900 }),
     }));
     await service.setRoomMode('living', 'off', noon);
     expect(callService).toHaveBeenLastCalledWith(expect.objectContaining({ service: 'turn_off' }));
@@ -192,6 +190,30 @@ describe('room lighting modes', () => {
       target: { entity_id: 'switch.living_lamp' },
       serviceData: undefined,
     });
+  });
+
+  test('keeps configured accent lamps off in dimmed mode and restores them in maximum mode', async () => {
+    const states = [lightState(), { entity_id: 'switch.living_lamp', state: 'on', attributes: {} }];
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const service = new HomeAdaptiveLightingService(
+      fixture(false, true, ['living-plug-lamp']),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async (entityId: string) => states.find((state) => state.entity_id === entityId)),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() }
+    );
+
+    await service.setRoomMode('living', 'dimmed', new Date('2026-01-15T12:00:00.000Z'));
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'switch', service: 'turn_off', target: { entity_id: 'switch.living_lamp' },
+    }));
+    callService.mockClear();
+    await service.setRoomMode('living', 'maximum', new Date('2026-01-15T12:00:00.000Z'));
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'switch', service: 'turn_on', target: { entity_id: 'switch.living_lamp' },
+    }));
   });
 
   test('does not change a selected mode merely because the clock crosses a phase boundary', async () => {

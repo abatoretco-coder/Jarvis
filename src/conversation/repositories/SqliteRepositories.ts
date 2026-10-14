@@ -5,7 +5,17 @@ import Database from 'better-sqlite3';
 
 import { getCurrentDataOwnerScope } from '../../identity/requestIdentity';
 import { runConversationMigrations } from './conversationMigrations';
-import type { MessageRecord, MessageRepository, MessageRole } from './MessageRepository';
+import {
+  buildMessageAuditSources,
+  MAX_DECISION_METADATA_LENGTH,
+  type MessageAuditSource,
+  type MessageDecisionMetadata,
+  type MessageRecord,
+  type MessageRepository,
+  type MessageRole,
+  normalizeMessageDecisionMetadata,
+  normalizeMessageRawContent,
+} from './MessageRepository';
 import type { CommitCandidateResult, SummaryStatus, ThreadListItem, ThreadRecord, ThreadRepository } from './ThreadRepository';
 
 function normalizeContent(content: string): string {
@@ -13,6 +23,91 @@ function normalizeContent(content: string): string {
     .replace(/\0/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function parseSourceDetails(value: string | null): MessageAuditSource[] | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return undefined;
+    if (parsed.every((item) => typeof item === 'string')) {
+      const legacySources = buildMessageAuditSources(parsed, undefined, 0);
+      return legacySources.length > 0 ? legacySources : undefined;
+    }
+    const sources = parsed
+      .filter(
+        (item): item is Record<string, unknown> =>
+          Boolean(item) && typeof item === 'object' && !Array.isArray(item)
+      )
+      .flatMap((item) => {
+        const url = typeof item.url === 'string' ? item.url : '';
+        const normalized = buildMessageAuditSources(
+          [url],
+          typeof item.provider === 'string'
+            ? { schemaVersion: 1, source: item.provider.slice(0, 512) }
+            : undefined,
+          typeof item.capturedAtMs === 'number' && Number.isFinite(item.capturedAtMs)
+            ? Math.max(0, Math.floor(item.capturedAtMs))
+            : 0
+        );
+        const source = normalized[0];
+        if (!source) return [];
+        return [
+          {
+            ...source,
+            ...(typeof item.title === 'string' && item.title.trim()
+              ? { title: item.title.replace(/\0/g, '').trim().slice(0, 512) }
+              : {}),
+          },
+        ];
+      });
+    return sources.length > 0 ? sources : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type SqliteMessageRow = {
+  thread_id: string;
+  seq: number;
+  role: MessageRole;
+  content: string;
+  spoken_content: string | null;
+  raw_content: string | null;
+  sources_json: string | null;
+  decision_metadata_json: string | null;
+  created_at_ms: number;
+};
+
+function toMessageRecord(row: SqliteMessageRow): MessageRecord {
+  const sourceDetails = parseSourceDetails(row.sources_json);
+  const decisionMetadata = parseDecisionMetadata(row.decision_metadata_json);
+  return {
+    threadId: row.thread_id,
+    seq: Number(row.seq),
+    role: row.role,
+    content: row.content,
+    ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
+    ...(row.raw_content ? { rawContent: row.raw_content } : {}),
+    ...(sourceDetails
+      ? { sources: sourceDetails.map((source) => source.url), sourceDetails }
+      : {}),
+    ...(decisionMetadata ? { decisionMetadata } : {}),
+    createdAtMs: Number(row.created_at_ms),
+  };
+}
+
+function parseDecisionMetadata(value: string | null): MessageDecisionMetadata | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const record = parsed as Partial<MessageDecisionMetadata>;
+    if (record.schemaVersion !== 1) return undefined;
+    return normalizeMessageDecisionMetadata(record as MessageDecisionMetadata);
+  } catch {
+    return undefined;
+  }
 }
 
 function buildConversationTitle(content: string): string {
@@ -400,7 +495,16 @@ export class SqliteThreadRepository implements ThreadRepository {
 export class SqliteMessageRepository implements MessageRepository {
   constructor(private readonly db: Database.Database) {}
 
-  async appendMessage(input: { threadId: string; role: MessageRole; content: string; spokenContent?: string; createdAtMs?: number }): Promise<number> {
+  async appendMessage(input: {
+    threadId: string;
+    role: MessageRole;
+    content: string;
+    spokenContent?: string;
+    rawContent?: string;
+    sources?: string[];
+    decisionMetadata?: MessageDecisionMetadata;
+    createdAtMs?: number;
+  }): Promise<number> {
     const normalized = normalizeContent(input.content);
     if (!normalized) {
       return 0;
@@ -418,10 +522,28 @@ export class SqliteMessageRepository implements MessageRepository {
       const nextSeq = Number(row.max_seq) + 1;
       this.db
         .prepare(
-          `INSERT INTO conversation_messages (thread_id, seq, role, content, spoken_content, created_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO conversation_messages
+             (thread_id, seq, role, content, spoken_content, raw_content, sources_json, decision_metadata_json, created_at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(input.threadId, nextSeq, input.role, normalized, input.spokenContent ? normalizeContent(input.spokenContent) : null, now);
+        .run(
+          input.threadId,
+          nextSeq,
+          input.role,
+          normalized,
+          input.spokenContent ? normalizeContent(input.spokenContent) : null,
+          input.rawContent ? normalizeMessageRawContent(input.rawContent) : null,
+          input.sources?.length
+            ? JSON.stringify(buildMessageAuditSources(input.sources, input.decisionMetadata, now))
+            : null,
+          input.decisionMetadata
+            ? JSON.stringify(normalizeMessageDecisionMetadata(input.decisionMetadata)).slice(
+                0,
+                MAX_DECISION_METADATA_LENGTH
+              )
+            : null,
+          now
+        );
       if (input.role === 'user') {
         this.db
           .prepare(
@@ -441,91 +563,47 @@ export class SqliteMessageRepository implements MessageRepository {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.raw_content, m.sources_json, m.decision_metadata_json, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql}
          ORDER BY m.seq DESC
          LIMIT ?`
       )
-      .all(threadId, ...owner.params, Math.max(1, limit)) as Array<{
-      thread_id: string;
-      seq: number;
-      role: MessageRole;
-      content: string;
-      spoken_content: string | null;
-      created_at_ms: number;
-    }>;
+      .all(threadId, ...owner.params, Math.max(1, limit)) as SqliteMessageRow[];
 
-    return rows
-      .reverse()
-      .map((row) => ({
-        threadId: row.thread_id,
-        seq: Number(row.seq),
-        role: row.role,
-        content: row.content,
-        ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
-        createdAtMs: Number(row.created_at_ms),
-      }));
+    return rows.reverse().map(toMessageRecord);
   }
 
   async getMessagesAfterSeq(threadId: string, afterExclusiveSeq: number, limit: number): Promise<MessageRecord[]> {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.raw_content, m.sources_json, m.decision_metadata_json, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql} AND m.seq > ?
          ORDER BY m.seq ASC
          LIMIT ?`
       )
-      .all(threadId, ...owner.params, Math.max(0, afterExclusiveSeq), Math.max(1, limit)) as Array<{
-      thread_id: string;
-      seq: number;
-      role: MessageRole;
-      content: string;
-      spoken_content: string | null;
-      created_at_ms: number;
-    }>;
+      .all(threadId, ...owner.params, Math.max(0, afterExclusiveSeq), Math.max(1, limit)) as SqliteMessageRow[];
 
-    return rows.map((row) => ({
-      threadId: row.thread_id,
-      seq: Number(row.seq),
-      role: row.role,
-      content: row.content,
-      ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
-      createdAtMs: Number(row.created_at_ms),
-    }));
+    return rows.map(toMessageRecord);
   }
 
   async getMessagesRange(threadId: string, fromExclusiveSeq: number, toInclusiveSeq: number): Promise<MessageRecord[]> {
     const owner = ownerPredicate('t.owner_user_id');
     const rows = this.db
       .prepare(
-        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.created_at_ms
+        `SELECT m.thread_id, m.seq, m.role, m.content, m.spoken_content, m.raw_content, m.sources_json, m.decision_metadata_json, m.created_at_ms
          FROM conversation_messages m
          JOIN conversation_threads t ON t.thread_id = m.thread_id
          WHERE m.thread_id = ? AND ${owner.sql} AND m.seq > ? AND m.seq <= ?
          ORDER BY m.seq ASC`
       )
-      .all(threadId, ...owner.params, fromExclusiveSeq, toInclusiveSeq) as Array<{
-      thread_id: string;
-      seq: number;
-      role: MessageRole;
-      content: string;
-      spoken_content: string | null;
-      created_at_ms: number;
-    }>;
+      .all(threadId, ...owner.params, fromExclusiveSeq, toInclusiveSeq) as SqliteMessageRow[];
 
-    return rows.map((row) => ({
-      threadId: row.thread_id,
-      seq: Number(row.seq),
-      role: row.role,
-      content: row.content,
-      ...(row.spoken_content ? { spokenContent: row.spoken_content } : {}),
-      createdAtMs: Number(row.created_at_ms),
-    }));
+    return rows.map(toMessageRecord);
   }
 
   async getMaxSeq(threadId: string): Promise<number> {

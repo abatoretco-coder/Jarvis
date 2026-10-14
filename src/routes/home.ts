@@ -70,7 +70,7 @@ const quickActionSchema = z
   .object({
     expectedRevision: revisionSchema,
     name: z.string().trim().min(1).max(60),
-    icon: z.enum(['light', 'climate', 'media', 'vacuum', 'home']),
+    icon: z.enum(['light', 'climate', 'media', 'vacuum', 'home', 'away-night']),
     deviceId: deviceIdSchema,
     action: actionNameSchema,
     value: z.number().finite().min(-10).max(100).optional(),
@@ -88,7 +88,7 @@ const sceneSchema = z
   .object({
     expectedRevision: revisionSchema,
     name: z.string().trim().min(1).max(60),
-    icon: z.enum(['light', 'climate', 'media', 'vacuum', 'home']),
+    icon: z.enum(['light', 'climate', 'media', 'vacuum', 'home', 'away-night']),
     quickActionIds: z.array(deviceIdSchema).min(2).max(20),
     voicePhrases: z.array(z.string().trim().min(2).max(80)).max(5).default([]),
   })
@@ -572,7 +572,6 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     return reply.code(200).send({
       revision: catalog.getRevision(),
       canEdit: canEditHome(request) && catalog.isWritable(),
-      weather: config.weather,
       rooms: config.rooms.map(({ roomId, phases, dimmedPhases }) => ({ roomId, phases, dimmedPhases })),
     });
   });
@@ -607,7 +606,6 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(200).send({
         revision: catalog.getRevision(),
         canEdit: true,
-        weather: config?.weather,
         rooms: config?.rooms.map(({ roomId, phases, dimmedPhases }) => ({ roomId, phases, dimmedPhases })) ?? [],
         room: room ? { roomId: room.roomId, phases: room.phases, dimmedPhases: room.dimmedPhases } : undefined,
       });
@@ -632,7 +630,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       return reply.code(400).send({ error: 'lighting_room_mode_invalid' });
     }
     try {
-      const requestedMode = body.data.mode === 'adaptive' || body.data.mode === 'maximum'
+      const requestedMode = body.data.mode === 'adaptive'
         ? 'on'
         : body.data.mode;
       const result = await adaptiveLightingService.setRoomMode(params.data.roomId, requestedMode);

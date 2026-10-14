@@ -37,6 +37,10 @@ import {
 } from '../conversation/orchestratorRouter';
 import { toSingleParagraphPlainText } from '../conversation/plainText';
 import {
+  MESSAGE_AUDIT_SCHEMA_VERSION,
+  type MessageDecisionMetadata,
+} from '../conversation/repositories/MessageRepository';
+import {
   createConversationDb,
   SqliteMessageRepository,
   SqliteThreadRepository,
@@ -237,6 +241,8 @@ const ingestSchema = z.object({
 const responseSchema = z.object({
   threadId: z.string().min(1),
   responseText: z.string().min(1),
+  displayText: z.string().min(1),
+  spokenText: z.string().min(1),
   usedSummaryVersion: z.string().min(1).optional(),
   sources: z.array(z.string().url()).optional(),
   cultureCandidates: z
@@ -284,6 +290,91 @@ const responseSchema = z.object({
     })
     .optional(),
 });
+
+function responseTextVariants(input: {
+  responseText: string;
+  displayText: string;
+  spokenText: string;
+}): { responseText: string; displayText: string; spokenText: string } {
+  return {
+    responseText: toSingleParagraphPlainText(input.responseText),
+    displayText: input.displayText.trim(),
+    spokenText: toSingleParagraphPlainText(input.spokenText),
+  };
+}
+
+function domainResponseTextVariants(input: {
+  displayText: string;
+  domain: VoiceResponseDomain;
+  mode: VoiceResponseMode;
+  voiceEnabled: boolean;
+}): { responseText: string; displayText: string; spokenText: string } {
+  const spokenText = formatVoiceResponse({
+    text: input.displayText,
+    domain: input.domain,
+    mode: input.mode,
+  });
+  return responseTextVariants({
+    responseText: input.voiceEnabled ? spokenText : input.displayText,
+    displayText: input.displayText,
+    spokenText,
+  });
+}
+
+function toMessageDecisionMetadata(
+  replyMeta: Record<string, unknown>,
+  requestId: string,
+  correlationId?: string
+): MessageDecisionMetadata {
+  const readString = (key: string): string | undefined =>
+    typeof replyMeta[key] === 'string' ? String(replyMeta[key]) : undefined;
+  return {
+    schemaVersion: MESSAGE_AUDIT_SCHEMA_VERSION,
+    requestId,
+    ...(correlationId ? { correlationId } : {}),
+    ...(readString('kind') ? { kind: readString('kind') } : {}),
+    ...(readString('source') ? { source: readString('source') } : {}),
+    ...(readString('routeKey') ? { routeKey: readString('routeKey') } : {}),
+    ...(readString('semanticDecision')
+      ? { semanticDecision: readString('semanticDecision') }
+      : {}),
+    ...(readString('fallbackReason') ? { fallbackReason: readString('fallbackReason') } : {}),
+    ...(readString('proposalId') ? { proposalId: readString('proposalId') } : {}),
+    ...(readString('pendingAction') ? { pendingAction: readString('pendingAction') } : {}),
+    ...(readString('operationStatus')
+      ? { operationStatus: readString('operationStatus') }
+      : {}),
+    ...(readString('llmProvider') ? { llmProvider: readString('llmProvider') } : {}),
+    ...(readString('llmModel') ? { llmModel: readString('llmModel') } : {}),
+    ...(typeof replyMeta['llmLatencyMs'] === 'number'
+      ? { llmLatencyMs: replyMeta['llmLatencyMs'] }
+      : {}),
+    ...(readString('llmFallbackReason')
+      ? { llmFallbackReason: readString('llmFallbackReason') }
+      : {}),
+  };
+}
+
+function ensureResponseTextVariants(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const record = payload as Record<string, unknown>;
+  if (typeof record['responseText'] !== 'string' || !record['responseText'].trim()) return payload;
+  return {
+    ...record,
+    displayText:
+      typeof record['displayText'] === 'string' ? record['displayText'] : record['responseText'],
+    spokenText:
+      typeof record['spokenText'] === 'string' ? record['spokenText'] : record['responseText'],
+  };
+}
+
+function quickActionVoiceOutcome(
+  operationStatus: 'succeeded' | 'accepted' | 'uncertain' | 'partial' | 'failed'
+): 'confirmed' | 'accepted' | 'uncertain' | 'partial' | 'failure' {
+  if (operationStatus === 'succeeded') return 'confirmed';
+  if (operationStatus === 'failed') return 'failure';
+  return operationStatus;
+}
 
 function resultSetBelongsToCultureProfile(
   resultSet: ConversationResultSet | null,
@@ -501,7 +592,7 @@ async function synthesizeWeatherReplyWithOpenAi(params: {
     reasoningEffort: 'low',
   });
   params.log?.info({ model: params.model, content_len: content.length }, 'weather_openai_done');
-  return toSingleParagraphPlainText(content);
+  return content.trim();
 }
 
 async function callGeneralOpenAi(params: {
@@ -534,7 +625,7 @@ async function callGeneralOpenAi(params: {
     timeoutMs: params.timeoutMs,
     reasoningEffort: 'low',
   });
-  return toSingleParagraphPlainText(content);
+  return content.trim();
 }
 
 /**
@@ -701,17 +792,17 @@ function sanitizeSearchAgentContent(raw: string): string {
       return true;
     });
 
-  const compact = filteredLines
-    .join(' ')
+  const formatted = filteredLines
+    .join('\n')
     .replace(
       /(?:^|\s)\((?:source|sources|reference|references|référence|références)\s*:[^)]+\)/giu,
       ' '
     )
     .replace(/\b(?:sources?|references?|références?)\s*:\s*(?:https?:\/\/\S+\s*)+/giu, ' ')
-    .replace(/\s{2,}/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
     .trim();
 
-  return toSingleParagraphPlainText(compact);
+  return formatted;
 }
 
 async function transcribeWithOpenAi(params: {
@@ -1176,6 +1267,10 @@ function findPreparedContextAnswer(
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const runtimeCfg = INGEST_RUNTIME_TUNING_CONFIG;
+
+  app.addHook('preSerialization', async (req, _reply, payload) =>
+    req.routeOptions.url === '/v1/ingest' ? ensureResponseTextVariants(payload) : payload
+  );
 
   app.addContentTypeParser(/^audio\/.+$/u, { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
@@ -2401,12 +2496,27 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           : disambiguationText;
         await conversationService.persistMessages(effectiveThreadId, text, disambiguationText, {
           ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'calendar',
+            source: 'pending_mutation',
+            routeKey: activePendingMutation.routeKey,
+            semanticDecision: 'clarification_required',
+          },
+          requestId,
+          correlationId || undefined
+        ),
         });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const finalProposal = await pendingMutationRepository.findActiveByThread(effectiveThreadId);
         const payload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: disambiguationText,
+            domain: 'calendar',
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           replyMeta: {
             kind: 'calendar',
             source: 'pending_mutation',
@@ -2475,11 +2585,27 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         : mutationText;
       await conversationService.persistMessages(effectiveThreadId, text, mutationText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: activePendingMutation.agent,
+            source: 'pending_mutation',
+            routeKey: activePendingMutation.routeKey,
+            semanticDecision: confirmed ? 'confirmed' : 'cancelled',
+            operationStatus: confirmed ? 'executed' : 'cancelled',
+          },
+          requestId,
+          correlationId || undefined
+        ),
       });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       const payload = {
         threadId: effectiveThreadId,
-        responseText: toSingleParagraphPlainText(responseText),
+        ...domainResponseTextVariants({
+          displayText: mutationText,
+          domain: responseDomain,
+          mode: voiceMode,
+          voiceEnabled,
+        }),
         replyMeta: {
           kind: activePendingMutation.agent,
           source: 'pending_mutation',
@@ -2574,16 +2700,37 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               ? 'failure'
               : result.outcome === 'partial'
                 ? 'partial'
-                : 'success'
+                : result.outcome
           )
         : detailedResponseText;
       await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'home',
+            source: 'scene',
+            routeKey: 'home.scene',
+            semanticDecision: result.outcome,
+            operationStatus: result.outcome,
+          },
+          requestId,
+          correlationId || undefined
+        ),
       });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
         threadId: effectiveThreadId,
-        responseText,
+        ...responseTextVariants({
+          responseText,
+          displayText: detailedResponseText,
+          spokenText: formatQuickActionVoiceResponse(
+            result.outcome === 'failed'
+              ? 'failure'
+              : result.outcome === 'partial'
+                ? 'partial'
+                : result.outcome
+          ),
+        }),
         replyMeta: {
           kind: 'home',
           source: 'scene',
@@ -2617,10 +2764,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             ? "La télé ne s'est pas déclarée prête après la commande d'allumage."
             : "Je n'ai pas pu exécuter cette action. Vérifie l'équipement et sa connexion.";
       const responseText = voiceEnabled
-        ? formatQuickActionVoiceResponse(result.ok ? 'success' : 'failure')
+        ? formatQuickActionVoiceResponse(
+            result.ok ? quickActionVoiceOutcome(result.operationStatus) : 'failure'
+          )
         : detailedResponseText;
       await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'home',
+            source: 'quick_action',
+            routeKey: 'home.quick_action',
+            semanticDecision: result.ok ? result.operationStatus : 'execution_failed',
+            operationStatus: result.ok ? result.operationStatus : 'failed',
+          },
+          requestId,
+          correlationId || undefined
+        ),
       });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       try {
@@ -2650,7 +2810,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
       return reply.code(200).send({
         threadId: effectiveThreadId,
-        responseText,
+        ...responseTextVariants({
+          responseText,
+          displayText: detailedResponseText,
+          spokenText: formatQuickActionVoiceResponse(
+            result.ok ? quickActionVoiceOutcome(result.operationStatus) : 'failure'
+          ),
+        }),
         replyMeta: {
           kind: 'home',
           source: 'quick_action',
@@ -2675,19 +2841,42 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         : roomLightingMode.mode === 'on'
           ? 'allumé'
           : 'éteint';
-      const detailedResponseText = result.operationStatus === 'failed'
-        ? `Je n’ai pas pu régler l’éclairage de ${roomLightingMode.roomName}.`
-        : `${roomLightingMode.roomName} : mode « ${modeLabel} » appliqué.`;
+      const detailedResponseText = result.operationStatus === 'succeeded'
+        ? `${roomLightingMode.roomName} : mode « ${modeLabel} » appliqué.`
+        : result.operationStatus === 'accepted'
+          ? `${roomLightingMode.roomName} : commande du mode « ${modeLabel} » acceptée, sans confirmation des équipements.`
+          : result.operationStatus === 'uncertain'
+            ? `${roomLightingMode.roomName} : commande du mode « ${modeLabel} » envoyée, mais son résultat reste incertain.`
+            : result.operationStatus === 'partial'
+              ? `${roomLightingMode.roomName} : mode « ${modeLabel} » appliqué en partie.`
+              : `Je n’ai pas pu régler l’éclairage de ${roomLightingMode.roomName}.`;
       const responseText = voiceEnabled
-        ? formatQuickActionVoiceResponse(result.operationStatus === 'failed' ? 'failure' : 'success')
+        ? formatQuickActionVoiceResponse(quickActionVoiceOutcome(result.operationStatus))
         : detailedResponseText;
       await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'home',
+            source: 'direct',
+            routeKey: 'home.lighting.room_mode',
+            semanticDecision: result.operationStatus,
+            operationStatus: result.operationStatus,
+          },
+          requestId,
+          correlationId || undefined
+        ),
       });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
         threadId: effectiveThreadId,
-        responseText,
+        ...responseTextVariants({
+          responseText,
+          displayText: detailedResponseText,
+          spokenText: formatQuickActionVoiceResponse(
+            quickActionVoiceOutcome(result.operationStatus)
+          ),
+        }),
         replyMeta: {
           kind: 'home',
           source: 'direct',
@@ -2737,10 +2926,25 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             ? "Ce compte n'est pas autorisé à piloter cet équipement."
             : `Je n'ai pas pu commander ${deterministicHomeAction.name}. Vérifie sa connexion.`;
       const responseText = voiceEnabled
-        ? formatQuickActionVoiceResponse(result.ok ? 'success' : 'failure')
+        ? formatQuickActionVoiceResponse(
+            result.ok ? quickActionVoiceOutcome(result.operationStatus) : 'failure'
+          )
         : detailedResponseText;
       await conversationService.persistMessages(effectiveThreadId, text, detailedResponseText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'home',
+            source: 'deterministic_home_action',
+            routeKey: isTelevisionVolume
+              ? 'home.television.set_volume'
+              : `home.light.${deterministicHomeAction.action}`,
+            semanticDecision: result.ok ? result.operationStatus : 'execution_failed',
+            operationStatus: result.ok ? result.operationStatus : 'failed',
+          },
+          requestId,
+          correlationId || undefined
+        ),
       });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       try {
@@ -2779,7 +2983,13 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       }
       return reply.code(200).send({
         threadId: effectiveThreadId,
-        responseText,
+        ...responseTextVariants({
+          responseText,
+          displayText: detailedResponseText,
+          spokenText: formatQuickActionVoiceResponse(
+            result.ok ? quickActionVoiceOutcome(result.operationStatus) : 'failure'
+          ),
+        }),
         replyMeta: {
           kind: 'home',
           source: 'deterministic_home_action',
@@ -2854,11 +3064,26 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             : answerText;
           await conversationService.persistMessages(effectiveThreadId, text, answerText, {
             ...(voiceEnabled ? { spokenText: responseText } : {}),
+            decisionMetadata: toMessageDecisionMetadata(
+              {
+                kind: preparedContextMatch.voiceDomain,
+                source: 'proactive_context_cache',
+                routeKey: `${preparedContextMatch.domain}.${preparedAnswer.questionKey}`,
+                semanticDecision: 'cache_hit',
+              },
+              requestId,
+              correlationId || undefined
+            ),
           });
           await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
           const payload = {
             threadId: effectiveThreadId,
-            responseText: toSingleParagraphPlainText(responseText),
+            ...domainResponseTextVariants({
+              displayText: answerText,
+              domain: preparedContextMatch.voiceDomain,
+              mode: voiceMode,
+              voiceEnabled,
+            }),
             replyMeta: {
               kind: preparedContextMatch.voiceDomain,
               source: 'proactive_context_cache',
@@ -2906,12 +3131,28 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           : unavailableText;
         await conversationService.persistMessages(effectiveThreadId, text, unavailableText, {
           ...(voiceEnabled ? { spokenText: responseText } : {}),
+          decisionMetadata: toMessageDecisionMetadata(
+            {
+              kind: preparedContextMatch.voiceDomain,
+              source: 'proactive_context_cache',
+              routeKey: `${preparedContextMatch.domain}.unavailable`,
+              semanticDecision: 'fallback',
+              fallbackReason: 'prepared_context_unavailable',
+            },
+            requestId,
+            correlationId || undefined
+          ),
         });
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         recordPerf('ingest', Date.now() - t0);
         const payload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: unavailableText,
+            domain: preparedContextMatch.voiceDomain,
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           replyMeta: {
             kind: preparedContextMatch.voiceDomain,
             source: 'proactive_context_cache',
@@ -2948,7 +3189,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const followupPayload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(followup),
+          ...responseTextVariants({ responseText: followup, displayText: followup, spokenText: followup }),
         };
         const followupValidated = responseSchema.safeParse(followupPayload);
         if (!followupValidated.success) {
@@ -3002,7 +3243,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
         const followupPayload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(refreshedVoice),
+          ...responseTextVariants({
+            responseText: refreshedVoice,
+            displayText: refreshedMailText,
+            spokenText: refreshedVoice,
+          }),
         };
         const followupValidated = responseSchema.safeParse(followupPayload);
         if (!followupValidated.success) {
@@ -3230,12 +3475,33 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
           effectiveThreadId,
           text || `culture.${requestedAction}`,
           culture.text,
-          { ...(voiceEnabled ? { spokenText: responseText } : {}) }
+          {
+            ...(voiceEnabled ? { spokenText: responseText } : {}),
+            decisionMetadata: toMessageDecisionMetadata(
+              {
+                kind: 'culture',
+                source: 'agora',
+                routeKey: `culture.${requestedAction}`,
+                semanticDecision: cultureRefinement
+                  ? 'deterministic_refinement'
+                  : referencedCultureResult
+                    ? 'deterministic_reference'
+                    : 'activated',
+              },
+              requestId,
+              correlationId || undefined
+            ),
+          }
         );
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         return reply.code(200).send({
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: culture.text,
+            domain: 'culture',
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           cultureCandidates: culture.candidates,
           replyMeta: {
             kind: 'culture',
@@ -3293,23 +3559,27 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         env: deps.env,
         log: app.log,
       });
-      const spotifyVoiceText = voiceEnabled
-        ? formatVoiceResponse({
-            text: spotifyResp.tts,
-            domain: 'spotify',
-            mode: voiceMode,
-          })
-        : spotifyResp.tts;
+      const spotifySpokenText = formatVoiceResponse({
+        text: spotifyResp.tts,
+        domain: 'spotify',
+        mode: voiceMode,
+      });
+      const spotifyVoiceText = voiceEnabled ? spotifySpokenText : spotifyResp.tts;
       const persistedUserText = text || `spotify.${explicitSpotifyPayload.data.action}`;
-      void conversationService
-        .persistMessages(effectiveThreadId, persistedUserText, spotifyResp.tts, {
-          ...(voiceEnabled ? { spokenText: spotifyVoiceText } : {}),
-        })
-        .then(async () => {
-          if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-            summarizationService.startPresummarize(effectiveThreadId);
-          }
-        });
+      await conversationService.persistMessages(effectiveThreadId, persistedUserText, spotifyResp.tts, {
+        ...(voiceEnabled ? { spokenText: spotifySpokenText } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'spotify',
+            source: 'spotify_executor',
+            routeKey: `spotify.${explicitSpotifyPayload.data.action}`,
+            semanticDecision: 'explicit_contract',
+            operationStatus: spotifyResp.status,
+          },
+          requestId,
+          correlationId || undefined
+        ),
+      });
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       app.log.info(
         {
@@ -3326,6 +3596,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         buildSpotifyIngestPayload({
           threadId: effectiveThreadId,
           responseText: spotifyVoiceText,
+          displayText: spotifyResp.tts,
+          spokenText: spotifySpokenText,
           spotify: {
             status: spotifyResp.status,
             ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
@@ -3398,7 +3670,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const pushSseResponse = (data: unknown): void => {
       sseSettled = true;
       if (fallbackAckTimer) clearTimeout(fallbackAckTimer);
-      sseStream?.push(`event: response\ndata: ${JSON.stringify(data)}\n\n`);
+      sseStream?.push(`event: response\ndata: ${JSON.stringify(ensureResponseTextVariants(data))}\n\n`);
       sseStream?.push(null);
     };
     sendVoiceIdentityClarificationStream = pushSseResponse;
@@ -3411,6 +3683,32 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             sseStream.push(`event: error\ndata: ${JSON.stringify({ error: 'forbidden' })}\n\n`);
             sseStream.push(null);
           };
+    const persistResponseDurably = async (
+      userText: string,
+      assistantText: string,
+      options: Parameters<ConversationService['persistMessages']>[3] = {}
+    ): Promise<boolean> => {
+      try {
+        await conversationService.persistMessages(
+          effectiveThreadId,
+          userText,
+          assistantText,
+          options
+        );
+        return true;
+      } catch (error) {
+        app.log.error({ threadId: effectiveThreadId, requestId, error }, 'response_audit_failed');
+        if (sseStream !== null) {
+          sseStream.push(
+            `event: error\ndata: ${JSON.stringify({ error: 'response_audit_failed' })}\n\n`
+          );
+          sseStream.push(null);
+        } else {
+          await reply.code(500).send({ error: 'response_audit_failed' });
+        }
+        return false;
+      }
+    };
 
     if (isLocalTimeQuery(assistantInputText)) {
       if (denyUnless('chat')) return reply;
@@ -3418,9 +3716,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: localTimeText, domain: 'general', mode: voiceMode })
         : localTimeText;
-      await conversationService.persistMessages(effectiveThreadId, text, localTimeText, {
+      if (!(await persistResponseDurably(text, localTimeText, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
-      });
+        decisionMetadata: toMessageDecisionMetadata(
+          { kind: 'time', source: 'local_paris_time', semanticDecision: 'direct' },
+          requestId,
+          correlationId || undefined
+        ),
+      }))) return reply;
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
@@ -3434,7 +3737,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       );
       const payload = {
         threadId: effectiveThreadId,
-        responseText: toSingleParagraphPlainText(responseText),
+        ...domainResponseTextVariants({
+          displayText: localTimeText,
+          domain: 'general',
+          mode: voiceMode,
+          voiceEnabled,
+        }),
         replyMeta: {
           kind: 'time',
           source: 'local_paris_time',
@@ -3475,9 +3783,14 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                   mode: voiceMode,
                 })
               : deterministicWeatherText;
-            await conversationService.persistMessages(effectiveThreadId, text, deterministicWeatherText, {
+            if (!(await persistResponseDurably(text, deterministicWeatherText, {
               ...(voiceEnabled ? { spokenText: responseText } : {}),
-            });
+              decisionMetadata: toMessageDecisionMetadata(
+                { kind: 'weather', source: 'local_weather_snapshot', semanticDecision: 'direct' },
+                requestId,
+                correlationId || undefined
+              ),
+            }))) return reply;
             await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
             recordPerf('ingest', Date.now() - t0);
             app.log.info(
@@ -3486,7 +3799,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             );
             const payload = {
               threadId: effectiveThreadId,
-              responseText: toSingleParagraphPlainText(responseText),
+              ...domainResponseTextVariants({
+                displayText: deterministicWeatherText,
+                domain: 'weather',
+                mode: voiceMode,
+                voiceEnabled,
+              }),
               replyMeta: {
                 kind: 'weather',
                 source: 'local_weather_snapshot',
@@ -3513,7 +3831,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const states = toEntityStates(await deps.ha.getStates());
         if (!hasRealSalonLight(states)) {
           const responseText = 'Je ne trouve pas de lumière du salon exposée dans Home Assistant.';
-          await conversationService.persistMessages(effectiveThreadId, text, responseText);
+          if (!(await persistResponseDurably(text, responseText))) return reply;
           await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
           recordPerf('ingest', Date.now() - t0);
           app.log.info(
@@ -3547,7 +3865,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       if (denyUnless('chat')) return reply;
       const responseText =
         'Je n’ai pas encore de journal fiable de ta journée. Je peux te résumer l’agenda, les tâches ou les mails si tu me précises quoi regarder.';
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      if (!(await persistResponseDurably(text, responseText))) return reply;
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
@@ -3597,9 +3915,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const responseText = voiceEnabled
         ? formatVoiceResponse({ text: spotifyResp.tts, domain: 'spotify', mode: voiceMode })
         : spotifyResp.tts;
-      await conversationService.persistMessages(effectiveThreadId, text, spotifyResp.tts, {
+      if (!(await persistResponseDurably(text, spotifyResp.tts, {
         ...(voiceEnabled ? { spokenText: responseText } : {}),
-      });
+        decisionMetadata: toMessageDecisionMetadata(
+          {
+            kind: 'spotify',
+            source: 'spotify_executor',
+            routeKey: `spotify.${simpleSpotifyAction}`,
+            semanticDecision: 'router_direct',
+            operationStatus: spotifyResp.status,
+          },
+          requestId,
+          correlationId || undefined
+        ),
+      }))) return reply;
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       recordPerf('ingest', Date.now() - t0);
       app.log.info(
@@ -3615,6 +3944,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       const payload = buildSpotifyIngestPayload({
         threadId: effectiveThreadId,
         responseText,
+        displayText: spotifyResp.tts,
+        spokenText: responseText,
         spotify: {
           status: spotifyResp.status,
           ...(spotifyResp.data ? { data: spotifyResp.data } : {}),
@@ -3634,7 +3965,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     if (!deps.env.NAS_STATUS_ENABLED && isNasStatusQuery(assistantInputText)) {
       const responseText = 'Le suivi du NAS est désactivé pour le moment.';
-      await conversationService.persistMessages(effectiveThreadId, text, responseText);
+      if (!(await persistResponseDurably(text, responseText))) return reply;
       await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
       return reply.code(200).send({
         threadId: effectiveThreadId,
@@ -3664,13 +3995,23 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             })
           : formatNasStatus(nasStatus, assistantInputText);
         const nasText = formatNasStatus(nasStatus, assistantInputText);
-        await conversationService.persistMessages(effectiveThreadId, text, nasText, {
+        if (!(await persistResponseDurably(text, nasText, {
           ...(voiceEnabled ? { spokenText: responseText } : {}),
-        });
+          decisionMetadata: toMessageDecisionMetadata(
+            { kind: 'nas_status', source: 'nas_status_cache', semanticDecision: 'direct' },
+            requestId,
+            correlationId || undefined
+          ),
+        }))) return reply;
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: nasText,
+            domain: 'general',
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           replyMeta: {
             kind: 'nas_status',
             source: 'nas_status_cache',
@@ -3714,13 +4055,32 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: calendarText, domain: 'calendar', mode: voiceMode })
           : calendarText;
-        await conversationService.persistMessages(effectiveThreadId, text, calendarText, {
+        if (!(await persistResponseDurably(text, calendarText, {
           ...(voiceEnabled ? { spokenText: responseText } : {}),
-        });
+          decisionMetadata: toMessageDecisionMetadata(
+            {
+              kind: 'calendar',
+              source: 'calendar_agent',
+              routeKey,
+              semanticDecision: isCalendarMutationRouteKey(routeKey)
+                ? hasActiveCalendarProposal
+                  ? 'confirmation_required'
+                  : 'clarification_required'
+                : 'direct',
+            },
+            requestId,
+            correlationId || undefined
+          ),
+        }))) return reply;
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: calendarText,
+            domain: 'calendar',
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           replyMeta: {
             kind: 'calendar',
             source: 'calendar_agent',
@@ -3751,13 +4111,29 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         const responseText = voiceEnabled
           ? formatVoiceResponse({ text: fallbackText, domain: 'calendar', mode: voiceMode })
           : fallbackText;
-        await conversationService.persistMessages(effectiveThreadId, text, fallbackText, {
+        if (!(await persistResponseDurably(text, fallbackText, {
           ...(voiceEnabled ? { spokenText: responseText } : {}),
-        });
+          decisionMetadata: toMessageDecisionMetadata(
+            {
+              kind: 'calendar',
+              source: 'calendar_agent',
+              routeKey,
+              semanticDecision: 'failed',
+              fallbackReason: 'calendar_unavailable',
+            },
+            requestId,
+            correlationId || undefined
+          ),
+        }))) return reply;
         await threadRepository.updateResponseTime(effectiveThreadId, Date.now());
         const payload = {
           threadId: effectiveThreadId,
-          responseText: toSingleParagraphPlainText(responseText),
+          ...domainResponseTextVariants({
+            displayText: fallbackText,
+            domain: 'calendar',
+            mode: voiceMode,
+            voiceEnabled,
+          }),
           replyMeta: {
             kind: 'calendar',
             source: 'calendar_agent',
@@ -5374,25 +5750,31 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
               failedTaskCount > 0
                 ? `Résultat partiel : ${failedTaskCount} service spécialisé n'a pas répondu. ${spotifyRes.tts}`
                 : spotifyRes.tts;
-            const spotifyVoiceText = voiceEnabled
-              ? formatVoiceResponse({
-                  text: spotifyText,
-                  domain: 'spotify',
-                  mode: voiceMode,
-                })
-              : spotifyText;
-            void conversationService
-              .persistMessages(effectiveThreadId, text, spotifyText, {
-                ...(voiceEnabled ? { spokenText: spotifyVoiceText } : {}),
-              })
-              .then(async () => {
-                if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-                  summarizationService.startPresummarize(effectiveThreadId);
-                }
-              });
+            const spotifySpokenText = formatVoiceResponse({
+              text: spotifyText,
+              domain: 'spotify',
+              mode: voiceMode,
+            });
+            const spotifyVoiceText = voiceEnabled ? spotifySpokenText : spotifyText;
+            if (!(await persistResponseDurably(text, spotifyText, {
+                ...(voiceEnabled ? { spokenText: spotifySpokenText } : {}),
+                decisionMetadata: toMessageDecisionMetadata(
+                  {
+                    kind: 'spotify',
+                    source: 'spotify_executor',
+                    routeKey: `spotify.${spotifyRes.action}`,
+                    semanticDecision: inferSpotifyRoutingPath(spotifyRes.musicPlanReason),
+                    operationStatus: spotifyRes.spotifyPayload.status,
+                  },
+                  requestId,
+                  correlationId || undefined
+                ),
+              }))) return reply;
             const spotifyOnlyPayload = buildSpotifyIngestPayload({
               threadId: effectiveThreadId,
               responseText: spotifyVoiceText,
+              displayText: spotifyText,
+              spokenText: spotifySpokenText,
               spotify: spotifyRes.spotifyPayload,
               action: spotifyRes.action,
               routingPath: inferSpotifyRoutingPath(spotifyRes.musicPlanReason),
@@ -5541,13 +5923,12 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     }
 
     const assistantTextForClient = sanitizeResponseAttribution(assistantText, responseDomain);
-    const assistantTextVoice = voiceEnabled
-      ? formatVoiceResponse({
-          text: assistantTextForClient,
-          domain: responseDomain,
-          mode: voiceMode,
-        })
-      : assistantTextForClient;
+    const assistantSpokenText = formatVoiceResponse({
+      text: assistantTextForClient,
+      domain: responseDomain,
+      mode: voiceMode,
+    });
+    const assistantTextVoice = voiceEnabled ? assistantSpokenText : assistantTextForClient;
     const shouldPrepareTts = voiceEnabled;
     const shouldInlineVoiceAudio = voiceEnabled && supportsInlineVoiceAudio;
 
@@ -5558,16 +5939,6 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         voiceThreadState.set(effectiveThreadId, { ...existing, ...parsedMail });
       }
     }
-
-    void conversationService
-      .persistMessages(effectiveThreadId, text, assistantTextForClient, {
-        ...(voiceEnabled ? { spokenText: assistantTextVoice } : {}),
-      })
-      .then(async () => {
-        if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
-          summarizationService.startPresummarize(effectiveThreadId);
-        }
-      });
 
     // Pre-warm TTS in background so voice clients can display text immediately
     // while a subsequent /v1/tts call can hit warm cache/in-flight audio.
@@ -5582,52 +5953,57 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       ? await resolveInlineVoiceAudio(toSingleParagraphPlainText(assistantTextVoice))
       : null;
 
+    const replyMeta = {
+      kind: responseDomain,
+      source: semanticActivatedRouteKey
+        ? 'semantic_router'
+        : generalResponseSource
+          ? generalResponseSource
+          : gracefulFallback
+            ? 'ha_general'
+            : 'router_or_specialized',
+      ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
+      semanticDecision:
+        semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
+          ? activeProposalForResponse?.agent === 'calendar' &&
+            activeProposalForResponse.routeKey === semanticActivatedRouteKey &&
+            activeProposalForResponse.action !== 'disambiguate_event'
+            ? 'confirmation_required'
+            : 'clarification_required'
+          : semanticActivatedRouteKey
+            ? 'activated'
+            : routerResult.status === 'rejected'
+              ? 'rejected'
+              : 'not_activated',
+      ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain
+        ? {
+            proposalId: activeProposalForResponse.proposalId,
+            pendingAction: `${activeProposalForResponse.agent}.${activeProposalForResponse.action}`,
+          }
+        : {}),
+      ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
+      ...(routerResult.status === 'fulfilled'
+        ? {
+            llmProvider: routerResult.value.provider,
+            llmModel: routerResult.value.model,
+            llmLatencyMs: routerResult.value.latencyMs,
+            ...(routerResult.value.fallbackReason
+              ? { llmFallbackReason: routerResult.value.fallbackReason }
+              : {}),
+          }
+        : {}),
+    };
     const payload = {
       threadId: effectiveThreadId,
-      responseText: toSingleParagraphPlainText(assistantTextVoice),
+      ...responseTextVariants({
+        responseText: assistantTextVoice,
+        displayText: assistantTextForClient,
+        spokenText: assistantSpokenText,
+      }),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
       ...(searchSources.length > 0 ? { sources: searchSources } : {}),
       ...(voiceAudio ? { voiceAudio } : {}),
-      replyMeta: {
-        kind: responseDomain,
-        source: semanticActivatedRouteKey
-          ? 'semantic_router'
-          : generalResponseSource
-            ? generalResponseSource
-            : gracefulFallback
-              ? 'ha_general'
-              : 'router_or_specialized',
-        ...(semanticActivatedRouteKey ? { routeKey: semanticActivatedRouteKey } : {}),
-        semanticDecision:
-          semanticActivatedRouteKey && isCalendarMutationRouteKey(semanticActivatedRouteKey)
-            ? activeProposalForResponse?.agent === 'calendar' &&
-              activeProposalForResponse.routeKey === semanticActivatedRouteKey &&
-              activeProposalForResponse.action !== 'disambiguate_event'
-              ? 'confirmation_required'
-              : 'clarification_required'
-            : semanticActivatedRouteKey
-              ? 'activated'
-              : routerResult.status === 'rejected'
-                ? 'rejected'
-                : 'not_activated',
-        ...(activeProposalForResponse && activeProposalForResponse.agent === responseDomain
-          ? {
-              proposalId: activeProposalForResponse.proposalId,
-              pendingAction: `${activeProposalForResponse.agent}.${activeProposalForResponse.action}`,
-            }
-          : {}),
-        ...(gracefulFallback ? { fallbackReason: 'general_fallback' } : {}),
-        ...(routerResult.status === 'fulfilled'
-          ? {
-              llmProvider: routerResult.value.provider,
-              llmModel: routerResult.value.model,
-              llmLatencyMs: routerResult.value.latencyMs,
-              ...(routerResult.value.fallbackReason
-                ? { llmFallbackReason: routerResult.value.fallbackReason }
-                : {}),
-            }
-          : {}),
-      },
+      replyMeta,
     };
 
     const validated = responseSchema.safeParse(payload);
@@ -5637,6 +6013,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         return reply;
       }
       return reply.code(500).send({ error: 'response_validation_failed' });
+    }
+
+    if (!(await persistResponseDurably(text, assistantTextForClient, {
+        ...(voiceEnabled ? { spokenText: assistantSpokenText } : {}),
+        rawText: assistantText,
+        ...(searchSources.length > 0 ? { sources: searchSources } : {}),
+        decisionMetadata: toMessageDecisionMetadata(
+          replyMeta,
+          requestId,
+          correlationId || undefined
+        ),
+      }))) return reply;
+    if (await summarizationService.shouldPresummarize(effectiveThreadId)) {
+      summarizationService.startPresummarize(effectiveThreadId);
     }
 
     // Mettre à jour le temps de réponse pour activer la fenêtre de conversation (10s)
@@ -5928,6 +6318,11 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         seq: item.seq,
         role: item.role,
         text: item.content,
+        ...(item.spokenContent ? { spokenText: item.spokenContent } : {}),
+        ...(item.rawContent ? { rawText: item.rawContent } : {}),
+        ...(item.sources?.length ? { sources: item.sources } : {}),
+        ...(item.sourceDetails?.length ? { sourceDetails: item.sourceDetails } : {}),
+        ...(item.decisionMetadata ? { decision: item.decisionMetadata } : {}),
         createdAt: new Date(item.createdAtMs).toISOString(),
       })),
     });

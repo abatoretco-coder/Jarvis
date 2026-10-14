@@ -85,7 +85,7 @@ describe('Philips Hue lighting integration', () => {
     ]));
   });
 
-  test('configures bounded weather and solar profiles for every installed Hue room', () => {
+  test('configures bounded adaptive profiles for every installed Hue room', () => {
     const catalog = new HomeCatalog(
       join(process.cwd(), 'config', 'homes'),
       'home_fr_paris_10_fsm_236_lot_204'
@@ -93,18 +93,13 @@ describe('Philips Hue lighting integration', () => {
 
     expect(catalog.getAdaptiveLightingConfig()).toMatchObject({
       enabled: true,
-      sunEntityId: 'sun.sun',
-      weatherEntityId: 'weather.forecast_maison',
       pollSeconds: 30,
       manualOverrideMinutes: 120,
-      weather: {
-        maxBrightnessAdjustment: 8,
-        maxColorTemperatureAdjustmentKelvin: 0,
-      },
       rooms: expect.arrayContaining([
         expect.objectContaining({
           roomId: 'room_living',
           deviceIds: ['hue-living-ceiling-1', 'hue-living-ceiling-2', 'tapo-plug-1', 'tapo-plug-2'],
+          dimmedOffDeviceIds: ['tapo-plug-2'],
           phases: {
             dawn: { brightnessPercent: 75, colorTemperatureKelvin: 3500 },
             day: { brightnessPercent: 90, colorTemperatureKelvin: 3800 },
