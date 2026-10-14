@@ -16,6 +16,7 @@ import { cleanMailDetailText } from '../mail/mailContentCleaner';
 import { type MailQualification,qualifyMail } from '../mail/mailQualification';
 import type { AppDeps } from '../server';
 import { getParisStartOfDayUtc } from '../time/parisTime';
+import { getMicrosoftTodoAccessToken } from '../todo/todoAgent';
 
 export type DashboardSection = {
   title: string;
@@ -68,13 +69,6 @@ type DashboardMailItem = {
   receivedAt: number;
   snippet?: string;
   qualification?: MailQualification;
-};
-
-type MicrosoftAccessTokenEnv = {
-  MICROSOFT_TENANT_ID?: string;
-  MICROSOFT_CLIENT_ID?: string;
-  MICROSOFT_CLIENT_SECRET?: string;
-  MICROSOFT_REFRESH_TOKEN?: string;
 };
 
 type MsTaskList = {
@@ -340,38 +334,6 @@ export async function buildAgendaFromGoogle(
   };
 }
 
-async function refreshMicrosoftAccessToken(env: MicrosoftAccessTokenEnv, scope: string): Promise<string> {
-  if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
-    throw new Error('microsoft_credentials_missing');
-  }
-
-  const tenantId = env.MICROSOFT_TENANT_ID?.trim() || 'common';
-  const response = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.MICROSOFT_CLIENT_ID,
-      client_secret: env.MICROSOFT_CLIENT_SECRET,
-      refresh_token: env.MICROSOFT_REFRESH_TOKEN,
-      grant_type: 'refresh_token',
-      scope,
-    }),
-    signal: AbortSignal.timeout(8_000),
-  });
-
-  if (!response.ok) {
-    const rawBody = await response.text().catch(() => '');
-    throw new Error(`microsoft_token_refresh_failed:${response.status}:${rawBody.slice(0, 200)}`);
-  }
-
-  const payload = await response.json() as { access_token?: string };
-  if (!payload.access_token) {
-    throw new Error('microsoft_token_refresh_no_token');
-  }
-
-  return payload.access_token;
-}
-
 async function refreshGoogleAccessToken(account: MailAccount, env: AppDeps['env']): Promise<string> {
   const credentials = await resolveGoogleCredentials({
     GOOGLE_CLIENT_ID: account.clientId,
@@ -485,7 +447,7 @@ async function fetchMicrosoftTodoLists(env: AppDeps['env']): Promise<{ token: st
     throw new Error('microsoft_todo_not_configured');
   }
 
-  const token = await refreshMicrosoftAccessToken(env, 'Tasks.ReadWrite offline_access');
+  const token = await getMicrosoftTodoAccessToken(env);
   const listsPayload = await graphGet<{ value?: MsTaskList[] }>('/me/todo/lists?$top=50', token);
   return { token, lists: listsPayload.value ?? [] };
 }
@@ -1557,7 +1519,7 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
       }
       const status = statusInput;
 
-      const token = await refreshMicrosoftAccessToken(deps.env, 'Tasks.ReadWrite offline_access');
+      const token = await getMicrosoftTodoAccessToken(deps.env);
       let patched = false;
       for (const listId of candidateListIds) {
         try {

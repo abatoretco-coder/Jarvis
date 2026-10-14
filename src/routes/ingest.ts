@@ -1863,6 +1863,20 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         ? async (next: string) =>
             deps.integrations?.rotateRefreshToken(ownerUserId, 'microsoft-todo', next, connectionId)
         : undefined,
+      onConnectionError: ownerUserId
+        ? async (code: string, terminal: boolean) =>
+            deps.integrations?.markConnectionError(
+              ownerUserId,
+              'microsoft-todo',
+              code,
+              terminal,
+              connectionId
+            )
+        : undefined,
+      onConnectionHealthy: ownerUserId
+        ? async () =>
+            deps.integrations?.markConnectionHealthy(ownerUserId, 'microsoft-todo', connectionId)
+        : undefined,
       OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
       OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
       OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
@@ -4432,18 +4446,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
                               callTodoAgent: async () => {
                                 return callTodoAgent(
                                   assistantInputText,
-                                  {
-                                    MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
-                                    MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
-                                    MICROSOFT_REFRESH_TOKEN: deps.env.MICROSOFT_REFRESH_TOKEN,
-                                    MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
-                                    OAUTH_REFRESH_TOKEN_STORE_PATH:
-                                      deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                                    OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-                                    OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-                                    OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-                                    OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-                                  },
+                                  buildTodoEnv(),
                                   app.log
                                 );
                               },
@@ -5173,17 +5176,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
             tasks.push(
               callTodoAgent(
                 assistantInputText,
-                {
-                  MICROSOFT_CLIENT_ID: deps.env.MICROSOFT_CLIENT_ID,
-                  MICROSOFT_CLIENT_SECRET: deps.env.MICROSOFT_CLIENT_SECRET,
-                  MICROSOFT_REFRESH_TOKEN: deps.env.MICROSOFT_REFRESH_TOKEN,
-                  MICROSOFT_TENANT_ID: deps.env.MICROSOFT_TENANT_ID,
-                  OAUTH_REFRESH_TOKEN_STORE_PATH: deps.env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-                  OPENAI_API_KEY: deps.env.OPENAI_API_KEY,
-                  OPENAI_BASE_URL: deps.env.OPENAI_BASE_URL,
-                  OPENAI_TIMEOUT_MS: deps.env.OPENAI_TIMEOUT_MS,
-                  OPENAI_MODEL_SUMMARY: deps.env.OPENAI_MODEL_SUMMARY,
-                },
+                buildTodoEnv(),
                 app.log
               )
                 .then((txt): SpecializedResult | null => {

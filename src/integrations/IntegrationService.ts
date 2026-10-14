@@ -191,6 +191,25 @@ export class IntegrationService {
     const selected = this.repository.getCredentialForUser({ userId, provider, connectionId });
     if (!selected) throw new Error('integration_credential_not_found');
     this.repository.updateCredential(selected.credentialId, this.vault.encrypt(token, selected.credentialId), userId);
+    this.repository.markRuntimeHealthy(selected.connection.connectionId);
+  }
+
+  markConnectionError(
+    userId: string,
+    provider: string,
+    code: string,
+    terminal: boolean,
+    connectionId?: string
+  ): void {
+    const selected = this.repository.getCredentialForUser({ userId, provider, connectionId });
+    if (!selected) return;
+    this.repository.markRuntimeError(selected.connection.connectionId, code, terminal);
+  }
+
+  markConnectionHealthy(userId: string, provider: string, connectionId?: string): void {
+    const selected = this.repository.getCredentialForUser({ userId, provider, connectionId });
+    if (!selected) return;
+    this.repository.markRuntimeHealthy(selected.connection.connectionId);
   }
 
   async revoke(principal: UserPrincipal, connectionId: string): Promise<boolean> {

@@ -4,10 +4,12 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, jest, test } from '@jest/globals';
 
+import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
 import type { HomeAssistantClient } from '../src/haClient';
 import { resolveAdaptiveLightingTarget, resolveLightingPhase } from '../src/home/AdaptiveLightingPolicy';
 import { HomeAdaptiveLightingService } from '../src/home/HomeAdaptiveLightingService';
 import { type AdaptiveLightingRoomConfig, HomeCatalog } from '../src/home/HomeCatalog';
+import { HomeRuntimeStateRepository } from '../src/home/HomeRuntimeStateRepository';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -268,5 +270,78 @@ describe('room lighting modes', () => {
     callService.mockClear();
     await service.tick(new Date(noon.getTime() + 120_000));
     expect(callService).not.toHaveBeenCalled();
+  });
+
+  test('restores a persisted room intent only when a bulb reconnects after restart', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const states = [
+      { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
+      lightState(),
+    ];
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const ha = {
+      getStates: jest.fn(async () => states),
+      getState: jest.fn(async () => states[1]),
+      callService,
+    } as unknown as HomeAssistantClient;
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+    await new HomeAdaptiveLightingService(
+      fixture(), ha, { info: jest.fn(), warn: jest.fn() }, stateRepository
+    ).setRoomMode('living', 'dimmed', noon);
+
+    const restarted = new HomeAdaptiveLightingService(
+      fixture(), ha, { info: jest.fn(), warn: jest.fn() }, stateRepository
+    );
+    callService.mockClear();
+    await restarted.tick(new Date(noon.getTime() + 1_000));
+    expect(callService).not.toHaveBeenCalled();
+    states[1] = lightState('unavailable');
+    await restarted.tick(new Date(noon.getTime() + 31_000));
+    states[1] = lightState('on', 255, 4_000);
+    await restarted.tick(new Date(noon.getTime() + 62_000));
+
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'turn_on',
+      serviceData: expect.objectContaining({ brightness_pct: 20, color_temp_kelvin: 2_800 }),
+    }));
+    states[1] = lightState('on', 51, 2_800);
+    await restarted.tick(new Date(noon.getTime() + 90_000));
+    await restarted.tick(new Date(noon.getTime() + 130_000));
+    expect(stateRepository.listLightingIntents()).toEqual([
+      expect.objectContaining({ roomId: 'living', mode: 'dimmed' }),
+    ]);
+    db.close();
+  });
+
+  test('releases the persisted room intent after a manual Home Assistant change', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const states = [
+      { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
+      lightState(),
+    ];
+    const callService = jest.fn(async () => ({ status: 200, data: [] }));
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async () => states[1]),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+    await service.setRoomMode('living', 'dimmed', noon);
+    states[1] = lightState('on', 51, 2_800);
+    await service.tick(new Date(noon.getTime() + 30_000));
+    states[1] = lightState('on', 200, 4_000);
+    callService.mockClear();
+    await service.tick(new Date(noon.getTime() + 90_000));
+
+    expect(callService).not.toHaveBeenCalled();
+    expect(stateRepository.listLightingIntents()).toEqual([]);
+    db.close();
   });
 });

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 13;
+export const CONVERSATION_SCHEMA_VERSION = 14;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -28,6 +28,52 @@ const SPOKEN_RESPONSE_AUDIT_CHECKSUM =
   'sha256:fd1cbb4d9f93304a565ba347d3b9d7a3e9af6a177e83c586ebdfc3b6bd06d0c7';
 const MUTATION_IDEMPOTENCY_CHECKSUM =
   'sha256:27a69258706ff7a2730f120f30abf92046eaa9fe0f89e99c414e9052edc78f85';
+const DURABLE_HOME_AND_RECURRENCE_CHECKSUM =
+  'sha256:3b63fd8c772ddd3eadc6cf3b55aa6af2264d4728931240f51c82d6b60a7f0ea8';
+
+function ensureDurableHomeAndRecurrenceSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS home_lighting_intents (
+      room_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL CHECK (mode IN ('on','dimmed','off')),
+      target_json TEXT,
+      updated_at_ms INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS home_automation_suspensions (
+      operation_id TEXT NOT NULL,
+      automation_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      scene_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending','suspended','restored','skipped','failed')),
+      error_code TEXT,
+      suspended_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(operation_id,automation_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_home_automation_suspensions_recovery
+      ON home_automation_suspensions(state,updated_at_ms);
+
+    CREATE TABLE IF NOT EXISTS daily_life_item_occurrences (
+      occurrence_id TEXT PRIMARY KEY,
+      item_id TEXT NOT NULL,
+      list_id TEXT NOT NULL,
+      item_version INTEGER NOT NULL,
+      due_at_ms INTEGER,
+      completed_at_ms INTEGER NOT NULL,
+      completed_by_user_id TEXT NOT NULL,
+      assigned_to_user_id TEXT,
+      title TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      UNIQUE(item_id,item_version),
+      FOREIGN KEY(list_id) REFERENCES daily_life_lists(list_id) ON DELETE CASCADE,
+      FOREIGN KEY(completed_by_user_id) REFERENCES users(user_id) ON DELETE RESTRICT,
+      FOREIGN KEY(assigned_to_user_id) REFERENCES users(user_id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_daily_life_occurrences_item_completed
+      ON daily_life_item_occurrences(item_id,completed_at_ms DESC);
+  `);
+}
 
 function ensureMutationIdempotencySchema(db: Database.Database): void {
   db.exec(`
@@ -836,6 +882,8 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:12');
   if (applied.get(13) && applied.get(13) !== MUTATION_IDEMPOTENCY_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:13');
+  if (applied.get(14) && applied.get(14) !== DURABLE_HOME_AND_RECURRENCE_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:14');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -914,6 +962,12 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (13, ?, ?, ?)'
       ).run('durable_mutation_idempotency', MUTATION_IDEMPOTENCY_CHECKSUM, Date.now());
+    }
+    ensureDurableHomeAndRecurrenceSchema(db);
+    if (!applied.has(14)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (14, ?, ?, ?)'
+      ).run('durable_home_and_recurrence_state', DURABLE_HOME_AND_RECURRENCE_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();

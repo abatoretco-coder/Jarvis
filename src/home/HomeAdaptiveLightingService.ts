@@ -6,6 +6,7 @@ import type { AdaptiveLightingTarget } from './AdaptiveLightingPolicy';
 import { resolveAdaptiveLightingTarget } from './AdaptiveLightingPolicy';
 import { executeCatalogHomeAction, executeCatalogLightProfile } from './HomeActionExecutor';
 import type { AdaptiveLightingRoomConfig, HomeActionName, HomeCatalog } from './HomeCatalog';
+import type { HomeRuntimeStateRepository } from './HomeRuntimeStateRepository';
 
 export type HomeLightingRoomMode = 'on' | 'dimmed' | 'off';
 export type HomeLightingRoomObservedMode = HomeLightingRoomMode | 'manual' | 'mixed';
@@ -33,6 +34,7 @@ type ObservedLight = {
 type DesiredRoom = {
   mode: HomeLightingRoomMode;
   target?: AdaptiveLightingTarget;
+  updatedAtMs?: number;
 };
 
 function finiteNumber(value: unknown): number | undefined {
@@ -64,6 +66,15 @@ function matchesTarget(current: ObservedLight, target: AdaptiveLightingTarget): 
       || Math.abs(current.colorTemperatureKelvin - target.colorTemperatureKelvin) <= 150);
 }
 
+function observedFingerprint(current: ObservedLight): string {
+  return JSON.stringify({
+    state: current.state,
+    brightnessPercent: current.brightnessPercent ?? null,
+    colorTemperatureKelvin: current.colorTemperatureKelvin ?? null,
+    colorMode: current.colorMode ?? null,
+  });
+}
+
 function mutationStatus(
   results: Array<Awaited<ReturnType<typeof executeCatalogHomeAction>>>
 ): HomeLightingRoomMutation['operationStatus'] {
@@ -80,12 +91,22 @@ export class HomeAdaptiveLightingService {
   private readonly desiredRooms = new Map<string, DesiredRoom>();
   private readonly lastObservedStates = new Map<string, string>();
   private readonly pendingUntil = new Map<string, number>();
+  private readonly commandGraceUntil = new Map<string, number>();
 
   constructor(
     private readonly catalog: HomeCatalog,
     private readonly ha: HomeAssistantClient,
-    private readonly log: Pick<FastifyBaseLogger, 'info' | 'warn'>
-  ) {}
+    private readonly log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+    private readonly stateRepository?: HomeRuntimeStateRepository
+  ) {
+    for (const intent of this.stateRepository?.listLightingIntents() ?? []) {
+      this.desiredRooms.set(intent.roomId, {
+        mode: intent.mode,
+        ...(intent.target ? { target: intent.target } : {}),
+        updatedAtMs: intent.updatedAtMs,
+      });
+    }
+  }
 
   start(): void {
     const config = this.catalog.getAdaptiveLightingConfig();
@@ -159,6 +180,8 @@ export class HomeAdaptiveLightingService {
       // overwritten by the previously selected room-wide mode.
       this.desiredRooms.delete(room.roomId);
       this.pendingUntil.delete(room.roomId);
+      this.commandGraceUntil.delete(room.roomId);
+      this.stateRepository?.deleteLightingIntent(room.roomId);
     }
   }
 
@@ -250,8 +273,8 @@ export class HomeAdaptiveLightingService {
     );
     for (const deviceId of deviceIds) {
       const entityId = this.catalog.getMapping(deviceId)?.entityId;
-      const state = entityId ? states.get(entityId)?.state : undefined;
-      if (state) this.lastObservedStates.set(deviceId, state);
+      const current = entityId ? observedLight(states.get(entityId)) : undefined;
+      if (current) this.lastObservedStates.set(deviceId, observedFingerprint(current));
     }
     const target = mode === 'off' ? undefined : this.target(room, mode, states.get(config.weatherEntityId), now);
     const results = await Promise.all(deviceIds.map((deviceId) => mode === 'off'
@@ -265,7 +288,12 @@ export class HomeAdaptiveLightingService {
     const failedDeviceIds = deviceIds.filter((_, index) => !results[index]?.ok);
     const operationStatus = mutationStatus(results);
     if (operationStatus !== 'failed') {
-      this.desiredRooms.set(roomId, { mode, ...(target ? { target } : {}) });
+      this.desiredRooms.set(roomId, { mode, ...(target ? { target } : {}), updatedAtMs: now.getTime() });
+      this.stateRepository?.saveLightingIntent({ roomId, mode, ...(target ? { target } : {}) }, now.getTime());
+      this.commandGraceUntil.set(
+        roomId,
+        now.getTime() + (config.transitionSeconds + config.pollSeconds + 10) * 1_000
+      );
       if (operationStatus === 'accepted' || operationStatus === 'uncertain') {
         this.pendingUntil.set(roomId, now.getTime() + (config.transitionSeconds + config.pollSeconds + 10) * 1_000);
       } else {
@@ -287,6 +315,24 @@ export class HomeAdaptiveLightingService {
   private async runTick(now: Date): Promise<void> {
     const config = this.catalog.getAdaptiveLightingConfig();
     if (!config?.enabled) return;
+    if (this.stateRepository) {
+      const persisted = new Map(
+        this.stateRepository.listLightingIntents().map((intent) => [intent.roomId, intent] as const)
+      );
+      for (const roomId of this.desiredRooms.keys()) {
+        if (!persisted.has(roomId)) this.desiredRooms.delete(roomId);
+      }
+      for (const intent of persisted.values()) {
+        this.desiredRooms.set(intent.roomId, {
+          mode: intent.mode,
+          ...(intent.target ? { target: intent.target } : {}),
+          updatedAtMs: intent.updatedAtMs,
+        });
+        const graceUntil = intent.updatedAtMs
+          + (config.transitionSeconds + config.pollSeconds + 10) * 1_000;
+        if (graceUntil > now.getTime()) this.commandGraceUntil.set(intent.roomId, graceUntil);
+      }
+    }
     let rawStates: unknown;
     try {
       rawStates = await this.ha.getStates();
@@ -304,18 +350,39 @@ export class HomeAdaptiveLightingService {
     );
 
     for (const room of config.rooms) {
-      const desired = this.desiredRooms.get(room.roomId);
+      let desired = this.desiredRooms.get(room.roomId);
       for (const deviceId of this.roomDeviceIds(room)) {
         const entityId = this.catalog.getMapping(deviceId)?.entityId;
         const current = entityId ? observedLight(states.get(entityId)) : undefined;
         if (!current) continue;
-        const previousState = this.lastObservedStates.get(deviceId);
-        this.lastObservedStates.set(deviceId, current.state);
+        const previousFingerprint = this.lastObservedStates.get(deviceId);
+        const currentFingerprint = observedFingerprint(current);
+        this.lastObservedStates.set(deviceId, currentFingerprint);
         if (!desired || ['unavailable', 'unknown'].includes(current.state)) continue;
         if ((this.pendingUntil.get(room.roomId) ?? 0) > now.getTime()) continue;
+        if ((this.commandGraceUntil.get(room.roomId) ?? 0) > now.getTime()) continue;
 
-        const shouldRestoreOff = desired.mode === 'off' && current.state === 'on';
+        const previousState = previousFingerprint
+          ? (JSON.parse(previousFingerprint) as { state?: string }).state
+          : undefined;
         const reconnected = ['unavailable', 'unknown'].includes(previousState ?? '') && current.state === 'on';
+        const manuallyChanged = previousFingerprint !== undefined
+          && previousFingerprint !== currentFingerprint
+          && !reconnected;
+        if (manuallyChanged) {
+          this.desiredRooms.delete(room.roomId);
+          this.pendingUntil.delete(room.roomId);
+          this.commandGraceUntil.delete(room.roomId);
+          this.stateRepository?.deleteLightingIntent(room.roomId);
+          this.log.info(
+            { deviceId, roomId: room.roomId, previousMode: desired.mode },
+            'room lighting intent released after manual change'
+          );
+          desired = undefined;
+          continue;
+        }
+
+        const shouldRestoreOff = desired.mode === 'off' && reconnected;
         const shouldRestoreProfile = desired.mode !== 'off' && desired.target && reconnected
           && !matchesTarget(current, desired.target);
         if (!shouldRestoreOff && !shouldRestoreProfile) continue;
@@ -334,6 +401,10 @@ export class HomeAdaptiveLightingService {
             'room lighting mode reconciliation failed'
           );
         } else {
+          this.commandGraceUntil.set(
+            room.roomId,
+            now.getTime() + (config.transitionSeconds + config.pollSeconds + 10) * 1_000
+          );
           this.log.info(
             { deviceId, roomId: room.roomId, mode: desired.mode },
             'room lighting mode restored after device reconnect'

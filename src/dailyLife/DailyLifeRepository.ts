@@ -46,6 +46,17 @@ export type DailyLifeList = {
   updatedAtMs: number;
 };
 
+export type DailyLifeOccurrence = {
+  occurrenceId: string;
+  itemId: string;
+  itemVersion: number;
+  dueAtMs: number | null;
+  completedAtMs: number;
+  completedByUserId: string;
+  assignedToUserId: string | null;
+  title: string;
+};
+
 type ItemRow = {
   item_id: string; list_id: string; title: string; details: string;
   quantity: string | null; category: string | null; due_at_ms: number | null;
@@ -83,20 +94,97 @@ function itemFromRow(row: ItemRow): DailyLifeItem {
   };
 }
 
-function nextOccurrence(fromMs: number, unit: DailyLifeRecurrenceUnit, interval: number): number | null {
+type ParisDateParts = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+};
+
+const parisFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Europe/Paris',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+function parisParts(value: number): ParisDateParts {
+  const parts = Object.fromEntries(
+    parisFormatter.formatToParts(new Date(value)).map((part) => [part.type, part.value])
+  );
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
+function civilValue(parts: ParisDateParts): number {
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+}
+
+function parisInstant(parts: ParisDateParts): number {
+  const targetCivil = civilValue(parts);
+  let firstAfterGap: { instant: number; civil: number } | undefined;
+  for (let instant = targetCivil - (4 * 3_600_000); instant <= targetCivil + (4 * 3_600_000); instant += 60_000) {
+    const observed = parisParts(instant);
+    const observedCivil = civilValue(observed);
+    if (observedCivil === targetCivil) return instant;
+    if (
+      observed.year === parts.year
+      && observed.month === parts.month
+      && observed.day === parts.day
+      && observedCivil > targetCivil
+      && (!firstAfterGap || observedCivil < firstAfterGap.civil)
+    ) firstAfterGap = { instant, civil: observedCivil };
+  }
+  return firstAfterGap?.instant ?? targetCivil;
+}
+
+function nextOccurrence(
+  fromMs: number,
+  unit: DailyLifeRecurrenceUnit,
+  interval: number,
+  anchorMs = fromMs
+): number | null {
   if (unit === 'none') return null;
-  const date = new Date(fromMs);
+  const current = parisParts(fromMs);
+  const anchor = parisParts(anchorMs);
+  const date = new Date(Date.UTC(
+    current.year,
+    current.month - 1,
+    current.day,
+    anchor.hour,
+    anchor.minute,
+    anchor.second
+  ));
   if (unit === 'day') date.setUTCDate(date.getUTCDate() + interval);
   else if (unit === 'week') date.setUTCDate(date.getUTCDate() + (7 * interval));
   else {
-    const day = date.getUTCDate();
+    const day = anchor.day;
     date.setUTCDate(1);
     const months = unit === 'quarter' ? interval * 3 : unit === 'year' ? interval * 12 : interval;
     date.setUTCMonth(date.getUTCMonth() + months);
     const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
     date.setUTCDate(Math.min(day, lastDay));
   }
-  return date.getTime();
+  return parisInstant({
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+    hour: date.getUTCHours(),
+    minute: date.getUTCMinutes(),
+    second: date.getUTCSeconds(),
+  });
 }
 
 export class DailyLifeRepository {
@@ -139,22 +227,20 @@ export class DailyLifeRepository {
     insert.run(randomUUID(), householdId, 'todo', 'À faire', 0, userId, now, now);
   }
 
-  private reactivateDue(householdId: string, now: number): void {
-    this.db.prepare(
+  processDueRecurrences(now = Date.now()): number {
+    return this.db.prepare(
       `UPDATE daily_life_items
        SET completed_at_ms=NULL, due_at_ms=next_occurrence_at_ms, next_occurrence_at_ms=NULL,
            version=version+1, updated_at_ms=?
-       WHERE next_occurrence_at_ms IS NOT NULL AND next_occurrence_at_ms<=?
-         AND list_id IN (SELECT list_id FROM daily_life_lists WHERE household_id=?)`
-    ).run(now, now, householdId);
+       WHERE completed_at_ms IS NOT NULL
+         AND next_occurrence_at_ms IS NOT NULL AND next_occurrence_at_ms<=?
+         AND list_id IN (SELECT list_id FROM daily_life_lists WHERE archived_at_ms IS NULL)`
+    ).run(now, now).changes;
   }
 
   snapshot(userId: string, now = Date.now()): { householdId: string; members: DailyLifeMember[]; lists: DailyLifeList[] } {
     const householdId = this.householdId(userId);
-    this.db.transaction(() => {
-      this.seedDefaults(userId, householdId, now);
-      this.reactivateDue(householdId, now);
-    })();
+    this.seedDefaults(userId, householdId, now);
     const rows = this.db.prepare(
       `SELECT list_id listId,kind,name,position,created_at_ms createdAtMs,updated_at_ms updatedAtMs
        FROM daily_life_lists WHERE household_id=? AND archived_at_ms IS NULL
@@ -303,36 +389,43 @@ export class DailyLifeRepository {
     recurrenceAnchorAtMs?: number | null; assignedToUserId?: string | null;
     completed?: boolean;
   }, now = Date.now()): DailyLifeItem {
-    const row = this.db.prepare(
+    return this.db.transaction(() => {
+      const row = this.db.prepare(
       `SELECT i.* FROM daily_life_items i JOIN daily_life_lists l ON l.list_id=i.list_id
        JOIN household_memberships hm ON hm.household_id=l.household_id
        WHERE i.item_id=? AND hm.user_id=? AND hm.status='active' AND l.archived_at_ms IS NULL`
-    ).get(itemId, userId) as ItemRow | undefined;
-    if (!row) throw new Error('daily_life_item_not_found');
-    if (row.version !== expectedVersion) throw new Error('daily_life_version_conflict');
+      ).get(itemId, userId) as ItemRow | undefined;
+      if (!row) throw new Error('daily_life_item_not_found');
+      if (row.version !== expectedVersion) throw new Error('daily_life_version_conflict');
 
-    const householdId = this.householdId(userId);
-    this.assertAssignee(householdId, input.assignedToUserId === undefined ? row.assigned_to_user_id : input.assignedToUserId);
-    const recurrenceUnit = input.recurrenceUnit ?? row.recurrence_unit;
-    const interval = input.recurrenceInterval ?? row.recurrence_every;
-    const anchorAt = input.recurrenceAnchorAtMs === undefined ? row.recurrence_anchor_at_ms : input.recurrenceAnchorAtMs;
-    const dueAt = input.dueAtMs === undefined ? row.due_at_ms : input.dueAtMs;
-    let completedAt = row.completed_at_ms;
-    let nextAt = row.next_occurrence_at_ms;
-    if (input.completed === true && completedAt === null) {
-      completedAt = now;
-      nextAt = nextOccurrence(dueAt ?? anchorAt ?? now, recurrenceUnit, interval);
-    } else if (input.completed === false) {
-      completedAt = null;
-      nextAt = null;
-    }
-    const result = this.db.prepare(
+      const householdId = this.householdId(userId);
+      this.assertAssignee(householdId, input.assignedToUserId === undefined ? row.assigned_to_user_id : input.assignedToUserId);
+      const recurrenceUnit = input.recurrenceUnit ?? row.recurrence_unit;
+      const interval = input.recurrenceInterval ?? row.recurrence_every;
+      const anchorAt = input.recurrenceAnchorAtMs === undefined ? row.recurrence_anchor_at_ms : input.recurrenceAnchorAtMs;
+      const dueAt = input.dueAtMs === undefined ? row.due_at_ms : input.dueAtMs;
+      let completedAt = row.completed_at_ms;
+      let nextAt = row.next_occurrence_at_ms;
+      const recordOccurrence = input.completed === true && completedAt === null;
+      if (recordOccurrence) {
+        completedAt = now;
+        nextAt = nextOccurrence(
+          dueAt ?? anchorAt ?? now,
+          recurrenceUnit,
+          interval,
+          anchorAt ?? dueAt ?? now
+        );
+      } else if (input.completed === false) {
+        completedAt = null;
+        nextAt = null;
+      }
+      const result = this.db.prepare(
       `UPDATE daily_life_items SET
         title=?,details=?,quantity=?,category=?,due_at_ms=?,recurrence=?,recurrence_interval=?,recurrence_every=?,
         recurrence_unit=?,recurrence_anchor_at_ms=?,assigned_to_user_id=?,
         completed_at_ms=?,next_occurrence_at_ms=?,updated_by_user_id=?,updated_at_ms=?,version=version+1
        WHERE item_id=? AND version=?`
-    ).run(
+      ).run(
       input.title ?? row.title, input.details ?? row.details,
       input.quantity === undefined ? row.quantity : input.quantity,
       input.category === undefined ? row.category : input.category,
@@ -340,9 +433,35 @@ export class DailyLifeRepository {
       recurrenceUnit, anchorAt,
       input.assignedToUserId === undefined ? row.assigned_to_user_id : input.assignedToUserId,
       completedAt, nextAt, userId, now, itemId, expectedVersion,
-    );
-    if (result.changes !== 1) throw new Error('daily_life_version_conflict');
-    return this.readItem(itemId);
+      );
+      if (result.changes !== 1) throw new Error('daily_life_version_conflict');
+      if (recordOccurrence) {
+        this.db.prepare(
+          `INSERT INTO daily_life_item_occurrences(
+             occurrence_id,item_id,list_id,item_version,due_at_ms,completed_at_ms,completed_by_user_id,
+             assigned_to_user_id,title,created_at_ms
+           ) VALUES (?,?,?,?,?,?,?,?,?,?)`
+        ).run(
+          randomUUID(), itemId, row.list_id, row.version, dueAt, now, userId,
+          input.assignedToUserId === undefined ? row.assigned_to_user_id : input.assignedToUserId,
+          input.title ?? row.title, now
+        );
+      }
+      return this.readItem(itemId);
+    })();
+  }
+
+  listItemOccurrences(userId: string, itemId: string): DailyLifeOccurrence[] {
+    const householdId = this.householdId(userId);
+    return this.db.prepare(
+      `SELECT o.occurrence_id occurrenceId,o.item_id itemId,o.item_version itemVersion,
+              o.due_at_ms dueAtMs,o.completed_at_ms completedAtMs,
+              o.completed_by_user_id completedByUserId,o.assigned_to_user_id assignedToUserId,o.title
+       FROM daily_life_item_occurrences o
+       JOIN daily_life_lists l ON l.list_id=o.list_id
+       WHERE o.item_id=? AND l.household_id=?
+       ORDER BY o.completed_at_ms DESC`
+    ).all(itemId, householdId) as DailyLifeOccurrence[];
   }
 
   private assertAssignee(householdId: string, assigneeUserId: string | null): void {

@@ -1,11 +1,13 @@
 import { describe, expect, jest, test } from '@jest/globals';
 
+import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
 import type { HomeAssistantClient } from '../src/haClient';
 import {
   compileManagedAutomation,
   HomeAssistantAutomationService,
 } from '../src/home/HomeAssistantAutomationService';
 import type { HomeCatalog } from '../src/home/HomeCatalog';
+import { HomeRuntimeStateRepository } from '../src/home/HomeRuntimeStateRepository';
 
 const scene = {
   sceneId: 'scene-evening',
@@ -321,6 +323,188 @@ describe('HomeAssistantAutomationService', () => {
 
     expect(result.reconciliation.operationStatus).toBe('uncertain');
     expect(callService).toHaveBeenCalledWith(expect.objectContaining({ service: 'turn_on' }));
+  });
+
+  test('reports skipped managed automations as a partial reconciliation', async () => {
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: true,
+    });
+    config.description = 'jarvis-managed:v1:scene=missing-scene';
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree', state: 'on',
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => config),
+    } as unknown as HomeAssistantClient;
+
+    await expect(new HomeAssistantAutomationService(ha, catalog()).reconcile()).resolves.toMatchObject({
+      operationStatus: 'partial',
+      skipped: [{ automationId: 'jarvis_schedule', reason: 'missing_scene' }],
+    });
+  });
+
+  test('attempts restoration when reconciliation throws after suspension', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    let state = 'on';
+    let failNextStateRead = false;
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: true,
+    });
+    const ha = {
+      getStates: jest.fn(async () => {
+        if (failNextStateRead) {
+          failNextStateRead = false;
+          throw new Error('ha_unavailable');
+        }
+        return [{
+          entity_id: 'automation.soiree', state,
+          attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+        }];
+      }),
+      getAutomationConfig: jest.fn(async () => config),
+      callService: jest.fn(async (input: { service: string }) => {
+        state = input.service === 'turn_on' ? 'on' : 'off';
+        return { status: 200, data: [] };
+      }),
+    } as unknown as HomeAssistantClient;
+    const service = new HomeAssistantAutomationService(
+      ha, catalog(), async () => undefined, stateRepository
+    );
+
+    await expect(service.reconcileCatalogMutation(() => {
+      failNextStateRead = true;
+      return 'changed';
+    })).rejects.toThrow('ha_unavailable');
+
+    expect(state).toBe('on');
+    expect(stateRepository.listRecoverableAutomationSuspensions()).toEqual([]);
+    expect(stateRepository.listAutomationSuspensions()).toEqual([
+      expect.objectContaining({ state: 'restored', automationId: 'jarvis_schedule' }),
+    ]);
+    db.close();
+  });
+
+  test('recovers a safely suspended managed automation after restart', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    stateRepository.recordAutomationSuspension({
+      operationId: 'catalog-change-1',
+      automationId: 'jarvis_schedule',
+      entityId: 'automation.soiree',
+      sceneId: 'scene-evening',
+    }, 100);
+    stateRepository.updateAutomationSuspension('catalog-change-1', 'jarvis_schedule', 'suspended', null, 110);
+    let state = 'off';
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: true,
+    });
+    const callService = jest.fn(async (input: { service: string }) => {
+      state = input.service === 'turn_on' ? 'on' : 'off';
+      return { status: 200, data: [] };
+    });
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree', state,
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => config),
+      callService,
+    } as unknown as HomeAssistantClient;
+
+    const recovery = await new HomeAssistantAutomationService(
+      ha, catalog(), async () => undefined, stateRepository
+    ).recoverSuspendedAutomations();
+
+    expect(recovery).toMatchObject({ operationStatus: 'succeeded', restored: ['jarvis_schedule'] });
+    expect(state).toBe('on');
+    expect(callService).toHaveBeenCalledTimes(1);
+    db.close();
+  });
+
+  test('does not race an active reconciliation or restore a changed automation', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    stateRepository.recordAutomationSuspension({
+      operationId: 'active-change',
+      automationId: 'jarvis_schedule',
+      entityId: 'automation.soiree',
+      sceneId: 'scene-evening',
+    });
+    stateRepository.updateAutomationSuspension('active-change', 'jarvis_schedule', 'suspended');
+    const changedConfig = compileManagedAutomation(catalog(), {
+      name: 'Soirée modifiée', sceneId: 'scene-evening', at: '20:30', weekdays: [1], enabled: true,
+    });
+    changedConfig.description = JSON.stringify({ managedBy: 'someone-else', sceneId: 'scene-evening' });
+    const callService = jest.fn(async () => ({ status: 200, data: [] }));
+    const ha = {
+      getAutomationConfig: jest.fn(async () => changedConfig),
+      getStates: jest.fn(async () => []),
+      callService,
+    } as unknown as HomeAssistantClient;
+    const service = new HomeAssistantAutomationService(
+      ha, catalog(), async () => undefined, stateRepository
+    );
+
+    expect(await service.recoverSuspendedAutomations()).toMatchObject({
+      operationStatus: 'succeeded', restored: [], skipped: [], failed: [],
+    });
+    expect(callService).not.toHaveBeenCalled();
+
+    expect(await service.recoverSuspendedAutomations({ includeRecent: true })).toMatchObject({
+      operationStatus: 'partial', restored: [], skipped: ['jarvis_schedule'], failed: [],
+    });
+    expect(callService).not.toHaveBeenCalled();
+
+    expect(stateRepository.listAutomationSuspensions()).toEqual([
+      expect.objectContaining({ state: 'skipped', errorCode: 'automation_no_longer_safe' }),
+    ]);
+    db.close();
+  });
+
+  test('serializes concurrent catalog reconciliations', async () => {
+    const events: string[] = [];
+    let state = 'on';
+    let releaseFirstMutation!: () => void;
+    const firstMutationBlocked = new Promise<void>((resolve) => {
+      releaseFirstMutation = resolve;
+    });
+    const config = compileManagedAutomation(catalog(), {
+      name: 'Soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: true,
+    });
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree', state,
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => config),
+      callService: jest.fn(async (input: { service: string }) => {
+        state = input.service === 'turn_on' ? 'on' : 'off';
+        events.push(input.service);
+        return { status: 200, data: [] };
+      }),
+    } as unknown as HomeAssistantClient;
+    const service = new HomeAssistantAutomationService(ha, catalog(), async () => undefined);
+
+    const first = service.reconcileCatalogMutation(async () => {
+      events.push('first:start');
+      await firstMutationBlocked;
+      events.push('first:end');
+      return 'first';
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = service.reconcileCatalogMutation(() => {
+      events.push('second');
+      return 'second';
+    });
+    await Promise.resolve();
+    expect(events).not.toContain('second');
+    releaseFirstMutation();
+    await expect(first).resolves.toMatchObject({ value: 'first' });
+    await expect(second).resolves.toMatchObject({ value: 'second' });
+    expect(events.indexOf('second')).toBeGreaterThan(events.indexOf('first:end'));
   });
 
   test('waits for a saved automation to reload and applies the requested state', async () => {

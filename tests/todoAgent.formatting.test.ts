@@ -5,6 +5,7 @@ import {
   executeTodoAgentAction,
   formatDueDateForUser,
   formatTodoActionPreview,
+  getMicrosoftTodoAccessToken,
 } from '../src/todo/todoAgent';
 
 const originalFetch = global.fetch;
@@ -85,6 +86,51 @@ describe('todoAgent formatting', () => {
       },
     );
     expect(requestedUrls.some((url) => url.includes('attacker.example'))).toBe(false);
+  });
+
+  it('coalesces concurrent Microsoft refreshes and persists one rotated token', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const onRefreshToken = jest.fn(async (_token: string) => undefined);
+    global.fetch = jest.fn(async () => {
+      await gate;
+      return new Response(JSON.stringify({
+        access_token: 'access-shared',
+        expires_in: 3600,
+        refresh_token: 'refresh-rotated',
+      }), { status: 200 });
+    }) as typeof fetch;
+    const env = {
+      MICROSOFT_CLIENT_ID: 'single-flight-test',
+      MICROSOFT_CLIENT_SECRET: 'secret',
+      MICROSOFT_REFRESH_TOKEN: 'refresh-original',
+      onRefreshToken,
+    };
+
+    const first = getMicrosoftTodoAccessToken(env);
+    const second = getMicrosoftTodoAccessToken(env);
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['access-shared', 'access-shared']);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(onRefreshToken).toHaveBeenCalledTimes(1);
+    expect(onRefreshToken).toHaveBeenCalledWith('refresh-rotated');
+  });
+
+  it('surfaces a revoked Microsoft refresh token as a reconnect-required error', async () => {
+    const onConnectionError = jest.fn(async (_code: string, _terminal: boolean) => undefined);
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({
+      error: 'invalid_grant',
+      error_description: 'sensitive provider detail',
+    }), { status: 400 })) as typeof fetch;
+
+    await expect(getMicrosoftTodoAccessToken({
+      MICROSOFT_CLIENT_ID: 'revoked-token-test',
+      MICROSOFT_CLIENT_SECRET: 'secret',
+      MICROSOFT_REFRESH_TOKEN: 'refresh-secret',
+      onConnectionError,
+    })).rejects.toThrow('todo_ms_token_refresh_failed:400:invalid_grant');
+    expect(onConnectionError).toHaveBeenCalledWith('microsoft_invalid_grant', true);
   });
 
   it("keeps every task in today's written list", () => {

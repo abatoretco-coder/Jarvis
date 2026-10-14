@@ -367,6 +367,31 @@ export class IntegrationRepository {
     })();
   }
 
+  markRuntimeError(connectionId: string, code: string, terminal: boolean): void {
+    const now = Date.now();
+    const row = this.db.prepare(
+      'SELECT owner_user_id ownerUserId FROM integration_connections WHERE connection_id=?'
+    ).get(connectionId) as { ownerUserId: string } | undefined;
+    this.db.transaction(() => {
+      this.db.prepare(
+        `UPDATE integration_connections SET
+           status=CASE WHEN ?=1 THEN 'error' ELSE status END,
+           last_error_code=?,updated_at_ms=? WHERE connection_id=? AND status<>'revoked'`
+      ).run(terminal ? 1 : 0, code.slice(0, 128), now, connectionId);
+      if (row) this.recordAudit(row.ownerUserId, 'integration.runtime_failed', connectionId, 'failed', {
+        errorCode: code.slice(0, 128),
+        terminal,
+      }, now);
+    })();
+  }
+
+  markRuntimeHealthy(connectionId: string): void {
+    this.db.prepare(
+      `UPDATE integration_connections SET status='active',last_error_code=NULL,updated_at_ms=?
+       WHERE connection_id=? AND status<>'revoked'`
+    ).run(Date.now(), connectionId);
+  }
+
   getCredentialForUser(input: {
     userId: string;
     provider: string;

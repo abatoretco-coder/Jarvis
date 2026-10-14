@@ -9,6 +9,7 @@ import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
 import type { HomeAdaptiveLightingService } from './home/HomeAdaptiveLightingService';
 import type { HomeCatalog } from './home/HomeCatalog';
+import { HomeRuntimeStateRepository } from './home/HomeRuntimeStateRepository';
 import { MutationIdempotencyCoordinator } from './idempotency/MutationIdempotencyCoordinator';
 import { SqliteMutationIdempotencyStore } from './idempotency/SqliteMutationIdempotencyStore';
 import { IdentityRepository } from './identity/IdentityRepository';
@@ -54,6 +55,7 @@ export type AppDeps = {
   adminAudit?: AdminControlPlaneRepository;
   homeCatalog?: HomeCatalog;
   homeLightingService?: HomeAdaptiveLightingService;
+  homeRuntimeState?: HomeRuntimeStateRepository;
   pcAgentBroker?: PcAgentCommandBroker;
   identityRepository?: IdentityRepository;
 };
@@ -117,6 +119,7 @@ export function buildApp(env: Env): FastifyInstance {
 
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
   const runtimeDb = createConversationDb(env.CONVERSATION_DB_PATH);
+  deps.homeRuntimeState = new HomeRuntimeStateRepository(runtimeDb);
   const identityDb = env.OIDC_ENABLED ? runtimeDb : undefined;
   const issuer = env.OIDC_ISSUER_URL?.replace(/\/$/u, '');
   const identityService =
@@ -139,13 +142,33 @@ export function buildApp(env: Env): FastifyInstance {
   deps.identityRepository = identityService?.repository;
   const adminRepository = identityDb ? new AdminControlPlaneRepository(identityDb) : undefined;
   const dailyLifeRepository = identityDb ? new DailyLifeRepository(identityDb) : undefined;
+  const processDailyLifeRecurrences = () => {
+    if (!dailyLifeRepository) return;
+    try {
+      const activated = dailyLifeRepository.processDueRecurrences();
+      if (activated > 0) app.log.info({ activated }, 'daily life recurrences activated');
+    } catch (error) {
+      app.log.warn(
+        { errorCode: error instanceof Error ? error.message : 'daily_life_recurrence_failed' },
+        'daily life recurrence processing failed'
+      );
+    }
+  };
+  const dailyLifeTimer = dailyLifeRepository
+    ? setInterval(processDailyLifeRecurrences, 60_000)
+    : undefined;
+  dailyLifeTimer?.unref();
+  processDailyLifeRecurrences();
   deps.adminAudit = adminRepository;
   const integrations = identityDb
     ? new IntegrationService(new IntegrationRepository(identityDb), env)
     : undefined;
   deps.integrations = integrations;
   deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
-  app.addHook('onClose', async () => runtimeDb.close());
+  app.addHook('onClose', async () => {
+    if (dailyLifeTimer) clearInterval(dailyLifeTimer);
+    runtimeDb.close();
+  });
 
   // Startup config summary (no secrets) to avoid “it’s configured but it doesn’t work”.
   const spotifyWebApiConfigured = spotifyWebApi.isConfigured();

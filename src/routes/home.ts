@@ -222,6 +222,7 @@ function mutationError(error: unknown): { status: number; code: string } {
   if (code === 'home_automation_not_managed') return { status: 409, code };
   if (code === 'home_automation_invalid') return { status: 400, code };
   if (code === 'home_automation_pause_unconfirmed') return { status: 503, code };
+  if (code === 'home_automation_restore_uncertain') return { status: 503, code };
   if (code === 'home_config_read_only') return { status: 503, code };
   if (code.startsWith('home_')) return { status: 400, code };
   return { status: 500, code: 'home_config_update_failed' };
@@ -290,13 +291,21 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
   }
   deps.homeCatalog = catalog ?? undefined;
   const automationService =
-    catalog && deps.ha ? new HomeAssistantAutomationService(deps.ha, catalog) : null;
+    catalog && deps.ha
+      ? new HomeAssistantAutomationService(
+          deps.ha,
+          catalog,
+          undefined,
+          deps.homeRuntimeState,
+          app.log
+        )
+      : null;
   const heatingPlanService = deps.ha ? new HomeHeatingPlanService(deps.ha) : null;
   const registrySyncService = catalog && deps.ha
     ? new HomeAssistantRegistrySyncService(deps.ha, catalog)
     : null;
   const adaptiveLightingService = catalog && deps.ha
-    ? new HomeAdaptiveLightingService(catalog, deps.ha, app.log)
+    ? new HomeAdaptiveLightingService(catalog, deps.ha, app.log, deps.homeRuntimeState)
     : null;
   deps.homeLightingService = adaptiveLightingService ?? undefined;
   adaptiveLightingService?.start();
@@ -331,6 +340,34 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     }
     return result;
   };
+  let automationRecoveryTimer: NodeJS.Timeout | undefined;
+  const recoverManagedAutomations = async (reason: string, includeRecent = false) => {
+    if (!automationService) return;
+    try {
+      const recovery = await automationService.recoverSuspendedAutomations({ includeRecent });
+      if (recovery.restored.length || recovery.skipped.length || recovery.failed.length) {
+        const level = recovery.operationStatus === 'succeeded' ? 'info' : 'warn';
+        app.log[level]({ reason, ...recovery }, 'managed home automation recovery completed');
+      }
+    } catch (error) {
+      app.log.warn(
+        { reason, errorCode: error instanceof Error ? error.message : 'home_automation_recovery_failed' },
+        'managed home automation recovery failed'
+      );
+    }
+  };
+  app.addHook('onReady', async () => {
+    await recoverManagedAutomations('startup_recovery', true);
+    if (!automationService) return;
+    automationRecoveryTimer = setInterval(
+      () => void recoverManagedAutomations('periodic_recovery'),
+      60_000
+    );
+    automationRecoveryTimer.unref();
+  });
+  app.addHook('onClose', async () => {
+    if (automationRecoveryTimer) clearInterval(automationRecoveryTimer);
+  });
 
   app.get('/v1/home/configuration/home-assistant-sync', async (request, reply) => {
     if (!hasRequestPermission(request, 'home') || !canEditHome(request)) {

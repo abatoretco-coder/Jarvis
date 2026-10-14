@@ -124,6 +124,8 @@ export type TodoEnv = {
   OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
   credentialKey?: string;
   onRefreshToken?: (token: string) => Promise<void> | void;
+  onConnectionError?: (code: string, terminal: boolean) => Promise<void> | void;
+  onConnectionHealthy?: () => Promise<void> | void;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL: string;
   OPENAI_TIMEOUT_MS: number;
@@ -173,16 +175,16 @@ type MinLogger = {
 //
 // Two protections against token expiry:
 //   1. Access token cache: reused until TOKEN_EXPIRY_BUFFER_MS before expiry (~1 h window).
-//   2. Refresh token rotation: if the provider returns a new refresh_token, it is kept
-//      in memory and used for subsequent calls (Microsoft rotates by default).
-//   3. Keep-alive: a setInterval fires every KEEPALIVE_INTERVAL_MS to proactively call
-//      the token endpoint, keeping the refresh token's inactivity window reset.
-//      Microsoft inactive limit: 90 days. We refresh every 30 days → always safe.
-//      If the process is down for >90 days the user must re-run the auth flow once.
+//   2. Refresh token replacement: if Microsoft returns a new refresh_token, it is
+//      durably stored before later calls use it.
+//   3. Single-flight refresh: concurrent requests in one process share one exchange.
+//   4. Keep-alive is only a best-effort optimization. Expiry and revocation remain
+//      normal OAuth states and are surfaced to the integration connection.
 
 interface CachedToken { accessToken: string; expiresAt: number }
 const _msTokenCache          = new Map<string, CachedToken>();
 const _msLiveRefreshToken    = new Map<string, string>(); // captures rotated refresh tokens
+const _msRefreshInFlight     = new Map<string, Promise<string>>();
 const _msKeepaliveScheduled  = new Set<string>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;          // refresh access token 60 s before expiry
 const KEEPALIVE_DAYS         = 30;              // resets Microsoft's 90-day inactivity window
@@ -196,11 +198,39 @@ async function refreshMicrosoftToken(env: {
   storeKey?: string;
   OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
   onRefreshToken?: (token: string) => Promise<void> | void;
+  onConnectionError?: (code: string, terminal: boolean) => Promise<void> | void;
+  onConnectionHealthy?: () => Promise<void> | void;
+  onDiagnostic?: (code: string) => void;
 }): Promise<string> {
   const cacheKey = env.cacheKey?.trim() || env.MICROSOFT_CLIENT_ID;
-  const storeKey = env.storeKey?.trim() || `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`;
   const cached = _msTokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
+  const inFlight = _msRefreshInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const refresh = refreshMicrosoftTokenUncached(env, cacheKey).finally(() => {
+    if (_msRefreshInFlight.get(cacheKey) === refresh) _msRefreshInFlight.delete(cacheKey);
+  });
+  _msRefreshInFlight.set(cacheKey, refresh);
+  return refresh;
+}
+
+async function refreshMicrosoftTokenUncached(env: {
+  MICROSOFT_TENANT_ID?: string;
+  MICROSOFT_CLIENT_ID: string;
+  MICROSOFT_CLIENT_SECRET: string;
+  MICROSOFT_REFRESH_TOKEN: string;
+  cacheKey?: string;
+  storeKey?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
+  onConnectionError?: (code: string, terminal: boolean) => Promise<void> | void;
+  onConnectionHealthy?: () => Promise<void> | void;
+  onDiagnostic?: (code: string) => void;
+}, cacheKey: string): Promise<string> {
+  const cached = _msTokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.accessToken;
+  const storeKey = env.storeKey?.trim() || `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`;
 
   // Use the latest rotated refresh token if we have one; fall back to env.
   const refreshToken =
@@ -208,24 +238,36 @@ async function refreshMicrosoftToken(env: {
     ?? await getStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey)
     ?? env.MICROSOFT_REFRESH_TOKEN;
   const tenantId = env.MICROSOFT_TENANT_ID?.trim() || 'common';
-  const resp = await fetch(
-    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id:     env.MICROSOFT_CLIENT_ID,
-        client_secret: env.MICROSOFT_CLIENT_SECRET,
-        refresh_token: refreshToken,
-        grant_type:    'refresh_token',
-        scope:         'Tasks.ReadWrite offline_access',
-      }),
-      signal: AbortSignal.timeout(8_000),
-    },
-  );
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id:     env.MICROSOFT_CLIENT_ID,
+          client_secret: env.MICROSOFT_CLIENT_SECRET,
+          refresh_token: refreshToken,
+          grant_type:    'refresh_token',
+          scope:         'Tasks.ReadWrite offline_access',
+        }),
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+  } catch (error) {
+    await env.onConnectionError?.('token_endpoint_unreachable', false);
+    env.onDiagnostic?.('token_endpoint_unreachable');
+    throw error;
+  }
   if (!resp.ok) {
     _msTokenCache.delete(cacheKey);
-    throw new Error(`todo_ms_token_refresh_failed:${resp.status}`);
+    const body = await resp.json().catch(() => ({})) as { error?: string };
+    const providerCode = typeof body.error === 'string' ? body.error : `http_${resp.status}`;
+    const terminal = providerCode === 'invalid_grant' || providerCode === 'interaction_required';
+    await env.onConnectionError?.(`microsoft_${providerCode}`, terminal);
+    env.onDiagnostic?.(`microsoft_${providerCode}`);
+    throw new Error(`todo_ms_token_refresh_failed:${resp.status}:${providerCode}`);
   }
   const data = await resp.json() as { access_token?: string; expires_in?: number; refresh_token?: string };
   if (!data.access_token) throw new Error('todo_ms_token_refresh_no_token');
@@ -236,6 +278,7 @@ async function refreshMicrosoftToken(env: {
     await setStoredRefreshToken(env.OAUTH_REFRESH_TOKEN_STORE_PATH, storeKey, data.refresh_token);
     await env.onRefreshToken?.(data.refresh_token);
   }
+  await env.onConnectionHealthy?.();
 
   const expiresIn = typeof data.expires_in === 'number' ? data.expires_in : 3600;
   _msTokenCache.set(cacheKey, {
@@ -243,9 +286,8 @@ async function refreshMicrosoftToken(env: {
     expiresAt:   Date.now() + expiresIn * 1_000 - TOKEN_EXPIRY_BUFFER_MS,
   });
 
-  // Schedule a keep-alive so the refresh token's inactivity window never expires
-  // while the Jarvis process is running. Fires every 30 days (well within the
-  // 90-day Microsoft inactive limit).
+  // Best-effort keep-alive while Jarvis remains online. Revocation and long
+  // downtime are still handled as explicit reconnect-required states.
   // Note: Node.js setInterval uses a 32-bit ms counter (max ~24.8 days).
   // We chain 1-day intervals and count up to KEEPALIVE_DAYS to stay within bounds.
   if (!_msKeepaliveScheduled.has(cacheKey)) {
@@ -256,13 +298,43 @@ async function refreshMicrosoftToken(env: {
       if (dayCount >= KEEPALIVE_DAYS) {
         dayCount = 0;
         _msTokenCache.delete(cacheKey);
-        refreshMicrosoftToken(env).catch(() => { /* keep-alive failure is non-fatal */ });
+        refreshMicrosoftToken(env).catch(() => {
+          env.onDiagnostic?.('microsoft_keepalive_failed');
+        });
       }
     }, 24 * 3_600_000); // 1 day — safe for 32-bit setInterval
     if (timer.unref) timer.unref();
   }
 
   return data.access_token;
+}
+
+export async function getMicrosoftTodoAccessToken(env: {
+  MICROSOFT_TENANT_ID?: string;
+  MICROSOFT_CLIENT_ID?: string;
+  MICROSOFT_CLIENT_SECRET?: string;
+  MICROSOFT_REFRESH_TOKEN?: string;
+  OAUTH_REFRESH_TOKEN_STORE_PATH?: string;
+  credentialKey?: string;
+  onRefreshToken?: (token: string) => Promise<void> | void;
+  onConnectionError?: (code: string, terminal: boolean) => Promise<void> | void;
+  onConnectionHealthy?: () => Promise<void> | void;
+}, onDiagnostic?: (code: string) => void): Promise<string> {
+  if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET || !env.MICROSOFT_REFRESH_TOKEN) {
+    throw new Error('microsoft_credentials_missing');
+  }
+  return refreshMicrosoftToken({
+    MICROSOFT_TENANT_ID: env.MICROSOFT_TENANT_ID,
+    MICROSOFT_CLIENT_ID: env.MICROSOFT_CLIENT_ID,
+    MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
+    MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
+    OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
+    cacheKey: env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
+    onRefreshToken: env.onRefreshToken,
+    onConnectionError: env.onConnectionError,
+    onConnectionHealthy: env.onConnectionHealthy,
+    onDiagnostic,
+  });
 }
 
 // ─── MS Graph — low-level helpers ────────────────────────────────────────────
@@ -1109,6 +1181,9 @@ export async function executeTodoAgentAction(
       storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
       OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
       onRefreshToken:          env.onRefreshToken,
+      onConnectionError:      env.onConnectionError,
+      onConnectionHealthy:    env.onConnectionHealthy,
+      onDiagnostic:           (code) => options?.log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
     });
   } catch (err) {
     options?.log?.warn({ err: String(err) }, 'todo_agent_token_error');
@@ -1188,6 +1263,9 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
       storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
       OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
       onRefreshToken:          env.onRefreshToken,
+      onConnectionError:      env.onConnectionError,
+      onConnectionHealthy:    env.onConnectionHealthy,
+      onDiagnostic:           (code) => log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
     });
   } catch (err) {
     log?.warn({ err: String(err) }, 'todo_agent_token_error');

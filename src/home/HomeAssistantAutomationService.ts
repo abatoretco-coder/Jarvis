@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import type { FastifyBaseLogger } from 'fastify';
+
 import {
   type HomeAssistantAutomationConfig,
   type HomeAssistantClient,
@@ -7,6 +9,7 @@ import {
 } from '../haClient';
 import { resolveCatalogHomeAction } from './HomeActionExecutor';
 import type { HomeCatalog, HomeScene } from './HomeCatalog';
+import type { HomeRuntimeStateRepository } from './HomeRuntimeStateRepository';
 
 const MANAGED_V1_PREFIX = 'jarvis-managed:v1:scene=';
 const MANAGED_V2_PREFIX = 'jarvis-managed:v2:scene=';
@@ -14,6 +17,7 @@ const automationIdPattern = /^[a-z0-9][a-z0-9_-]{0,127}$/u;
 const weekdays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
 const reloadAttempts = 20;
 const reloadDelayMs = 100;
+const interruptedOperationGraceMs = 2 * 60_000;
 
 export type HomeAutomationSummary = {
   automationId: string | null;
@@ -46,6 +50,7 @@ export type HomeAutomationReconciliationResult = {
 };
 
 type SuspendedManagedAutomation = {
+  operationId: string;
   automationId: string;
   entityId: string;
   sceneId: string;
@@ -141,11 +146,15 @@ export function compileManagedAutomation(
 }
 
 export class HomeAssistantAutomationService {
+  private reconciliationTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly ha: HomeAssistantClient,
     private readonly catalog: HomeCatalog,
     private readonly wait: (milliseconds: number) => Promise<void> =
-      (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+      (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    private readonly stateRepository?: HomeRuntimeStateRepository,
+    private readonly log?: Pick<FastifyBaseLogger, 'info' | 'warn'>
   ) {}
 
   async list(): Promise<HomeAutomationSummary[]> {
@@ -321,31 +330,77 @@ export class HomeAssistantAutomationService {
     if (!managedMetadata(config)) throw new Error('home_automation_not_managed');
   }
 
-  async reconcileCatalogMutation<T>(mutation: () => T): Promise<{
+  async reconcileCatalogMutation<T>(mutation: () => T | Promise<T>): Promise<{
     value: T;
     reconciliation: HomeAutomationReconciliationResult;
   }> {
-    const suspended = await this.suspendManagedAutomations();
+    const previous = this.reconciliationTail;
+    let release!: () => void;
+    this.reconciliationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.reconcileCatalogMutationUnlocked(mutation);
+    } finally {
+      release();
+    }
+  }
+
+  private async reconcileCatalogMutationUnlocked<T>(mutation: () => T | Promise<T>): Promise<{
+    value: T;
+    reconciliation: HomeAutomationReconciliationResult;
+  }> {
+    const operationId = randomUUID();
+    const suspended = await this.suspendManagedAutomations(operationId);
     let value: T;
     try {
-      value = mutation();
+      value = await mutation();
     } catch (error) {
-      await this.restoreManagedAutomations(suspended);
+      const restoreStatus = await this.restoreManagedAutomations(suspended);
+      if (restoreStatus !== 'succeeded') {
+        throw new Error('home_automation_restore_uncertain', { cause: error });
+      }
       throw error;
     }
-    const reconciliation = await this.reconcile();
+    let reconciliation: HomeAutomationReconciliationResult;
+    try {
+      reconciliation = await this.reconcile();
+    } catch (error) {
+      const restoreStatus = await this.restoreManagedAutomations(suspended);
+      if (restoreStatus !== 'succeeded') {
+        throw new Error('home_automation_restore_uncertain', { cause: error });
+      }
+      throw error;
+    }
     const blocked = new Set([
       ...reconciliation.failed,
       ...reconciliation.skipped.map((item) => item.automationId),
     ]);
+    for (const automation of suspended.filter((item) => blocked.has(item.automationId))) {
+      this.stateRepository?.updateAutomationSuspension(
+        automation.operationId,
+        automation.automationId,
+        'skipped',
+        'reconciliation_blocked'
+      );
+      this.log?.warn(
+        { operationId: automation.operationId, automationId: automation.automationId },
+        'managed home automation restoration skipped after reconciliation'
+      );
+    }
     const restoreStatus = await this.restoreManagedAutomations(
       suspended.filter((item) => !blocked.has(item.automationId) && this.catalog.getScene(item.sceneId))
     );
-    if (restoreStatus !== 'succeeded') reconciliation.operationStatus = 'uncertain';
+    if (restoreStatus === 'uncertain') reconciliation.operationStatus = 'uncertain';
+    else if (restoreStatus === 'partial' && reconciliation.operationStatus === 'succeeded') {
+      reconciliation.operationStatus = 'partial';
+    }
     return { value, reconciliation };
   }
 
   async reconcile(): Promise<HomeAutomationReconciliationResult> {
+    const operationId = randomUUID();
     const rawStates = await this.ha.getStates();
     const states = (Array.isArray(rawStates) ? rawStates : [])
       .filter(isHaState)
@@ -361,6 +416,10 @@ export class HomeAssistantAutomationService {
       try {
         config = await this.ha.getAutomationConfig(automationId);
       } catch {
+        if (automationId.startsWith('jarvis_')) {
+          failed.push(automationId);
+          uncertain = true;
+        }
         continue;
       }
       const managed = managedMetadata(config);
@@ -377,6 +436,12 @@ export class HomeAssistantAutomationService {
         continue;
       }
       const wasEnabled = state.state === 'on';
+      const suspension = wasEnabled ? {
+        operationId,
+        automationId,
+        entityId: state.entity_id,
+        sceneId: managed.sceneId,
+      } : undefined;
       let desired: HomeAssistantAutomationConfig;
       try {
         desired = compileManagedAutomation(this.catalog, {
@@ -395,31 +460,100 @@ export class HomeAssistantAutomationService {
       }
       try {
         if (wasEnabled) {
+          this.stateRepository?.recordAutomationSuspension(suspension!);
           const disabledStatus = await this.setEnabledAndVerify(automationId, state.entity_id, false);
           if (disabledStatus !== 'succeeded') {
+            this.stateRepository?.updateAutomationSuspension(
+              operationId,
+              automationId,
+              'failed',
+              `pause_${disabledStatus}`
+            );
             failed.push(automationId);
             uncertain = true;
+            await this.restoreManagedAutomations([suspension!]);
             continue;
           }
+          this.stateRepository?.updateAutomationSuspension(operationId, automationId, 'suspended');
         }
         await this.ha.saveAutomationConfig(automationId, desired);
         const enabledStatus = await this.setEnabledWhenLoaded(automationId, wasEnabled);
-        if (enabledStatus !== 'succeeded') uncertain = true;
+        if (enabledStatus !== 'succeeded') {
+          uncertain = true;
+          if (suspension) {
+            this.stateRepository?.updateAutomationSuspension(
+              operationId,
+              automationId,
+              'failed',
+              `restore_${enabledStatus}`
+            );
+          }
+        } else if (suspension) {
+          this.stateRepository?.updateAutomationSuspension(operationId, automationId, 'restored');
+        }
         updated.push(automationId);
       } catch (error) {
         failed.push(automationId);
+        if (suspension) {
+          const restoreStatus = await this.restoreManagedAutomations([suspension]);
+          if (restoreStatus !== 'succeeded') uncertain = true;
+        }
         if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) uncertain = true;
       }
     }
     return {
-      operationStatus: uncertain ? 'uncertain' : failed.length > 0 ? 'partial' : 'succeeded',
+      operationStatus: uncertain
+        ? 'uncertain'
+        : failed.length > 0 || skipped.length > 0 ? 'partial' : 'succeeded',
       updated,
       skipped,
       failed,
     };
   }
 
-  private async suspendManagedAutomations(): Promise<SuspendedManagedAutomation[]> {
+  async recoverSuspendedAutomations(options: { includeRecent?: boolean } = {}): Promise<{
+    operationStatus: 'succeeded' | 'partial' | 'uncertain';
+    restored: string[];
+    skipped: string[];
+    failed: string[];
+  }> {
+    const recoverable = this.stateRepository?.listRecoverableAutomationSuspensions(
+      options.includeRecent ? Number.MAX_SAFE_INTEGER : Date.now() - interruptedOperationGraceMs
+    ) ?? [];
+    const suspended = recoverable.map((item) => ({
+      operationId: item.operationId,
+      automationId: item.automationId,
+      entityId: item.entityId,
+      sceneId: item.sceneId,
+    }));
+    await this.restoreManagedAutomations(suspended);
+    const finalStates = new Map(
+      (this.stateRepository?.listAutomationSuspensions() ?? []).map((item) => [
+        `${item.operationId}\u0000${item.automationId}`,
+        item.state,
+      ])
+    );
+    const restored: string[] = [];
+    const skipped: string[] = [];
+    const failed: string[] = [];
+    for (const item of recoverable) {
+      const key = `${item.operationId}\u0000${item.automationId}`;
+      const state = finalStates.get(key);
+      if (state === 'restored') restored.push(item.automationId);
+      else if (state === 'skipped') skipped.push(item.automationId);
+      else failed.push(item.automationId);
+    }
+    return {
+      operationStatus: failed.length
+        ? (restored.length || skipped.length ? 'partial' : 'uncertain')
+        : skipped.length ? 'partial' : 'succeeded',
+      restored,
+      skipped,
+      failed,
+    };
+  }
+
+  private async suspendManagedAutomations(operationId: string): Promise<SuspendedManagedAutomation[]> {
     const rawStates = await this.ha.getStates();
     const states = (Array.isArray(rawStates) ? rawStates : [])
       .filter(isHaState)
@@ -437,29 +571,97 @@ export class HomeAssistantAutomationService {
       }
       const managed = managedMetadata(config);
       if (!managed) continue;
-      const status = await this.setEnabledAndVerify(automationId, state.entity_id, false);
+      const suspendedAutomation = {
+        operationId,
+        automationId,
+        entityId: state.entity_id,
+        sceneId: managed.sceneId,
+      };
+      this.stateRepository?.recordAutomationSuspension(suspendedAutomation);
+      suspended.push(suspendedAutomation);
+      let status: 'succeeded' | 'accepted' | 'uncertain';
+      try {
+        status = await this.setEnabledAndVerify(automationId, state.entity_id, false);
+      } catch {
+        await this.restoreManagedAutomations(suspended);
+        throw new Error('home_automation_pause_unconfirmed');
+      }
       if (status !== 'succeeded') {
         await this.restoreManagedAutomations(suspended);
         throw new Error('home_automation_pause_unconfirmed');
       }
-      suspended.push({ automationId, entityId: state.entity_id, sceneId: managed.sceneId });
+      this.stateRepository?.updateAutomationSuspension(operationId, automationId, 'suspended');
+      this.log?.info(
+        { operationId, automationId, sceneId: managed.sceneId },
+        'managed home automation suspended for catalog reconciliation'
+      );
     }
     return suspended;
   }
 
   private async restoreManagedAutomations(
     automations: SuspendedManagedAutomation[]
-  ): Promise<'succeeded' | 'uncertain'> {
+  ): Promise<'succeeded' | 'partial' | 'uncertain'> {
     let uncertain = false;
+    let skipped = false;
     for (const automation of automations) {
       try {
+        const config = await this.ha.getAutomationConfig(automation.automationId);
+        const managed = managedMetadata(config);
+        if (!managed || managed.sceneId !== automation.sceneId || !this.catalog.getScene(automation.sceneId)) {
+          this.stateRepository?.updateAutomationSuspension(
+            automation.operationId,
+            automation.automationId,
+            'skipped',
+            'automation_no_longer_safe'
+          );
+          this.log?.warn(
+            { operationId: automation.operationId, automationId: automation.automationId },
+            'managed home automation restoration skipped because configuration changed'
+          );
+          skipped = true;
+          continue;
+        }
         const status = await this.setEnabledWhenLoaded(automation.automationId, true);
-        if (status !== 'succeeded') uncertain = true;
-      } catch {
+        if (status !== 'succeeded') {
+          uncertain = true;
+          this.stateRepository?.updateAutomationSuspension(
+            automation.operationId,
+            automation.automationId,
+            'failed',
+            `restore_${status}`
+          );
+          this.log?.warn(
+            { operationId: automation.operationId, automationId: automation.automationId, status },
+            'managed home automation restoration could not be confirmed'
+          );
+        } else {
+          this.stateRepository?.updateAutomationSuspension(
+            automation.operationId,
+            automation.automationId,
+            'restored'
+          );
+          this.log?.info(
+            { operationId: automation.operationId, automationId: automation.automationId },
+            'managed home automation restored after reconciliation'
+          );
+        }
+      } catch (error) {
         uncertain = true;
+        const errorCode = error instanceof Error ? error.message : 'home_automation_restore_failed';
+        this.stateRepository?.updateAutomationSuspension(
+          automation.operationId,
+          automation.automationId,
+          'failed',
+          errorCode
+        );
+        this.log?.warn(
+          { operationId: automation.operationId, automationId: automation.automationId, errorCode },
+          'managed home automation restoration failed'
+        );
       }
     }
-    return uncertain ? 'uncertain' : 'succeeded';
+    return uncertain ? 'uncertain' : skipped ? 'partial' : 'succeeded';
   }
 
   private async findStateById(automationId: string): Promise<HaState | undefined> {

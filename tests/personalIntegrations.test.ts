@@ -289,4 +289,36 @@ describe('personal integration isolation', () => {
     expect(repository.listForUser('owner')[0]?.status).toBe('active');
     db.close();
   });
+
+  it('exposes transient and reconnect-required Microsoft To Do failures', () => {
+    const db = createConversationDb(':memory:');
+    insertUser(db, 'owner', 'owner@example.test');
+    const repository = new IntegrationRepository(db);
+    const service = new IntegrationService(repository, env());
+    const connectionId = repository.beginOAuth({
+      ownerUserId: 'owner', provider: 'microsoft-todo', kind: 'personal',
+      scopes: ['offline_access', 'Tasks.ReadWrite'], state: 'state', codeVerifier: 'verifier',
+      redirectUri: 'https://jarvis.test/callback', expiresAtMs: Date.now() + 60_000,
+    });
+    const credentialId = 'microsoft-credential';
+    repository.activate({
+      connectionId,
+      credentialId,
+      encrypted: new CredentialVault(key).encrypt('refresh-token', credentialId),
+      scopes: ['offline_access', 'Tasks.ReadWrite'],
+    });
+
+    service.markConnectionError('owner', 'microsoft-todo', 'token_endpoint_unreachable', false);
+    expect(repository.listForUser('owner')[0]).toMatchObject({
+      status: 'active', lastErrorCode: 'token_endpoint_unreachable',
+    });
+    service.markConnectionHealthy('owner', 'microsoft-todo');
+    expect(repository.listForUser('owner')[0]).toMatchObject({ status: 'active', lastErrorCode: null });
+    service.markConnectionError('owner', 'microsoft-todo', 'microsoft_invalid_grant', true);
+    expect(repository.listForUser('owner')[0]).toMatchObject({
+      status: 'error', lastErrorCode: 'microsoft_invalid_grant',
+    });
+    expect(service.resolveRefreshToken('owner', 'microsoft-todo')).toBeNull();
+    db.close();
+  });
 });

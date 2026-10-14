@@ -44,11 +44,24 @@ describe('DailyLifeRepository', () => {
     expect(completed.nextOccurrenceAtMs).toBe(604_801_000);
     expect(() => repository.updateItem('owner', item.itemId, 1, { title: 'Ancien état' }, 600))
       .toThrow('daily_life_version_conflict');
+    const beforeProcessing = repository.snapshot('owner', 604_801_000).lists
+      .flatMap((list) => list.items).find((candidate) => candidate.itemId === item.itemId)!;
+    expect(beforeProcessing.completedAtMs).toBe(500);
+    expect(repository.processDueRecurrences(604_801_000)).toBe(1);
+    expect(repository.processDueRecurrences(604_801_000)).toBe(0);
     const reactivated = repository.snapshot('owner', 604_801_000).lists
       .flatMap((list) => list.items).find((candidate) => candidate.itemId === item.itemId)!;
     expect(reactivated.completedAtMs).toBeNull();
     expect(reactivated.dueAtMs).toBe(604_801_000);
     expect(reactivated.version).toBe(3);
+    expect(repository.listItemOccurrences('owner', item.itemId)).toEqual([
+      expect.objectContaining({
+        itemId: item.itemId,
+        itemVersion: 1,
+        completedAtMs: 500,
+        completedByUserId: 'owner',
+      }),
+    ]);
     db.close();
   });
 
@@ -63,6 +76,47 @@ describe('DailyLifeRepository', () => {
     }, january31);
     const completed = repository.updateItem('owner', item.itemId, item.version, { completed: true }, january31);
     expect(completed.nextOccurrenceAtMs).toBe(Date.UTC(2027, 1, 28, 12));
+    expect(repository.processDueRecurrences(completed.nextOccurrenceAtMs!)).toBe(1);
+    const february = repository.snapshot('owner').lists.flatMap((list) => list.items)
+      .find((candidate) => candidate.itemId === item.itemId)!;
+    const completedAgain = repository.updateItem(
+      'owner', item.itemId, february.version, { completed: true }, february.dueAtMs!
+    );
+    expect(completedAgain.nextOccurrenceAtMs).toBe(Date.UTC(2027, 2, 31, 11));
+    db.close();
+  });
+
+  test('preserves the Paris wall-clock time across daylight-saving changes', () => {
+    const db = createConversationDb(':memory:');
+    addUser(db, 'owner', 'home:one', 'owner');
+    const repository = new DailyLifeRepository(db);
+    const todo = repository.snapshot('owner').lists.find((list) => list.kind === 'todo')!;
+    const nineInParisBeforeDst = Date.UTC(2027, 2, 27, 8);
+    const item = repository.createItem('owner', todo.listId, {
+      title: 'Routine du matin', recurrenceUnit: 'day', dueAtMs: nineInParisBeforeDst,
+    }, nineInParisBeforeDst);
+
+    const completed = repository.updateItem(
+      'owner', item.itemId, item.version, { completed: true }, nineInParisBeforeDst
+    );
+
+    expect(completed.nextOccurrenceAtMs).toBe(Date.UTC(2027, 2, 28, 7));
+    db.close();
+  });
+
+  test('restores leap-day yearly recurrences when the leap year returns', () => {
+    const db = createConversationDb(':memory:');
+    addUser(db, 'owner', 'home:one', 'owner');
+    const repository = new DailyLifeRepository(db);
+    const todo = repository.snapshot('owner').lists.find((list) => list.kind === 'todo')!;
+    const leapDay = Date.UTC(2024, 1, 29, 11);
+    const item = repository.createItem('owner', todo.listId, {
+      title: 'Leap', recurrenceUnit: 'year', recurrenceInterval: 4, dueAtMs: leapDay,
+    }, leapDay);
+
+    const completed = repository.updateItem('owner', item.itemId, item.version, { completed: true }, leapDay);
+
+    expect(completed.nextOccurrenceAtMs).toBe(Date.UTC(2028, 1, 29, 11));
     db.close();
   });
 

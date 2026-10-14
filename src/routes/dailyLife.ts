@@ -130,6 +130,16 @@ export function registerDailyLifeRoutes(
     } catch (error) { return routeError(reply, error); }
   });
 
+  app.get('/v1/daily-life/items/:itemId/occurrences', async (request) => {
+    const principal = requireUserPrincipal(request);
+    return {
+      items: repository.listItemOccurrences(
+        principal.userId,
+        (request.params as { itemId: string }).itemId
+      ),
+    };
+  });
+
   app.delete('/v1/daily-life/items/:itemId', async (request, reply) => {
     const principal = requireUserPrincipal(request);
     const parsed = itemDeleteSchema.safeParse(request.query);
