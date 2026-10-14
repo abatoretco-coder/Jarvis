@@ -2,7 +2,7 @@
 
 ## Domotique
 
-- Home Assistant est la source d’autorité des automatisations horaires. Les anciennes routines du catalogue Jarvis sont conservées pour compatibilité de lecture et suppression, mais `HomeRoutineScheduler` n’est pas démarré en production.
+- Home Assistant est la source d’autorité des automatisations horaires. Les anciennes routines du catalogue Jarvis restent lisibles et supprimables pour migration, mais Jarvis ne les exécute plus.
 - Jarvis compile et réconcilie uniquement les automatisations Home Assistant qu’il marque `jarvis-managed`. Home Assistant continue donc à les exécuter lorsque Jarvis est indisponible.
 - Les scènes Jarvis sont des commandes explicites et immédiates. Elles ne constituent pas un second moteur horaire.
 - L’éclairage adaptatif conserve l’intention de mode par pièce (`allumé`, `tamisé`, `éteint`). Une modification manuelle observée dans Home Assistant ou une application tierce libère cette intention. Une reconnexion d’ampoule conserve au contraire le mode choisi.

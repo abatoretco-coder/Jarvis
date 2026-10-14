@@ -36,11 +36,28 @@ describe('daily life routes', () => {
       payload: { title: 'Lait', quantity: '2' },
     });
     expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ title: 'Lait', quantity: '2', category: null });
+
+    const legacy = await app.inject({
+      method: 'POST', url: `/v1/daily-life/lists/${shopping.listId}/items`,
+      payload: { title: 'Pommes', quantity: '4', category: 'Fruits et légumes' },
+    });
+    expect(legacy.statusCode).toBe(201);
+    const legacyItem = legacy.json();
+    const renamedLegacy = await app.inject({
+      method: 'PATCH', url: `/v1/daily-life/items/${legacyItem.itemId}`,
+      payload: { expectedVersion: legacyItem.version, title: 'Pommes bio' },
+    });
+    expect(renamedLegacy.statusCode).toBe(200);
+    expect(renamedLegacy.json()).toMatchObject({ title: 'Pommes bio', category: 'Fruits et légumes' });
 
     userId = 'chloe';
     const shared = await app.inject({ method: 'GET', url: '/v1/daily-life' });
     expect(shared.json().lists.flatMap((list: { items: unknown[] }) => list.items))
-      .toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Lait', quantity: '2' })]));
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ title: 'Lait', quantity: '2', category: null }),
+        expect.objectContaining({ title: 'Pommes bio', category: 'Fruits et légumes' }),
+      ]));
     const agendaResponse = await app.inject({ method: 'GET',
       url: '/v1/daily-life/agenda?timeMin=2026-10-13T00%3A00%3A00.000Z&timeMax=2026-10-20T00%3A00%3A00.000Z' });
     expect(agendaResponse.statusCode).toBe(200);

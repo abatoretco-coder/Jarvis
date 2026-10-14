@@ -388,6 +388,65 @@ describe('home routes', () => {
     await app.close();
   });
 
+  test('returns deferred lighting details and audits them without calling an unavailable bulb', async () => {
+    const { app, getStates, callService, recordActorAudit } = setup(
+      'resident', ['home'], false, true, undefined, true
+    );
+    getStates.mockResolvedValue([
+      { entity_id: 'light.salon', state: 'unavailable', attributes: {} },
+    ]);
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'dimmed' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      roomId: 'living',
+      available: false,
+      pending: true,
+      operationStatus: 'accepted',
+      failedDeviceIds: [],
+      deferredDeviceIds: ['living-light'],
+    });
+    expect(callService).not.toHaveBeenCalled();
+    expect(recordActorAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'home.lighting.room_mode',
+      targetId: 'living',
+      outcome: 'success',
+      metadata: expect.objectContaining({
+        operationStatus: 'accepted',
+        failedDeviceCount: 0,
+        deferredDeviceCount: 1,
+      }),
+    }));
+    await app.close();
+  });
+
+  test('rejects observed-only and unknown room lighting mutations before Home Assistant calls', async () => {
+    const { app, callService } = setup('resident', ['home'], false, true, undefined, true);
+
+    const invalid = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'mixed' },
+    });
+    const unknown = await app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/garage/mode',
+      payload: { mode: 'off' },
+    });
+
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toEqual({ error: 'lighting_room_mode_invalid' });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: 'lighting_room_not_found' });
+    expect(callService).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   test('lets the owner read and update room lighting curves while residents stay read-only', async () => {
     const owner = setup('owner', ['home'], true, true, undefined, true);
     const initial = await owner.app.inject({ method: 'GET', url: '/v1/home/lighting/profiles' });

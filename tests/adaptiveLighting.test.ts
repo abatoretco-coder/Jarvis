@@ -267,6 +267,246 @@ describe('room lighting modes', () => {
     }));
   });
 
+  test('applies the latest room mode selected while a bulb is unavailable after reconnect', async () => {
+    const states = [
+      { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
+      lightState(),
+    ];
+    const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async () => states[1]),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() }
+    );
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+
+    await service.setRoomMode('living', 'dimmed', noon);
+    states[1] = lightState('unavailable', 0, 2_800);
+    await service.tick(new Date(noon.getTime() + 60_000));
+    callService.mockClear();
+
+    const deferred = await service.setRoomMode(
+      'living',
+      'maximum',
+      new Date(noon.getTime() + 61_000)
+    );
+    expect(deferred).toMatchObject({
+      mode: 'maximum',
+      available: false,
+      operationStatus: 'accepted',
+      deferredDeviceIds: ['living-light'],
+      failedDeviceIds: [],
+      pending: true,
+    });
+    expect(callService).not.toHaveBeenCalled();
+
+    states[1] = lightState('off', 0, 2_800);
+    await service.tick(new Date(noon.getTime() + 122_000));
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'turn_on',
+      serviceData: expect.objectContaining({ brightness_pct: 100, color_temp_kelvin: 3_900 }),
+    }));
+  });
+
+  test('defers every unavailable lamp without calling Home Assistant and persists the intent', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const states = [
+      lightState('unavailable'),
+      { ...lightState('unavailable'), entity_id: 'light.living_wall' },
+    ];
+    const callService = jest.fn(async () => ({ status: 200, data: [] }));
+    const service = new HomeAdaptiveLightingService(
+      fixture(true),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async (entityId: string) => states.find((state) => state.entity_id === entityId)),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+
+    const result = await service.setRoomMode('living', 'dimmed', new Date('2026-01-15T12:00:00.000Z'));
+
+    expect(result).toMatchObject({
+      available: false,
+      operationStatus: 'accepted',
+      pending: true,
+      deferredDeviceIds: ['living-light', 'living-wall-light'],
+      failedDeviceIds: [],
+    });
+    expect(callService).not.toHaveBeenCalled();
+    expect(stateRepository.listLightingIntents()).toEqual([
+      expect.objectContaining({ roomId: 'living', mode: 'dimmed' }),
+    ]);
+    db.close();
+  });
+
+  test('applies available lamps while explicitly deferring only unavailable siblings', async () => {
+    const states = [
+      lightState(),
+      { ...lightState('unavailable'), entity_id: 'light.living_wall' },
+    ];
+    const callService = jest.fn(async (input: { target?: { entity_id?: string }; serviceData?: Record<string, unknown> }) => {
+      if (input.target?.entity_id === 'light.living') {
+        states[0] = lightState(
+          'on',
+          Math.round(Number(input.serviceData?.brightness_pct) * 2.55),
+          Number(input.serviceData?.color_temp_kelvin)
+        );
+      }
+      return { status: 200, data: [] };
+    });
+    const service = new HomeAdaptiveLightingService(
+      fixture(true),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async (entityId: string) => states.find((state) => state.entity_id === entityId)),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() }
+    );
+
+    const result = await service.setRoomMode('living', 'on', new Date('2026-01-15T12:00:00.000Z'));
+
+    expect(result).toMatchObject({
+      available: true,
+      operationStatus: 'accepted',
+      deferredDeviceIds: ['living-wall-light'],
+      failedDeviceIds: [],
+      pending: true,
+    });
+    expect(callService).toHaveBeenCalledTimes(1);
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({
+      target: { entity_id: 'light.living' },
+    }));
+  });
+
+  test('reports a partial room update and persists the desired mode for the successful lamp', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const unsupportedWall = {
+      ...lightState(),
+      entity_id: 'light.living_wall',
+      attributes: { supported_color_modes: ['onoff'] },
+    };
+    const states = [lightState(), unsupportedWall];
+    const callService = jest.fn(async (input: { target?: { entity_id?: string }; serviceData?: Record<string, unknown> }) => {
+      if (input.target?.entity_id === 'light.living') {
+        states[0] = lightState(
+          'on',
+          Math.round(Number(input.serviceData?.brightness_pct) * 2.55),
+          Number(input.serviceData?.color_temp_kelvin)
+        );
+      }
+      return { status: 200, data: [] };
+    });
+    const service = new HomeAdaptiveLightingService(
+      fixture(true),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async (entityId: string) => states.find((state) => state.entity_id === entityId)),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+
+    const result = await service.setRoomMode('living', 'on', new Date('2026-01-15T12:00:00.000Z'));
+
+    expect(result).toMatchObject({
+      operationStatus: 'partial',
+      failedDeviceIds: ['living-wall-light'],
+      deferredDeviceIds: [],
+    });
+    expect(stateRepository.listLightingIntents()).toEqual([
+      expect.objectContaining({ roomId: 'living', mode: 'on' }),
+    ]);
+    db.close();
+  });
+
+  test('does not persist a room intent when every device command fails', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const unsupported = {
+      ...lightState(),
+      attributes: { supported_color_modes: ['onoff'] },
+    };
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => [unsupported]),
+        getState: jest.fn(async () => unsupported),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+
+    const result = await service.setRoomMode('living', 'on', new Date('2026-01-15T12:00:00.000Z'));
+
+    expect(result).toMatchObject({
+      operationStatus: 'failed',
+      failedDeviceIds: ['living-light'],
+      deferredDeviceIds: [],
+    });
+    expect(stateRepository.listLightingIntents()).toEqual([]);
+    db.close();
+  });
+
+  test('does not replay an off command when a deferred bulb reconnects already off', async () => {
+    const states = [lightState('unavailable')];
+    const callService = jest.fn(async () => ({ status: 200, data: [] }));
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async () => states[0]),
+        callService,
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() }
+    );
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+    await service.setRoomMode('living', 'off', noon);
+
+    states[0] = lightState('off');
+    await service.tick(new Date(noon.getTime() + 90_000));
+
+    expect(callService).not.toHaveBeenCalled();
+  });
+
+  test('keeps a persisted intent when Home Assistant state polling fails', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const getStates = jest.fn<() => Promise<unknown>>()
+      .mockResolvedValueOnce([lightState()])
+      .mockRejectedValueOnce(new Error('ha_offline'));
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates,
+        getState: jest.fn(async () => lightState('on', 51, 2_800)),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+    await service.setRoomMode('living', 'dimmed', noon);
+
+    await service.tick(new Date(noon.getTime() + 90_000));
+
+    expect(stateRepository.listLightingIntents()).toEqual([
+      expect.objectContaining({ roomId: 'living', mode: 'dimmed' }),
+    ]);
+    db.close();
+  });
+
   test('leaves a per-light customization alone until a room mode is selected again', async () => {
     const states = [
       { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
@@ -363,6 +603,37 @@ describe('room lighting modes', () => {
     await service.tick(new Date(noon.getTime() + 90_000));
 
     expect(callService).not.toHaveBeenCalled();
+    expect(stateRepository.listLightingIntents()).toEqual([]);
+    db.close();
+  });
+
+  test('does not swallow a manual light change made during command grace', async () => {
+    const db = createConversationDb(':memory:');
+    const stateRepository = new HomeRuntimeStateRepository(db);
+    const states = [
+      { entity_id: 'weather.home', state: 'cloudy', attributes: { cloud_coverage: 50 } },
+      lightState(),
+    ];
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => states),
+        getState: jest.fn(async () => states[1]),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      stateRepository
+    );
+    const noon = new Date('2026-01-15T12:00:00.000Z');
+    await service.setRoomMode('living', 'dimmed', noon);
+
+    states[1] = lightState('on', 51, 2_800);
+    await service.tick(new Date(noon.getTime() + 20_000));
+    states[1] = lightState('on', 200, 4_000);
+    await service.tick(new Date(noon.getTime() + 30_000));
+    expect(stateRepository.listLightingIntents()).toHaveLength(1);
+
+    await service.tick(new Date(noon.getTime() + 90_000));
     expect(stateRepository.listLightingIntents()).toEqual([]);
     db.close();
   });

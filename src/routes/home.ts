@@ -644,6 +644,7 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
           mode: result.mode,
           operationStatus: result.operationStatus,
           failedDeviceCount: result.failedDeviceIds.length,
+          deferredDeviceCount: result.deferredDeviceIds.length,
         },
       });
       return reply.code(result.operationStatus === 'failed' ? 502 : 200).send(result);

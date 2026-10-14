@@ -22,6 +22,7 @@ export type HomeLightingRoomState = {
 export type HomeLightingRoomMutation = HomeLightingRoomState & {
   operationStatus: 'succeeded' | 'accepted' | 'uncertain' | 'partial' | 'failed';
   failedDeviceIds: string[];
+  deferredDeviceIds: string[];
 };
 
 type ObservedLight = {
@@ -279,20 +280,39 @@ export class HomeAdaptiveLightingService {
         .filter(isHassState)
         .map((state) => [state.entity_id, state] as const)
     );
+    const deferredDeviceIds = deviceIds.filter((deviceId) => {
+      const entityId = this.catalog.getMapping(deviceId)?.entityId;
+      const current = entityId ? observedLight(states.get(entityId)) : undefined;
+      return current !== undefined && ['unavailable', 'unknown'].includes(current.state);
+    });
+    const deferred = new Set(deferredDeviceIds);
+    const currentlyAvailable = deviceIds.some((deviceId) => {
+      const entityId = this.catalog.getMapping(deviceId)?.entityId;
+      const current = entityId ? observedLight(states.get(entityId)) : undefined;
+      return current !== undefined && !['unavailable', 'unknown'].includes(current.state);
+    });
     for (const deviceId of deviceIds) {
       const entityId = this.catalog.getMapping(deviceId)?.entityId;
       const current = entityId ? observedLight(states.get(entityId)) : undefined;
       if (current) this.lastObservedStates.set(deviceId, observedFingerprint(current));
     }
     const target = mode === 'off' ? undefined : this.target(room, mode, now);
-    const results = await Promise.all(deviceIds.map((deviceId) => !this.deviceShouldBeOn(room, deviceId, mode)
-      ? executeCatalogHomeAction({
-          catalog: this.catalog,
-          ha: this.ha,
-          command: { deviceId, action: 'turn_off' },
-          allowAlreadySatisfied: true,
-        })
-      : this.applyRoomProfile(deviceId, target!, config.transitionSeconds))) as Array<Awaited<ReturnType<typeof executeCatalogHomeAction>>>;
+    const results = await Promise.all(deviceIds.map((deviceId) => {
+      if (deferred.has(deviceId)) {
+        return Promise.resolve({
+          ok: true as const,
+          operationStatus: 'accepted' as const,
+        });
+      }
+      return !this.deviceShouldBeOn(room, deviceId, mode)
+        ? executeCatalogHomeAction({
+            catalog: this.catalog,
+            ha: this.ha,
+            command: { deviceId, action: 'turn_off' },
+            allowAlreadySatisfied: true,
+          })
+        : this.applyRoomProfile(deviceId, target!, config.transitionSeconds);
+    })) as Array<Awaited<ReturnType<typeof executeCatalogHomeAction>>>;
     const failedDeviceIds = deviceIds.filter((_, index) => !results[index]?.ok);
     const operationStatus = mutationStatus(results);
     if (operationStatus !== 'failed') {
@@ -311,12 +331,13 @@ export class HomeAdaptiveLightingService {
     return {
       roomId,
       mode,
-      available: results.some((result) => result.ok),
+      available: currentlyAvailable,
       deviceIds,
       ...(target ? { target } : {}),
       ...(operationStatus === 'accepted' || operationStatus === 'uncertain' ? { pending: true } : {}),
       operationStatus,
       failedDeviceIds,
+      deferredDeviceIds,
     };
   }
 
@@ -365,15 +386,32 @@ export class HomeAdaptiveLightingService {
         if (!current) continue;
         const previousFingerprint = this.lastObservedStates.get(deviceId);
         const currentFingerprint = observedFingerprint(current);
-        this.lastObservedStates.set(deviceId, currentFingerprint);
-        if (!desired || ['unavailable', 'unknown'].includes(current.state)) continue;
-        if ((this.pendingUntil.get(room.roomId) ?? 0) > now.getTime()) continue;
-        if ((this.commandGraceUntil.get(room.roomId) ?? 0) > now.getTime()) continue;
+        if (!desired || ['unavailable', 'unknown'].includes(current.state)) {
+          this.lastObservedStates.set(deviceId, currentFingerprint);
+          continue;
+        }
 
         const previousState = previousFingerprint
           ? (JSON.parse(previousFingerprint) as { state?: string }).state
           : undefined;
-        const reconnected = ['unavailable', 'unknown'].includes(previousState ?? '') && current.state === 'on';
+        const reconnected = ['unavailable', 'unknown'].includes(previousState ?? '')
+          && !['unavailable', 'unknown'].includes(current.state);
+        const shouldBeOn = this.deviceShouldBeOn(room, deviceId, desired.mode);
+        const matchesDesired = shouldBeOn
+          ? Boolean(desired.target && matchesTarget(current, desired.target))
+          : current.state === 'off';
+        const inCommandWindow = (this.pendingUntil.get(room.roomId) ?? 0) > now.getTime()
+          || (this.commandGraceUntil.get(room.roomId) ?? 0) > now.getTime();
+        if (inCommandWindow) {
+          // Only accept a settled command result as the new baseline. A manual
+          // override during the grace period must remain detectable afterwards.
+          if (matchesDesired) this.lastObservedStates.set(deviceId, currentFingerprint);
+          continue;
+        }
+        if (matchesDesired) {
+          this.lastObservedStates.set(deviceId, currentFingerprint);
+          continue;
+        }
         const manuallyChanged = previousFingerprint !== undefined
           && previousFingerprint !== currentFingerprint
           && !reconnected;
@@ -390,11 +428,12 @@ export class HomeAdaptiveLightingService {
           continue;
         }
 
-        const shouldBeOn = this.deviceShouldBeOn(room, deviceId, desired.mode);
         const shouldRestoreOff = !shouldBeOn && reconnected;
         const shouldRestoreProfile = shouldBeOn && desired.target && reconnected
           && !matchesTarget(current, desired.target);
         if (!shouldRestoreOff && !shouldRestoreProfile) continue;
+
+        this.lastObservedStates.set(deviceId, currentFingerprint);
 
         const result = !shouldBeOn
           ? await executeCatalogHomeAction({

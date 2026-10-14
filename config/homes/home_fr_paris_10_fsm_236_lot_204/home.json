@@ -433,12 +433,6 @@
           "placement": {"x": 8.2, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
         },
         {
-          "deviceId": "tapo-plug-3",
-          "name": "Prise 3",
-          "presetId": "plug",
-          "placement": {"x": 9.7, "y": 2.45, "z": 0.25, "rotationDeg": 0, "scale": 0.8}
-        },
-        {
           "deviceId": "living-room-radiator",
           "name": "Radiateur",
           "presetId": "heating",
@@ -547,12 +541,17 @@
           {
             "deviceId": "hue-living-ceiling-1",
             "action": "set_brightness",
-            "value": 1
+            "value": 10
           },
           {
             "deviceId": "hue-living-ceiling-2",
             "action": "set_brightness",
-            "value": 1
+            "value": 10
+          },
+          {
+            "deviceId": "hue-office-light",
+            "action": "set_brightness",
+            "value": 8
           }
         ],
         "voicePhrases": ["mode film", "lance la scene film"],

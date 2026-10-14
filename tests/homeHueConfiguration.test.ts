@@ -57,10 +57,13 @@ describe('Philips Hue lighting integration', () => {
       available: false,
       capabilities: [],
     });
-    expect(catalog.getScene('film')?.steps).toEqual(expect.arrayContaining([
-      { deviceId: 'hue-living-ceiling-1', action: 'set_brightness', value: 1 },
-      { deviceId: 'hue-living-ceiling-2', action: 'set_brightness', value: 1 },
-    ]));
+    expect(catalog.getScene('film')?.steps).toEqual([
+      { deviceId: 'tapo-plug-1', action: 'turn_on' },
+      { deviceId: 'tapo-plug-2', action: 'turn_off' },
+      { deviceId: 'hue-living-ceiling-1', action: 'set_brightness', value: 10 },
+      { deviceId: 'hue-living-ceiling-2', action: 'set_brightness', value: 10 },
+      { deviceId: 'hue-office-light', action: 'set_brightness', value: 8 },
+    ]);
     expect(catalog.getScene('film')?.steps).not.toEqual(expect.arrayContaining([
       { deviceId: 'hue-kitchen-ceiling', action: 'turn_off' },
     ]));
@@ -82,6 +85,18 @@ describe('Philips Hue lighting integration', () => {
     ));
     expect(catalog.getScene('ceilings-on')?.steps).not.toEqual(expect.arrayContaining([
       { deviceId: 'hue-office-light', action: 'turn_on' },
+    ]));
+  });
+
+  test('does not expose the disconnected third plug', () => {
+    const catalog = new HomeCatalog(
+      join(process.cwd(), 'config', 'homes'),
+      'home_fr_paris_10_fsm_236_lot_204'
+    );
+
+    expect(catalog.getMapping('tapo-plug-3')).toBeUndefined();
+    expect(catalog.getHomeAssistantProjection().devices).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ deviceId: 'tapo-plug-3' }),
     ]));
   });
 

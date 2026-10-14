@@ -31,6 +31,7 @@
     "verify:music-routing": "tsx scripts/verify-music-routing.ts",
     "test:e2e:voice-music:live": "tsx scripts/run-prod-voice-music-e2e.ts",
     "test:e2e:home:live": "tsx scripts/run-prod-home-e2e.ts",
+    "test:e2e:lighting:live": "tsx scripts/run-prod-lighting-e2e.ts",
     "backup:pc": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-runtime.ps1 backup -Profile pc-preprod-full",
     "verify": "npm run lint && npm run build && npm run typecheck:test && npm test && npm run check:capabilities",
     "format": "prettier . --check",
