@@ -276,6 +276,8 @@ describe('dashboard mail reliability', () => {
       page: 20,
       pageSize: 100,
       hasMore: true,
+      partial: false,
+      failedMessages: 0,
       items: [{ id: 'last-page', accountLabel: 'gmail' }],
     });
     expect(listCalls).toBe(21);
@@ -438,5 +440,69 @@ describe('dashboard mail reliability', () => {
     expect(trash.json()).toEqual({ error: 'mail_account_required' });
     expect(fetchSpy).not.toHaveBeenCalled();
     await app.close();
+  });
+
+  it('exposes partial metadata failures from the paginated messages endpoint', async () => {
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false',
+      LOG_LEVEL: 'silent',
+      GOOGLE_CLIENT_ID: 'client',
+      GOOGLE_CLIENT_SECRET: 'secret',
+    });
+    const app = Fastify({ logger: false });
+    app.addHook('preHandler', async (request) => setRequestPrincipal(request, userPrincipal('alice')));
+    registerDashboardRoute(app, {
+      env,
+      integrations: { resolveRefreshToken: () => 'refresh-alice' } as unknown as IntegrationService,
+      spotifyWebApi: { isConfigured: () => false } as AppDeps['spotifyWebApi'],
+    });
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) return json({ access_token: 'access' });
+      if (url.includes('/messages?')) return json({ messages: [{ id: 'valid' }, { id: 'unavailable' }] });
+      if (url.includes('/messages/valid?')) return json(message('valid', 'Valide', '1791792000000'));
+      if (url.includes('/messages/unavailable?')) throw new DOMException('timed out', 'TimeoutError');
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/mail/messages?accountLabel=gmail',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      page: 0,
+      pageSize: 40,
+      hasMore: false,
+      partial: true,
+      failedMessages: 1,
+      items: [{ id: 'valid', accountLabel: 'gmail' }],
+    });
+    await app.close();
+  });
+
+  it.each([
+    { status: 403, payload: { error: { errors: [{ reason: 'insufficientPermissions' }] } } },
+    { status: 403, payload: { error: { errors: [{ reason: 'rateLimitExceeded' }] } } },
+    { status: 503, payload: { error: { status: 'UNAVAILABLE' } } },
+  ])('does not refresh OAuth after a non-expiry Gmail $status response', async ({ status, payload }) => {
+    const env = mailEnv([{ label: 'perso', refreshToken: 'refresh-perso' }]);
+    let refreshCount = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        refreshCount += 1;
+        return json({ access_token: `access-${refreshCount}` });
+      }
+      if (url.includes('/messages?')) return json({ messages: [{ id: 'mail-1' }] });
+      if (url.includes('/messages/mail-1?')) return json(payload, status);
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    const section = await buildMailSection(env, Fastify({ logger: false }).log);
+
+    expect(section.status).toBe('error');
+    expect(refreshCount).toBe(1);
   });
 });

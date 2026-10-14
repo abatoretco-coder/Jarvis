@@ -558,6 +558,10 @@ class GmailApiError extends Error {
   }
 }
 
+function isExpiredGmailAccessToken(error: unknown): error is GmailGetError | GmailApiError {
+  return (error instanceof GmailGetError || error instanceof GmailApiError) && error.status === 401;
+}
+
 async function gmailPost<T>(
   path: string,
   token: string,
@@ -589,7 +593,7 @@ async function trashGmailMessage(account: MailAccount, env: AppDeps['env'], mess
   try {
     await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
   } catch (error) {
-    if (!(error instanceof GmailApiError) || (error.status !== 401 && error.status !== 403)) throw error;
+    if (!isExpiredGmailAccessToken(error)) throw error;
     token = await refreshGoogleAccessToken(account, env);
     await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
   }
@@ -909,9 +913,7 @@ async function createGmailAccountReader(
       try {
         return await gmailGet<T>(path, attemptedToken);
       } catch (error) {
-        if (!(error instanceof GmailGetError) || (error.status !== 401 && error.status !== 403)) {
-          throw error;
-        }
+        if (!isExpiredGmailAccessToken(error)) throw error;
         const retryToken = attemptedToken === accessToken
           ? await refreshAccessToken()
           : accessToken;
@@ -1506,6 +1508,8 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         page: safePage,
         pageSize: safePageSize,
         hasMore: payload.hasMore,
+        partial: payload.failedMessages > 0,
+        failedMessages: payload.failedMessages,
         items: payload.items,
       });
     } catch (error) {
