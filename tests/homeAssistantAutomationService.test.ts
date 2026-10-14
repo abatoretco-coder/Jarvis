@@ -66,6 +66,28 @@ describe('HomeAssistantAutomationService', () => {
     });
   });
 
+  test('refuses to compile conflicting actions for the same Home Assistant entity', () => {
+    const conflictingScene = {
+      ...scene,
+      steps: [
+        { deviceId: 'living-light', action: 'turn_on' as const },
+        { deviceId: 'living-light', action: 'turn_off' as const },
+      ],
+    };
+    const conflictingCatalog = {
+      ...catalog(),
+      getScene: jest.fn(() => conflictingScene),
+    } as unknown as HomeCatalog;
+
+    expect(() => compileManagedAutomation(conflictingCatalog, {
+      name: 'Conflit',
+      sceneId: conflictingScene.sceneId,
+      at: '19:30',
+      weekdays: [1],
+      enabled: true,
+    })).toThrow('home_scene_device_conflict');
+  });
+
   test('lists native and Jarvis-managed automations from Home Assistant', async () => {
     const ha = {
       getStates: jest.fn(async () => [

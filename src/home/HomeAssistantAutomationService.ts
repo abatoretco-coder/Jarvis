@@ -8,7 +8,7 @@ import {
   HomeAssistantRequestError,
 } from '../haClient';
 import { resolveCatalogHomeAction } from './HomeActionExecutor';
-import type { HomeCatalog, HomeScene } from './HomeCatalog';
+import { type HomeCatalog, type HomeScene, sceneHasDeviceConflicts } from './HomeCatalog';
 import type { HomeRuntimeStateRepository } from './HomeRuntimeStateRepository';
 
 const MANAGED_V1_PREFIX = 'jarvis-managed:v1:scene=';
@@ -107,6 +107,7 @@ function scheduleFromConfig(
 }
 
 function compileActions(catalog: HomeCatalog, scene: HomeScene): Array<Record<string, unknown>> {
+  if (sceneHasDeviceConflicts(scene.steps)) throw new Error('home_scene_device_conflict');
   return scene.steps.map((step) => {
     const resolved = resolveCatalogHomeAction(catalog, step);
     if (!resolved.ok) throw new Error(resolved.code);

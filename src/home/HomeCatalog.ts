@@ -368,7 +368,6 @@ export type UpsertHomeScene = Omit<HomeScene, 'sortOrder'> & {
   expectedRevision: string;
   sortOrder?: number;
 };
-export type UpsertHomeRoutine = HomeRoutine & { expectedRevision: string };
 
 const entityIdPattern = /^[a-z_]+\.[a-z0-9_]+$/u;
 const homeAssistantAreaIdPattern = /^[a-z0-9_]{1,64}$/u;
@@ -625,6 +624,15 @@ function normalizeScene(value: HomeScene): HomeScene | null {
     voicePhrases,
     sortOrder: value.sortOrder,
   };
+}
+
+export function sceneHasDeviceConflicts(steps: HomeScene['steps']): boolean {
+  const deviceIds = new Set<string>();
+  return steps.some((step) => {
+    if (deviceIds.has(step.deviceId)) return true;
+    deviceIds.add(step.deviceId);
+    return false;
+  });
 }
 
 function normalizeRoutine(value: HomeRoutine): HomeRoutine | null {
@@ -1206,6 +1214,7 @@ export class HomeCatalog {
   upsertScene(input: UpsertHomeScene): void {
     if (!this.writable) throw new Error('home_config_read_only');
     if (input.expectedRevision !== this.revision) throw new Error('home_config_conflict');
+    if (sceneHasDeviceConflicts(input.steps)) throw new Error('home_scene_device_conflict');
     const scene = normalizeScene({ ...input, sortOrder: input.sortOrder ?? this.scenes.length });
     if (!scene) throw new Error('home_scene_invalid');
     for (const step of scene.steps) {
@@ -1240,24 +1249,6 @@ export class HomeCatalog {
       quickActions: nextHome.automation?.quickActions ?? [],
       scenes: (nextHome.automation?.scenes ?? []).filter((scene) => scene.sceneId !== sceneId),
       routines: (nextHome.automation?.routines ?? []).filter((routine) => routine.sceneId !== sceneId),
-    };
-    this.persist(nextHome);
-  }
-
-  upsertRoutine(input: UpsertHomeRoutine): void {
-    if (!this.writable) throw new Error('home_config_read_only');
-    if (input.expectedRevision !== this.revision) throw new Error('home_config_conflict');
-    const routine = normalizeRoutine(input);
-    if (!routine || !this.scenes.some((scene) => scene.sceneId === routine.sceneId)) {
-      throw new Error('home_routine_invalid');
-    }
-    const nextHome = structuredClone(this.home);
-    nextHome.automation = {
-      ...nextHome.automation,
-      spaces: nextHome.automation?.spaces ?? [],
-      quickActions: nextHome.automation?.quickActions ?? [],
-      scenes: nextHome.automation?.scenes ?? [],
-      routines: [...(nextHome.automation?.routines ?? []).filter((item) => item.routineId !== routine.routineId), routine],
     };
     this.persist(nextHome);
   }
