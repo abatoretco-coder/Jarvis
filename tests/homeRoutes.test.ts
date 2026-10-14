@@ -184,12 +184,17 @@ function setup(
   const automationStates = new Map<string, 'on' | 'off'>();
   let vacuumState = 'docked';
   let suctionState = 'Strong';
+  let televisionState = 'playing';
   const callService = jest.fn(async (input: unknown) => {
     const call = input as { domain?: string; service?: string; serviceData?: { option?: string }; target?: { entity_id?: string } };
     if (call.domain === 'vacuum' && call.service === 'start') vacuumState = 'cleaning';
     if (call.domain === 'vacuum' && call.service === 'return_to_base') vacuumState = 'returning';
     if (call.domain === 'select' && call.service === 'select_option' && call.serviceData?.option) {
       suctionState = call.serviceData.option;
+    }
+    if (call.domain === 'media_player' && call.target?.entity_id === 'media_player.lg_tv') {
+      if (call.service === 'turn_off') televisionState = 'off';
+      if (call.service === 'turn_on') televisionState = 'on';
     }
     if (call.domain === 'automation' && call.target?.entity_id) {
       const automationId = call.target.entity_id.replace(/^automation\./u, '');
@@ -221,7 +226,7 @@ function setup(
     if (entityId === 'media_player.lg_tv') {
       return {
         entity_id: entityId,
-        state: 'playing',
+        state: televisionState,
         attributes: { volume_level: 0.22, source: 'Netflix', source_list: ['Netflix', 'HDMI 1'] },
       };
     }
@@ -556,7 +561,7 @@ describe('home routes', () => {
     await guest.app.close();
   });
 
-  test('limits the Stream Deck client to light inventory and explicit light actions', async () => {
+  test('limits the Stream Deck client to binary lighting and TV actions', async () => {
     const streamDeck = setup('owner', ['home'], false, true, 'jarvis-streamdeck');
 
     const inventory = await streamDeck.app.inject({ method: 'GET', url: '/v1/home/lights' });
@@ -576,6 +581,17 @@ describe('home routes', () => {
       service: 'turn_off',
     }));
 
+    const tv = await streamDeck.app.inject({
+      method: 'POST',
+      url: '/v1/home/actions',
+      payload: { deviceId: 'living-tv', action: 'turn_off' },
+    });
+    expect(tv.statusCode).toBe(200);
+    expect(streamDeck.callService).toHaveBeenCalledWith(expect.objectContaining({
+      domain: 'media_player',
+      service: 'turn_off',
+    }));
+
     const vacuum = await streamDeck.app.inject({
       method: 'POST',
       url: '/v1/home/actions',
@@ -587,6 +603,53 @@ describe('home routes', () => {
       domain: 'vacuum',
       service: 'start',
     }));
+    await streamDeck.app.close();
+  });
+
+  test('limits Stream Deck room lighting controls to maximum, on, dimmed and off', async () => {
+    const streamDeck = setup('owner', ['home'], false, true, 'jarvis-streamdeck', true);
+
+    const inventory = await streamDeck.app.inject({ method: 'GET', url: '/v1/home/lighting/rooms' });
+    expect(inventory.statusCode).toBe(200);
+
+    const status = await streamDeck.app.inject({ method: 'GET', url: '/v1/home/stream-deck/status' });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      rooms: [expect.objectContaining({ roomId: 'living' })],
+      television: { deviceId: 'living-tv', state: 'playing', available: true, source: 'Netflix', muted: false },
+    });
+
+    const on = await streamDeck.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'on' },
+    });
+    expect(on.statusCode).toBe(200);
+
+    streamDeck.callService.mockClear();
+    const dimmed = await streamDeck.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'dimmed' },
+    });
+    expect(dimmed.statusCode).toBe(200);
+    expect(streamDeck.callService).toHaveBeenCalled();
+
+    const maximum = await streamDeck.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'maximum' },
+    });
+    expect(maximum.statusCode).toBe(200);
+
+    const manual = await streamDeck.app.inject({
+      method: 'PUT',
+      url: '/v1/home/lighting/rooms/living/mode',
+      payload: { mode: 'adaptive' },
+    });
+    expect(manual.statusCode).toBe(403);
+    expect(manual.json()).toEqual({ error: 'client_scope_forbidden' });
+
     await streamDeck.app.close();
   });
 

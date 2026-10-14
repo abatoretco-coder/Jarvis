@@ -4,7 +4,11 @@ import {
   type HomeAssistantServiceCall,
 } from '../haClient';
 import { isHassState } from '../hass';
-import { isStreamDeckHomeActionAllowed, isStreamDeckPrincipal } from '../identity/oidcClientPolicy';
+import {
+  isStreamDeckHomeActionAllowed,
+  isStreamDeckPrincipal,
+  isStreamDeckSceneActionAllowed,
+} from '../identity/oidcClientPolicy';
 import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
 import { homeActionStateAlreadySatisfied, homeActionStateConflict } from './HomeActionPolicy';
@@ -417,6 +421,7 @@ export async function executeCatalogHomeAction(input: {
   statePollAttempts?: number;
   statePollIntervalMs?: number;
   allowAlreadySatisfied?: boolean;
+  streamDeckSceneId?: string;
 }): Promise<HomeActionExecution> {
   let active = activeCommandsByCatalog.get(input.catalog);
   if (!active) {
@@ -444,6 +449,7 @@ async function executeCatalogHomeActionOnce(input: {
   statePollAttempts?: number;
   statePollIntervalMs?: number;
   allowAlreadySatisfied?: boolean;
+  streamDeckSceneId?: string;
 }): Promise<HomeActionExecution> {
   const resolved = resolveCatalogHomeAction(input.catalog, input.command);
   if (!resolved.ok) return resolved;
@@ -451,7 +457,9 @@ async function executeCatalogHomeActionOnce(input: {
   if (
     input.principal?.kind === 'user'
     && isStreamDeckPrincipal(input.principal)
-    && !isStreamDeckHomeActionAllowed(domain, input.command.action)
+    && !(input.streamDeckSceneId
+      ? isStreamDeckSceneActionAllowed(input.streamDeckSceneId, domain, input.command.action)
+      : isStreamDeckHomeActionAllowed(domain, input.command.action))
   ) {
     return { ok: false, status: 403, code: 'client_scope_forbidden', domain };
   }
@@ -712,7 +720,7 @@ export async function executeCatalogHomeScene(input: {
     if (
       input.principal?.kind === 'user' &&
       isStreamDeckPrincipal(input.principal) &&
-      !isStreamDeckHomeActionAllowed(domain, step.action)
+      !isStreamDeckSceneActionAllowed(input.scene.sceneId, domain, step.action)
     ) {
       return {
         contractVersion: 2,
@@ -744,7 +752,14 @@ export async function executeCatalogHomeScene(input: {
   }
   const executions = await Promise.all(
     input.scene.steps.map(async (step) => {
-      const result = await executeCatalogHomeAction({ ...input, command: step, allowAlreadySatisfied: true });
+      const result = await executeCatalogHomeAction({
+        catalog: input.catalog,
+        command: step,
+        allowAlreadySatisfied: true,
+        streamDeckSceneId: input.scene.sceneId,
+        ...(input.ha ? { ha: input.ha } : {}),
+        ...(input.principal ? { principal: input.principal } : {}),
+      });
       return result.ok
         ? {
             deviceId: step.deviceId,

@@ -20,6 +20,7 @@ import {
   HomeHeatingPlanService,
   HomeHeatingPlanUpdateError,
 } from '../home/HomeHeatingPlanService';
+import { isStreamDeckPrincipal } from '../identity/oidcClientPolicy';
 import { getRequestPrincipal, hasRequestPermission } from '../identity/requestIdentity';
 import type { AppDeps } from '../server';
 
@@ -629,6 +630,10 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     if (!params.success || !body.success) {
       return reply.code(400).send({ error: 'lighting_room_mode_invalid' });
     }
+    const principal = getRequestPrincipal(request);
+    if (principal?.kind === 'user' && isStreamDeckPrincipal(principal) && !['maximum', 'on', 'dimmed', 'off'].includes(body.data.mode)) {
+      return reply.code(403).send({ error: 'client_scope_forbidden' });
+    }
     try {
       const requestedMode = body.data.mode === 'adaptive'
         ? 'on'
@@ -651,6 +656,33 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     } catch (error) {
       const code = error instanceof Error ? error.message : 'home_control_unavailable';
       return reply.code(502).send({ error: code });
+    }
+  });
+
+  app.get('/v1/home/stream-deck/status', async (request, reply) => {
+    if (!hasRequestPermission(request, 'home')) return reply.code(403).send({ error: 'forbidden' });
+    if (!catalog) {
+      return reply.code(503).send({ error: 'home_control_unavailable' });
+    }
+    try {
+      const [snapshot, rooms] = await Promise.all([
+        catalog.snapshot(deps.ha),
+        adaptiveLightingService ? adaptiveLightingService.getRoomStates() : Promise.resolve([]),
+      ]);
+      const television = snapshot.devices.find((device) => device.presetId === 'television') ?? null;
+      reply.header('cache-control', 'no-store');
+      return reply.code(200).send({
+        rooms,
+        television: television ? {
+          deviceId: television.deviceId,
+          state: television.state,
+          available: television.available,
+          source: television.source,
+          muted: television.muted,
+        } : null,
+      });
+    } catch {
+      return reply.code(502).send({ error: 'home_assistant_unavailable' });
     }
   });
 

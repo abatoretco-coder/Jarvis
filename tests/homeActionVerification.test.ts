@@ -281,6 +281,44 @@ describe('home action state verification', () => {
     expect(callService).not.toHaveBeenCalled();
   });
 
+  test('allows the Film scene to control only its light-switch steps for Stream Deck', async () => {
+    const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
+    let stateReads = 0;
+    const getState = jest.fn<HomeAssistantClient['getState']>(async (entityId) => ({
+      entity_id: entityId,
+      state: stateReads++ === 0 ? 'off' : 'on',
+      attributes: {},
+    }));
+    const result = await executeCatalogHomeScene({
+      catalog: {
+        getMapping: () => ({ deviceId: 'lava-lamp', entityId: 'switch.lava_lamp' }),
+      } as unknown as HomeCatalog,
+      ha: { callService, getState } as unknown as HomeAssistantClient,
+      principal: {
+        kind: 'user',
+        userId: 'owner-id',
+        email: 'owner@example.test',
+        displayName: 'Owner',
+        status: 'active',
+        roles: ['owner'],
+        permissions: ['home'],
+        sessionId: 'session',
+        clientId: 'jarvis-streamdeck',
+      },
+      scene: {
+        sceneId: 'film',
+        name: 'Film',
+        icon: 'media',
+        steps: [{ deviceId: 'lava-lamp', action: 'turn_on' }],
+        voicePhrases: [],
+        sortOrder: 0,
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'success', outcome: 'confirmed' });
+    expect(callService).toHaveBeenCalledWith(expect.objectContaining({ domain: 'switch', service: 'turn_on' }));
+  });
+
   test('keeps an all-off scene successful when the television is already off', async () => {
     const callService = jest.fn<HomeAssistantClient['callService']>(async () => ({ status: 200, data: [] }));
     const getState = jest.fn<HomeAssistantClient['getState']>(async (entityId) => ({

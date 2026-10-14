@@ -107,7 +107,8 @@
         "address",
         "phone",
         "organization",
-        "microprofile-jwt"
+        "microprofile-jwt",
+        "offline_access"
       ],
       "protocolMappers": [
         {
