@@ -67,7 +67,8 @@ interface CachedToken {
 }
 
 const _tokenCache = new Map<string, CachedToken>();
-const _keepaliveScheduled = new Set<string>();
+const _keepaliveTimers = new Map<string, ReturnType<typeof setInterval>>();
+const _keepaliveWork = new Set<Promise<unknown>>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;           // refresh 60 s before expiry
 const KEEPALIVE_DAYS = 30;
 const KEEPALIVE_TICK_MS = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
@@ -129,21 +130,33 @@ export async function refreshCalendarToken(env: CalendarTokenEnv): Promise<strin
     expiresAt:   Date.now() + expiresIn * 1_000 - TOKEN_EXPIRY_BUFFER_MS,
   });
 
-  if (!_keepaliveScheduled.has(cacheKey)) {
-    _keepaliveScheduled.add(cacheKey);
+  if (!_keepaliveTimers.has(cacheKey)) {
     let dayCount = 0;
     const timer = setInterval(() => {
       dayCount += 1;
       if (dayCount >= KEEPALIVE_DAYS) {
         dayCount = 0;
         _tokenCache.delete(cacheKey);
-        refreshCalendarToken(env).catch(() => {});
+        const work = refreshCalendarToken(env)
+          .catch(() => undefined)
+          .finally(() => _keepaliveWork.delete(work));
+        _keepaliveWork.add(work);
       }
     }, KEEPALIVE_TICK_MS);
+    _keepaliveTimers.set(cacheKey, timer);
     if (timer.unref) timer.unref();
   }
 
   return data.access_token;
+}
+
+export async function stopGoogleCalendarTokenKeepalives(): Promise<void> {
+  for (const timer of _keepaliveTimers.values()) clearInterval(timer);
+  _keepaliveTimers.clear();
+  await Promise.allSettled([..._keepaliveWork]);
+  for (const timer of _keepaliveTimers.values()) clearInterval(timer);
+  _keepaliveTimers.clear();
+  _tokenCache.clear();
 }
 
 // ─── Generic API request ──────────────────────────────────────────────────────

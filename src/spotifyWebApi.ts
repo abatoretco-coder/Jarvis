@@ -256,6 +256,7 @@ export class SpotifyWebApiClient {
   private readonly playlistCacheTtlMs = 10 * 60_000;
   private prefetchTimer?: ReturnType<typeof setInterval>;
   private readonly situationRefreshTimers = new Set<ReturnType<typeof setTimeout>>();
+  private backgroundStopped = false;
   private readonly persistTokenFile: boolean;
   private readonly onRefreshToken?: (token: string) => Promise<void> | void;
 
@@ -1570,7 +1571,12 @@ export class SpotifyWebApiClient {
 
   private refreshUserPlaylistCache(): void {
     if (!this.isConfigured()) return;
-    void this.listCurrentUserPlaylists(50, { forceRefresh: true, allowStaleOnError: true });
+    void this.listCurrentUserPlaylists(50, { forceRefresh: true, allowStaleOnError: true })
+      .catch((error) => {
+        this.log('warn', 'spotify_playlist_background_refresh_failed', {
+          errorCode: error instanceof Error ? error.message : 'spotify_playlist_refresh_failed',
+        });
+      });
   }
 
   async listUserPlaylistsPublic(limit = 50): Promise<
@@ -1736,7 +1742,7 @@ export class SpotifyWebApiClient {
   }
 
   startSituationPrefetch(): void {
-    if (!this.isConfigured() || this.prefetchTimer) return;
+    if (this.backgroundStopped || !this.isConfigured() || this.prefetchTimer) return;
     void this.fetchAndCacheSituation();
     this.refreshUserPlaylistCache();
     this.prefetchTimer = setInterval(() => {
@@ -1757,6 +1763,7 @@ export class SpotifyWebApiClient {
   }
 
   scheduleSituationRefresh(delayMs = 600): void {
+    if (this.backgroundStopped) return;
     // A player mutation is asynchronous on Spotify Connect. Drop the old value
     // immediately, then sample the situation more than once so a slow TV/app
     // activation cannot leave the previous track cached for a full TTL.
@@ -1771,6 +1778,15 @@ export class SpotifyWebApiClient {
       this.situationRefreshTimers.add(timer);
       timer.unref?.();
     }
+  }
+
+  stopSituationPrefetch(): void {
+    this.backgroundStopped = true;
+    if (this.prefetchTimer) clearInterval(this.prefetchTimer);
+    this.prefetchTimer = undefined;
+    for (const timer of this.situationRefreshTimers) clearTimeout(timer);
+    this.situationRefreshTimers.clear();
+    this.invalidateSituationCache();
   }
 
   private async fetchAndCacheSituation(): Promise<void> {

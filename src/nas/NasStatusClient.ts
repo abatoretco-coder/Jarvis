@@ -1,5 +1,9 @@
 import type { Env } from '../env';
 
+type NasStatusLogger = {
+  warn(obj: Record<string, unknown>, msg: string): void;
+};
+
 export type NasStatus = {
   hostname: string;
   generatedAt: string;
@@ -26,7 +30,7 @@ export class NasStatusClient {
   private cached?: { value: NasStatus; fetchedAt: number };
   private inFlight?: Promise<NasStatus>;
 
-  constructor(env: Env) {
+  constructor(env: Env, private readonly log?: NasStatusLogger) {
     this.url = env.NAS_STATUS_URL;
     this.token = env.NAS_STATUS_TOKEN;
     this.timeoutMs = env.NAS_STATUS_TIMEOUT_MS;
@@ -45,7 +49,12 @@ export class NasStatusClient {
       return this.cached.value;
     }
     if (this.cached && now - this.cached.fetchedAt <= this.cacheStaleMs) {
-      void this.refreshStatus();
+      void this.refreshStatus().catch((error) => {
+        this.log?.warn(
+          { errorCode: error instanceof Error ? error.message : 'nas_status_refresh_failed' },
+          'NAS status background refresh failed'
+        );
+      });
       return this.cached.value;
     }
     return this.refreshStatus();

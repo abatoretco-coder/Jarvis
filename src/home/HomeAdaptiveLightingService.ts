@@ -88,7 +88,9 @@ function mutationStatus(
 
 export class HomeAdaptiveLightingService {
   private timer?: NodeJS.Timeout;
+  private scheduledTick?: Promise<void>;
   private running = false;
+  private stopped = true;
   private readonly desiredRooms = new Map<string, DesiredRoom>();
   private readonly lastObservedStates = new Map<string, string>();
   private readonly pendingUntil = new Map<string, number>();
@@ -112,14 +114,32 @@ export class HomeAdaptiveLightingService {
   start(): void {
     const config = this.catalog.getAdaptiveLightingConfig();
     if (!config?.enabled || this.timer) return;
-    void this.tick();
-    this.timer = setInterval(() => void this.tick(), config.pollSeconds * 1_000);
+    this.stopped = false;
+    this.scheduleTick();
+    this.timer = setInterval(() => this.scheduleTick(), config.pollSeconds * 1_000);
     this.timer.unref();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    await this.scheduledTick;
+  }
+
+  private scheduleTick(): void {
+    if (this.stopped || this.scheduledTick) return;
+    const work = this.tick()
+      .catch((error) => {
+        this.log.warn(
+          { errorCode: error instanceof Error ? error.message : 'adaptive_lighting_tick_failed' },
+          'adaptive lighting scheduled tick failed'
+        );
+      })
+      .finally(() => {
+        if (this.scheduledTick === work) this.scheduledTick = undefined;
+      });
+    this.scheduledTick = work;
   }
 
   private roomDeviceIds(room: AdaptiveLightingRoomConfig): string[] {

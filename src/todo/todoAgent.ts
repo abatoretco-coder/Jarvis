@@ -185,7 +185,7 @@ interface CachedToken { accessToken: string; expiresAt: number }
 const _msTokenCache          = new Map<string, CachedToken>();
 const _msLiveRefreshToken    = new Map<string, string>(); // captures rotated refresh tokens
 const _msRefreshInFlight     = new Map<string, Promise<string>>();
-const _msKeepaliveScheduled  = new Set<string>();
+const _msKeepaliveTimers     = new Map<string, ReturnType<typeof setInterval>>();
 const TOKEN_EXPIRY_BUFFER_MS = 60_000;          // refresh access token 60 s before expiry
 const KEEPALIVE_DAYS         = 30;              // resets Microsoft's 90-day inactivity window
 
@@ -290,8 +290,7 @@ async function refreshMicrosoftTokenUncached(env: {
   // downtime are still handled as explicit reconnect-required states.
   // Note: Node.js setInterval uses a 32-bit ms counter (max ~24.8 days).
   // We chain 1-day intervals and count up to KEEPALIVE_DAYS to stay within bounds.
-  if (!_msKeepaliveScheduled.has(cacheKey)) {
-    _msKeepaliveScheduled.add(cacheKey);
+  if (!_msKeepaliveTimers.has(cacheKey)) {
     let dayCount = 0;
     const timer = setInterval(() => {
       dayCount++;
@@ -303,10 +302,20 @@ async function refreshMicrosoftTokenUncached(env: {
         });
       }
     }, 24 * 3_600_000); // 1 day — safe for 32-bit setInterval
+    _msKeepaliveTimers.set(cacheKey, timer);
     if (timer.unref) timer.unref();
   }
 
   return data.access_token;
+}
+
+export async function stopTodoTokenKeepalives(): Promise<void> {
+  for (const timer of _msKeepaliveTimers.values()) clearInterval(timer);
+  _msKeepaliveTimers.clear();
+  await Promise.allSettled([..._msRefreshInFlight.values()]);
+  for (const timer of _msKeepaliveTimers.values()) clearInterval(timer);
+  _msKeepaliveTimers.clear();
+  _msTokenCache.clear();
 }
 
 export async function getMicrosoftTodoAccessToken(env: {

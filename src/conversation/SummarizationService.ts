@@ -17,6 +17,7 @@ export type SummarizationServiceOptions = {
   llmModel: string;
   llmTimeoutMs: number;
   llmMaxOutputTokens?: number;
+  log?: { warn(obj: Record<string, unknown>, msg: string): void };
 };
 
 function sanitizeSummaryOutput(input: string): string {
@@ -41,6 +42,9 @@ function sanitizeSummaryOutput(input: string): string {
 }
 
 export class SummarizationService {
+  private readonly backgroundJobs = new Set<Promise<void>>();
+  private stopping = false;
+
   constructor(
     private readonly threadRepository: ThreadRepository,
     private readonly messageRepository: MessageRepository,
@@ -69,12 +73,38 @@ export class SummarizationService {
   }
 
   startPresummarize(threadId: string): void {
-    void this.runPresummarize(threadId);
+    this.startBackgroundJob(
+      () => this.runPresummarize(threadId),
+      'conversation presummarization failed'
+    );
   }
 
   startTitleGeneration(threadId: string, userText: string, assistantText: string): void {
     if (!this.options.llmApiKey) return;
-    void this.runTitleGeneration(threadId, userText, assistantText);
+    this.startBackgroundJob(
+      () => this.runTitleGeneration(threadId, userText, assistantText),
+      'conversation title generation failed'
+    );
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    await Promise.allSettled([...this.backgroundJobs]);
+  }
+
+  private startBackgroundJob(createJob: () => Promise<void>, message: string): void {
+    if (this.stopping) return;
+    const tracked = createJob()
+      .catch((error) => {
+        this.options.log?.warn(
+          { errorCode: error instanceof Error ? error.message : 'conversation_background_job_failed' },
+          message
+        );
+      })
+      .finally(() => {
+        this.backgroundJobs.delete(tracked);
+      });
+    this.backgroundJobs.add(tracked);
   }
 
   async commitCandidateIfReady(threadId: string): Promise<{ committed: boolean; usedSummaryVersion?: string }> {

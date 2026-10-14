@@ -1,9 +1,80 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, jest, test } from '@jest/globals';
 
 import { InMemoryMessageRepository, InMemoryThreadRepository } from '../src/conversation/repositories/InMemoryRepositories';
 import { SummarizationService } from '../src/conversation/SummarizationService';
 
 describe('conversation services', () => {
+  test('logs an autonomous presummarization rejection instead of leaving it unhandled', async () => {
+    const warn = jest.fn();
+    const threadRepository = {
+      tryStartSummary: jest.fn(async () => {
+        throw new Error('sqlite_summary_read_failed');
+      }),
+    } as unknown as InMemoryThreadRepository;
+    const service = new SummarizationService(
+      threadRepository,
+      new InMemoryMessageRepository(),
+      {
+        hotWindowK: 10,
+        minDeltaM: 20,
+        triggerEveryInteractions: 10,
+        llmApiKey: undefined,
+        llmBaseUrl: 'http://llm.test/v1',
+        llmModel: 'qwen-test',
+        llmTimeoutMs: 3_000,
+        log: { warn },
+      }
+    );
+
+    service.startPresummarize('thread-failing');
+    await service.stop();
+
+    expect(warn).toHaveBeenCalledWith(
+      { errorCode: 'sqlite_summary_read_failed' },
+      'conversation presummarization failed'
+    );
+  });
+
+  test('waits for active summarization work and refuses new work after stop', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tryStartSummary = jest.fn(async () => {
+      await pending;
+      return false;
+    });
+    const service = new SummarizationService(
+      { tryStartSummary } as unknown as InMemoryThreadRepository,
+      new InMemoryMessageRepository(),
+      {
+        hotWindowK: 10,
+        minDeltaM: 20,
+        triggerEveryInteractions: 10,
+        llmApiKey: undefined,
+        llmBaseUrl: 'http://llm.test/v1',
+        llmModel: 'qwen-test',
+        llmTimeoutMs: 3_000,
+      }
+    );
+
+    service.startPresummarize('thread-running');
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    release();
+    await stopping;
+    service.startPresummarize('thread-after-stop');
+    await Promise.resolve();
+
+    expect(stopped).toBe(true);
+    expect(tryStartSummary).toHaveBeenCalledTimes(1);
+  });
+
   test('findById does not create a missing conversation', async () => {
     const threadRepository = new InMemoryThreadRepository();
 
