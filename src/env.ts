@@ -220,6 +220,26 @@ const envSchema = z
     OPENAI_TTS_FORMAT: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).default('mp3'),
     // Optional speaking-style instructions for the configured OpenAI speech model.
     OPENAI_TTS_INSTRUCTIONS: optionalNonEmptyString,
+    // GPT-Live is an opt-in voice transport. Every client flag remains gated by
+    // the master flag and effective runtime health.
+    OPENAI_LIVE_ENABLED: booleanFromEnv.default(false),
+    OPENAI_LIVE_DESKTOP_ENABLED: booleanFromEnv.default(false),
+    OPENAI_LIVE_ANDROID_ENABLED: booleanFromEnv.default(false),
+    OPENAI_LIVE_HA_TTS_ENABLED: booleanFromEnv.default(false),
+    OPENAI_LIVE_MODEL: z.string().trim().min(1).max(128).default('gpt-live-1'),
+    OPENAI_LIVE_VOICE: z.string().trim().min(1).max(64).default('vesper'),
+    OPENAI_LIVE_IDLE_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(5_000).max(120_000)).default(20_000),
+    OPENAI_LIVE_MAX_SESSION_MS: numberFromEnv.pipe(z.number().min(30_000).max(7_200_000)).default(300_000),
+    OPENAI_LIVE_HA_TTS_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(1_000).max(60_000)).default(12_000),
+    OPENAI_LIVE_MAX_SESSIONS_PER_USER: numberFromEnv.pipe(z.number().min(1).max(10)).default(2),
+    OPENAI_LIVE_MAX_SESSIONS_PER_DEVICE: numberFromEnv.pipe(z.number().min(1).max(3)).default(1),
+    OPENAI_LIVE_MAX_CREATIONS_PER_MINUTE: numberFromEnv.pipe(z.number().min(1).max(60)).default(6),
+    OPENAI_LIVE_MAX_DELEGATIONS_PER_SESSION: numberFromEnv.pipe(z.number().min(1).max(1_000)).default(30),
+    OPENAI_LIVE_DELEGATION_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(1_000).max(300_000)).default(60_000),
+    OPENAI_LIVE_MAX_EVENT_BYTES: numberFromEnv.pipe(z.number().min(1_024).max(1_048_576)).default(65_536),
+    OPENAI_LIVE_MAX_FALLBACK_AUDIO_BYTES: numberFromEnv.pipe(z.number().min(65_536).max(52_428_800)).default(10_485_760),
+    OPENAI_LIVE_DAILY_BUDGET_USD: z.coerce.number().min(0).max(10_000).default(2),
+    OPENAI_LIVE_MONTHLY_BUDGET_USD: z.coerce.number().min(0).max(100_000).default(30),
     // Audio post-processing (applied to all TTS output via ffmpeg)
     TTS_SPEED: z.coerce.number().min(0.25).max(4.0).default(1.0), // atempo 0.5–2.0 (1.0=normal, 1.1=10% faster)
     TTS_PITCH_SEMITONES: z.coerce.number().min(-12).max(12).default(0), // pitch shift in semitones (0=unchanged)

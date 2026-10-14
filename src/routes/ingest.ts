@@ -155,6 +155,7 @@ import {
   planTodoAgentAction,
   type TodoAction,
 } from '../todo/todoAgent';
+import { hashLiveDeviceId } from '../voice/live/LiveSessionRegistry';
 import { VoiceArchiveRepository } from '../voice/VoiceArchiveRepository';
 import { VoiceArchiveService } from '../voice/VoiceArchiveService';
 import {
@@ -247,6 +248,9 @@ const responseSchema = z.object({
   responseText: z.string().min(1),
   displayText: z.string().min(1),
   spokenText: z.string().min(1),
+  operationStatus: z
+    .enum(['not_applicable', 'accepted', 'succeeded', 'partial', 'uncertain', 'failed'])
+    .optional(),
   usedSummaryVersion: z.string().min(1).optional(),
   sources: z.array(z.string().url()).optional(),
   cultureCandidates: z
@@ -363,13 +367,38 @@ function ensureResponseTextVariants(payload: unknown): unknown {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
   const record = payload as Record<string, unknown>;
   if (typeof record['responseText'] !== 'string' || !record['responseText'].trim()) return payload;
+  const replyMeta = record['replyMeta'];
+  const metadataStatus =
+    replyMeta && typeof replyMeta === 'object' && !Array.isArray(replyMeta)
+      ? (replyMeta as Record<string, unknown>)['operationStatus']
+      : undefined;
   return {
     ...record,
     displayText:
       typeof record['displayText'] === 'string' ? record['displayText'] : record['responseText'],
     spokenText:
       typeof record['spokenText'] === 'string' ? record['spokenText'] : record['responseText'],
+    operationStatus: normalizeOperationStatus(record['operationStatus'] ?? metadataStatus),
   };
+}
+
+function normalizeOperationStatus(value: unknown):
+  | 'not_applicable'
+  | 'accepted'
+  | 'succeeded'
+  | 'partial'
+  | 'uncertain'
+  | 'failed' {
+  if (
+    value === 'accepted' ||
+    value === 'succeeded' ||
+    value === 'partial' ||
+    value === 'uncertain' ||
+    value === 'failed'
+  ) return value;
+  if (value === 'executed' || value === 'confirmed') return 'succeeded';
+  if (value === 'cancelled' || value === 'execution_failed' || value === 'failure') return 'failed';
+  return 'not_applicable';
 }
 
 function quickActionVoiceOutcome(
@@ -2221,6 +2250,7 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     const supportsInlineVoiceAudio =
       parsed.data.clientContext?.['supportsInlineVoiceAudio'] === true ||
       parsed.data.clientContext?.['supportsInlineVoiceAudio'] === 'true';
+    const isGptLiveTransport = parsed.data.clientContext?.['voiceTransport'] === 'gpt-live';
     const isVoiceHubChannel = Boolean(clientChannel?.includes('voice-hub'));
     let assistantInputText = toSingleParagraphPlainText(enrichWithContextNote(text, contextNote));
     const requestId = randomUUID();
@@ -5996,8 +6026,8 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
       mode: voiceMode,
     });
     const assistantTextVoice = voiceEnabled ? assistantSpokenText : assistantTextForClient;
-    const shouldPrepareTts = voiceEnabled;
-    const shouldInlineVoiceAudio = voiceEnabled && supportsInlineVoiceAudio;
+    const shouldPrepareTts = voiceEnabled && !isGptLiveTransport;
+    const shouldInlineVoiceAudio = voiceEnabled && supportsInlineVoiceAudio && !isGptLiveTransport;
 
     if (responseDomain === 'mail') {
       const parsedMail = extractMailStateFromReply(assistantText);
@@ -6067,6 +6097,9 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         displayText: assistantTextForClient,
         spokenText: assistantSpokenText,
       }),
+      operationStatus: normalizeOperationStatus(
+        (replyMeta as Record<string, unknown>)['operationStatus']
+      ),
       ...(usedSummaryVersion ? { usedSummaryVersion } : {}),
       ...(searchSources.length > 0 ? { sources: searchSources } : {}),
       ...(voiceAudio ? { voiceAudio } : {}),
@@ -6266,6 +6299,71 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         typeof req.headers['x-voice-turn-id'] === 'string'
           ? req.headers['x-voice-turn-id'].trim()
           : '';
+
+      const principal = getRequestPrincipal(req);
+      const liveHaTts =
+        mode === 'auto' &&
+        principal?.kind === 'service' &&
+        principal.serviceId === 'home-assistant-pc' &&
+        deps.liveVoice?.sessions.availability('home_assistant').available === true;
+      if (liveHaTts && deps.liveVoice) {
+        try {
+          const liveResult = await deps.liveVoice.tts.synthesize(text, {
+            apiKey: deps.env.OPENAI_API_KEY!,
+            baseUrl: deps.env.OPENAI_BASE_URL,
+            model: deps.env.OPENAI_LIVE_MODEL,
+            voice: deps.env.OPENAI_LIVE_VOICE,
+            timeoutMs: deps.env.OPENAI_LIVE_HA_TTS_TIMEOUT_MS,
+            maxEventBytes: deps.env.OPENAI_LIVE_MAX_EVENT_BYTES,
+          });
+          const nowMs = Date.now();
+          deps.liveVoice.registry.create({
+            sessionId: liveResult.sessionId,
+            ownerUserId: 'service:home-assistant-pc',
+            deviceHash: hashLiveDeviceId('home-assistant-tts'),
+            threadId: 'home-assistant-tts',
+            client: 'home_assistant',
+            nowMs: nowMs - liveResult.usageSeconds * 1_000,
+            expiresAtMs: nowMs,
+          });
+          deps.liveVoice.registry.markClosed({
+            sessionId: liveResult.sessionId,
+            confirmed: false,
+            usageSeconds: liveResult.usageSeconds,
+            errorCode: 'ha_tts_usage_estimated',
+            nowMs,
+          });
+          const bytes = liveResult.audio;
+          const elapsedMs = Date.now() - t0;
+          recordPerf('tts', elapsedMs);
+          voiceArchive.archive({
+            voiceTurnId,
+            direction: 'output',
+            audio: bytes,
+            contentType: 'audio/wav',
+            transcript: text,
+            engineId: `openai-live:${deps.env.OPENAI_LIVE_MODEL}`,
+            latencyMs: elapsedMs,
+          });
+          app.log.info(
+            { elapsed_ms: elapsedMs, via: 'openai-live', voice_turn_id: voiceTurnId || undefined },
+            'tts_complete'
+          );
+          return reply
+            .code(200)
+            .header('content-type', 'audio/wav')
+            .header('x-tts-provider', `openai-live:${deps.env.OPENAI_LIVE_MODEL}`)
+            .send(bytes);
+        } catch (error) {
+          app.log.warn(
+            {
+              errorCode: error instanceof Error ? error.message : 'live_tts_failed',
+              voice_turn_id: voiceTurnId || undefined,
+            },
+            'live TTS rejected; using classic TTS'
+          );
+        }
+      }
 
       // ── Warm cache check ──────────────────────────────────────────────────────
       // ingest pre-warms TTS while building the response. If the Desktop calls

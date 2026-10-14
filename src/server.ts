@@ -39,6 +39,7 @@ import { registerHomeTelemetryRoutes } from './routes/homeTelemetry';
 import { registerIdentityRoutes } from './routes/identity';
 import { registerIngestRoute } from './routes/ingest';
 import { registerIntegrationRoutes } from './routes/integrations';
+import { registerLiveIngestValidationHook, registerLiveVoiceRoutes } from './routes/liveVoice';
 import { registerMusicRoutes } from './routes/music';
 import { registerMutationIdempotencyHooks } from './routes/mutationIdempotency';
 import { registerNasStatusRoute } from './routes/nasStatus';
@@ -49,6 +50,7 @@ import { parseTrustedProxyCidrs } from './security/edgePolicy';
 import { SpotifyClientResolver } from './spotify/SpotifyClientResolver';
 import { SpotifyWebApiClient } from './spotifyWebApi';
 import { stopTodoTokenKeepalives } from './todo/todoAgent';
+import { createLiveVoiceRuntime, type LiveVoiceRuntime } from './voice/live/runtime';
 
 export type AppDeps = {
   env: Env;
@@ -65,6 +67,7 @@ export type AppDeps = {
   homeTelemetry?: HomeTelemetryRepository;
   pcAgentBroker?: PcAgentCommandBroker;
   identityRepository?: IdentityRepository;
+  liveVoice?: LiveVoiceRuntime;
 };
 
 export function buildApp(env: Env): FastifyInstance {
@@ -122,6 +125,8 @@ export function buildApp(env: Env): FastifyInstance {
 
   const deps: AppDeps = { env, ha, spotifyWebApi, nasStatus, contextCache, pcAgentBroker: new PcAgentCommandBroker() };
   const runtimeDb = createConversationDb(env.CONVERSATION_DB_PATH);
+  const liveVoice = createLiveVoiceRuntime({ env, db: runtimeDb, log: app.log });
+  deps.liveVoice = liveVoice;
   deps.homeRuntimeState = new HomeRuntimeStateRepository(runtimeDb);
   deps.homeTelemetry = new HomeTelemetryRepository(runtimeDb);
   const identityDb = env.OIDC_ENABLED ? runtimeDb : undefined;
@@ -209,6 +214,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerSecurityHooks(app, env);
   registerApiKeyHook(app, env, identityService, adminRepository);
   registerPrincipalRateLimitHook(app, env);
+  registerLiveIngestValidationHook(app, liveVoice);
   registerMutationIdempotencyHooks(
     app,
     new MutationIdempotencyCoordinator({
@@ -241,6 +247,8 @@ export function buildApp(env: Env): FastifyInstance {
   homeTelemetryCollector?.start();
   app.addHook('onClose', async () => {
     await homeTelemetryCollector?.stop();
+    liveVoice.tts.stop();
+    await liveVoice.sessions.stop();
     runtimeDb.close();
   });
 
@@ -256,6 +264,7 @@ export function buildApp(env: Env): FastifyInstance {
   }
 
   registerCapabilitiesRoute(app, deps);
+  registerLiveVoiceRoutes(app, liveVoice, runtimeDb);
   registerContextCacheRoute(app, deps);
   if (env.CULTURE_ENABLED) registerCultureProfileRoutes(app, deps);
   registerDashboardRoute(app, deps);
@@ -266,6 +275,16 @@ export function buildApp(env: Env): FastifyInstance {
   registerMusicRoutes(app, deps);
   if (env.NAS_STATUS_ENABLED) registerNasStatusRoute(app, deps);
   registerIngestRoute(app, deps);
+
+  liveVoice.sessions.start();
+  if (env.OPENAI_LIVE_ENABLED && env.OPENAI_API_KEY && env.OIDC_ENABLED) {
+    void liveVoice.sessions.recoverOrphans().catch((error: unknown) => {
+      app.log.warn(
+        { errorCode: error instanceof Error ? error.message : 'live_orphan_recovery_failed' },
+        'live orphan recovery failed'
+      );
+    });
+  }
 
   return app;
 }

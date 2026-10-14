@@ -52,12 +52,13 @@ describe('conversation database migrations', () => {
       { version: 17, name: 'voice_artifact_archive' },
       { version: 18, name: 'lighting_intent_maximum_mode' },
       { version: 19, name: 'durable_home_telemetry' },
+      { version: 20, name: 'live_voice_registry' },
     ]);
     first.close();
 
     const reopened = createConversationDb(databasePath);
     expect(reopened.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({
-      count: 19,
+      count: 20,
     });
     reopened.close();
   });
