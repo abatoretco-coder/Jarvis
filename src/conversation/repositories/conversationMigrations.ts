@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CONVERSATION_SCHEMA_VERSION = 19;
+export const CONVERSATION_SCHEMA_VERSION = 20;
 
 const INITIAL_SCHEMA_CHECKSUM =
   'sha256:adef33240904073d81a464ea6dda799046546d240fa7572fdf1887a96adb7bbf';
@@ -40,6 +40,61 @@ const LIGHTING_INTENT_MAXIMUM_MODE_CHECKSUM =
   'sha256:c62b153f283296530a6916d3909cca0d97073d98dbaacf1d40e2e1fc63789bbf';
 const HOME_TELEMETRY_CHECKSUM =
   'sha256:31e938ce94d0b1244754c65c63ea37a112e060c8667515731a34f256317c814d';
+const LIVE_VOICE_REGISTRY_CHECKSUM =
+  'sha256:b68bec7dc1542485cf0907a9355eefbe2e7204c2cc24e291f6b70b47e8a38121';
+
+function ensureLiveVoiceRegistrySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS live_voice_sessions (
+      session_id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      device_hash TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      client TEXT NOT NULL CHECK (client IN ('desktop','android','home_assistant')),
+      state TEXT NOT NULL CHECK (state IN ('active','closing','closed','finalization_unconfirmed')),
+      sideband_attached INTEGER NOT NULL DEFAULT 0 CHECK (sideband_attached IN (0,1)),
+      finalization_confirmed INTEGER NOT NULL DEFAULT 0 CHECK (finalization_confirmed IN (0,1)),
+      usage_seconds INTEGER NOT NULL DEFAULT 0 CHECK (usage_seconds >= 0),
+      created_at_ms INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      last_event_at_ms INTEGER NOT NULL,
+      closed_at_ms INTEGER,
+      last_error_code TEXT,
+      CHECK (length(session_id) BETWEEN 8 AND 160),
+      CHECK (length(owner_user_id) BETWEEN 1 AND 160),
+      CHECK (length(device_hash) = 64),
+      CHECK (length(thread_id) BETWEEN 1 AND 256),
+      CHECK (expires_at_ms > created_at_ms),
+      CHECK (last_error_code IS NULL OR length(last_error_code) <= 128)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_live_voice_sessions_owner_state
+      ON live_voice_sessions(owner_user_id,state,expires_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_live_voice_sessions_device_state
+      ON live_voice_sessions(owner_user_id,device_hash,state,created_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_live_voice_sessions_usage_period
+      ON live_voice_sessions(created_at_ms,usage_seconds);
+
+    CREATE TABLE IF NOT EXISTS live_voice_delegations (
+      session_id TEXT NOT NULL,
+      delegation_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN (
+        'capturing','ready_to_delegate','delegating','ingest_sent','ingest_running',
+        'ingest_completed','replying','completed','uncertain','failed'
+      )),
+      operation_key TEXT,
+      observed_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(session_id,delegation_id),
+      FOREIGN KEY(session_id) REFERENCES live_voice_sessions(session_id) ON DELETE CASCADE,
+      CHECK (length(delegation_id) BETWEEN 1 AND 160),
+      CHECK (operation_key IS NULL OR length(operation_key) BETWEEN 8 AND 128)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_live_voice_delegations_operation_key
+      ON live_voice_delegations(operation_key) WHERE operation_key IS NOT NULL;
+  `);
+}
 
 function ensureHomeTelemetrySchema(db: Database.Database): void {
   db.exec(`
@@ -1025,6 +1080,8 @@ export function runConversationMigrations(db: Database.Database): void {
     throw new Error('conversation_migration_checksum_mismatch:18');
   if (applied.get(19) && applied.get(19) !== HOME_TELEMETRY_CHECKSUM)
     throw new Error('conversation_migration_checksum_mismatch:19');
+  if (applied.get(20) && applied.get(20) !== LIVE_VOICE_REGISTRY_CHECKSUM)
+    throw new Error('conversation_migration_checksum_mismatch:20');
 
   db.transaction(() => {
     ensureInitialSchema(db);
@@ -1139,6 +1196,12 @@ export function runConversationMigrations(db: Database.Database): void {
       db.prepare(
         'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (19, ?, ?, ?)'
       ).run('durable_home_telemetry', HOME_TELEMETRY_CHECKSUM, Date.now());
+    }
+    ensureLiveVoiceRegistrySchema(db);
+    if (!applied.has(20)) {
+      db.prepare(
+        'INSERT INTO schema_migrations(version, name, checksum, applied_at_ms) VALUES (20, ?, ?, ?)'
+      ).run('live_voice_registry', LIVE_VOICE_REGISTRY_CHECKSUM, Date.now());
     }
     db.pragma(`user_version = ${CONVERSATION_SCHEMA_VERSION}`);
   })();
