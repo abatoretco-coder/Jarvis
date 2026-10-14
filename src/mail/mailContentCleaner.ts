@@ -36,6 +36,23 @@ const LOW_VALUE_LINE_PATTERNS = [
   /^envoye depuis /i,
 ];
 
+const SIGNATURE_START_PATTERNS = [
+  /^(cordialement|bien cordialement|bien a vous|merci|best regards|kind regards|regards)[,!. ]*$/i,
+];
+
+const QUOTED_REPLY_START_PATTERNS = [
+  /^le .+ a ecrit\s*:$/i,
+  /^on .+ wrote\s*:$/i,
+  /^-{2,}\s*(message d[' ]origine|original message)\s*-{2,}$/i,
+];
+
+const IMPORTANT_TAIL_PATTERNS = [
+  /\b(urgent|action requise|merci de|repondre|reponse attendue|avant le|echeance)\b/i,
+  /\b(montant|reference|reservation|commande|annulation|paiement|facture|rendez[- ]vous|date|arrivee|depart|livraison)\b/i,
+  /\b\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?\b/,
+  /\b\d+(?:[ ,.]+\d{2})?\s*(?:eur|€|usd|\$)\b/i,
+];
+
 function normalizeForMatch(value: string): string {
   return value
     .normalize('NFKD')
@@ -92,6 +109,27 @@ function isStrongFooterStartLine(value: string): boolean {
   return STRONG_FOOTER_START_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+function isSignatureStartLine(value: string): boolean {
+  const normalized = normalizeForMatch(value);
+  return SIGNATURE_START_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isQuotedReplyStartLine(value: string): boolean {
+  const normalized = normalizeForMatch(value);
+  return QUOTED_REPLY_START_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function hasImportantContentAfter(lines: string[], currentIndex: number): boolean {
+  return lines.slice(currentIndex + 1).some((rawLine) => {
+    const line = collapseInlineWhitespace(rawLine);
+    if (!line || isLowValueLine(line) || isFooterStartLine(line) || isStrongFooterStartLine(line)) {
+      return false;
+    }
+    const normalized = normalizeForMatch(line);
+    return IMPORTANT_TAIL_PATTERNS.some((pattern) => pattern.test(normalized));
+  });
+}
+
 function normalizeMailBodyInput(value: string): string {
   return value
     .replace(/\r\n/g, '\n')
@@ -111,18 +149,32 @@ export function cleanMailDetailText(text: string): string {
   let blankPending = false;
   let keptMeaningfulLines = 0;
 
-  for (const rawLine of lines) {
+  for (const [lineIndex, rawLine] of lines.entries()) {
     const line = collapseInlineWhitespace(rawLine);
     if (!line) {
       blankPending = cleaned.length > 0;
       continue;
     }
 
-    if (isStrongFooterStartLine(line) && keptMeaningfulLines >= 2) {
+    if (isQuotedReplyStartLine(line) && keptMeaningfulLines >= 1) {
       break;
     }
 
-    if (isFooterStartLine(line) && keptMeaningfulLines >= 4) {
+    if (line.startsWith('>') && keptMeaningfulLines >= 1) {
+      break;
+    }
+
+    const importantContentFollows = hasImportantContentAfter(lines, lineIndex);
+
+    if (isSignatureStartLine(line) && keptMeaningfulLines >= 1 && !importantContentFollows) {
+      break;
+    }
+
+    if (isStrongFooterStartLine(line) && keptMeaningfulLines >= 2 && !importantContentFollows) {
+      break;
+    }
+
+    if (isFooterStartLine(line) && keptMeaningfulLines >= 4 && !importantContentFollows) {
       break;
     }
 

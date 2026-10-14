@@ -39,6 +39,17 @@ Each qualification may include:
 4. `ruleId`: stable id of the personal rule that matched.
 5. `groupKey`: aggregation key used to group repeated alerts, such as GitHub CI failures.
 
+Qualifications are advisory only. This module never sends or replies to an email, archives or deletes a message, or creates a task.
+
+Rule priority is conservative:
+1. Explicit personal `action` rules keep their specialized recommendation and grouping.
+2. Content-level guards detect account-security incidents, payment failures and cancellations or changes to orders, reservations and appointments.
+3. Personal `info` and `ignore` rules apply only when no important content guard matched.
+4. Generic request, informational and noise signals apply next.
+5. Ambiguous messages remain visible as low-confidence `info`.
+
+An address or display name is only a classification hint. It is never treated as proof that a sender is trusted or authentic. In particular, a marketing or automated sender rule cannot suppress content that indicates a security incident, failed payment, overdue invoice or transactional cancellation.
+
 Dashboard behavior is intentionally different from briefing behavior:
 1. Dashboard keeps showing all recent inbox messages so the user can quickly delete or archive noise.
 2. Dashboard prefixes rows with `Action`, `Info`, or `Ignore`.
@@ -67,6 +78,11 @@ When adding a rule:
 2. Use `subjectAnyIncludes` for alternative subject markers.
 3. Put more specific rules before broader rules if they can match the same sender.
 4. Add or update tests in `tests/mailQualification.test.ts`.
+
+## Mail Content Cleaning
+`cleanMailDetailText` removes common browser links, marketing chrome, signatures, legal boilerplate and quoted replies without parsing MIME or HTML.
+
+The cleaner preserves useful dates, amounts, references and deadlines. Before cutting at a footer-like or signature-like line, it checks the remaining text for important content. If cleaning would otherwise remove the complete message, it returns the normalized original text rather than an empty result.
 
 ## Proactive Context Cache
 1. Keep unread count, latest message metadata, important/unread summary and last-read thread summary warm.
