@@ -339,6 +339,7 @@ export async function getMicrosoftTodoAccessToken(env: {
     MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
     OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
     cacheKey: env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
+    storeKey: `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
     onRefreshToken: env.onRefreshToken,
     onConnectionError: env.onConnectionError,
     onConnectionHealthy: env.onConnectionHealthy,
@@ -349,6 +350,13 @@ export async function getMicrosoftTodoAccessToken(env: {
 // ─── MS Graph — low-level helpers ────────────────────────────────────────────
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
+const GRAPH_ORIGIN = 'https://graph.microsoft.com';
+const GRAPH_MAX_PAGES = 50;
+const GRAPH_MAX_ITEMS = 2_000;
+const GRAPH_READ_RETRIES = 1;
+const GRAPH_RETRY_FALLBACK_MS = 1_000;
+const GRAPH_RETRY_MAX_MS = 5_000;
+const PARIS_GRAPH_TIME_ZONE = 'Romance Standard Time';
 
 interface MsTaskList { id: string; displayName: string; wellknownListName?: string }
 interface MsTask {
@@ -368,88 +376,215 @@ interface MsTask {
 }
 interface MsChecklistItem { id: string; displayName: string; isChecked: boolean; createdDateTime?: string }
 
-async function graphGet<T>(path: string, token: string): Promise<T> {
-  const resp = await fetch(`${GRAPH}${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok) {
-    throw new Error(`todo_graph_get_failed:${resp.status}`);
+type GraphMethod = 'get' | 'post' | 'patch' | 'delete';
+type GraphOutcome = 'rejected' | 'uncertain';
+
+class TodoGraphError extends Error {
+  constructor(
+    readonly method: GraphMethod,
+    readonly outcome: GraphOutcome,
+    readonly status?: number,
+  ) {
+    super(outcome === 'uncertain'
+      ? `todo_graph_${method}_uncertain${status ? `:${status}` : ''}`
+      : `todo_graph_${method}_failed:${status ?? 'network'}`);
+    this.name = 'TodoGraphError';
   }
-  return resp.json() as Promise<T>;
+}
+
+function graphUrl(path: string): URL {
+  return new URL(`${GRAPH}${path.startsWith('/') ? path : `/${path}`}`);
+}
+
+function validateGraphNextLink(value: unknown): URL | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new Error('todo_graph_malformed_next_link');
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('todo_graph_malformed_next_link');
+  }
+  if (
+    url.protocol !== 'https:'
+    || url.origin !== GRAPH_ORIGIN
+    || url.port !== ''
+    || url.username !== ''
+    || url.password !== ''
+    || url.hash !== ''
+    || !(url.pathname === '/v1.0' || url.pathname.startsWith('/v1.0/'))
+  ) {
+    throw new Error('todo_graph_untrusted_next_link');
+  }
+  return url;
+}
+
+function retryDelayMs(response: Response): number | undefined {
+  const raw = response.headers.get('retry-after')?.trim();
+  if (!raw) return GRAPH_RETRY_FALLBACK_MS;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    const delayMs = Math.floor(seconds * 1_000);
+    return delayMs <= GRAPH_RETRY_MAX_MS ? delayMs : undefined;
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    const delayMs = Math.max(0, dateMs - Date.now());
+    return delayMs <= GRAPH_RETRY_MAX_MS ? delayMs : undefined;
+  }
+  return GRAPH_RETRY_FALLBACK_MS;
+}
+
+function delay(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+async function graphFetch(
+  url: URL,
+  token: string,
+  method: GraphMethod,
+  init: RequestInit = {},
+): Promise<Response> {
+  const isRead = method === 'get';
+  for (let attempt = 0; ; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'application/json',
+          ...(init.headers ?? {}),
+        },
+        redirect: 'error',
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch {
+      if (isRead && attempt < GRAPH_READ_RETRIES) {
+        await delay(GRAPH_RETRY_FALLBACK_MS);
+        continue;
+      }
+      throw new TodoGraphError(method, isRead ? 'rejected' : 'uncertain');
+    }
+
+    if (response.ok) return response;
+    const retryableRead = isRead
+      && attempt < GRAPH_READ_RETRIES
+      && (response.status === 429 || response.status === 502 || response.status === 503 || response.status === 504);
+    if (retryableRead) {
+      const retryDelay = retryDelayMs(response);
+      if (retryDelay !== undefined) {
+        await delay(retryDelay);
+        continue;
+      }
+    }
+    const uncertainMutation = !isRead && (response.status === 408 || response.status >= 500);
+    throw new TodoGraphError(method, uncertainMutation ? 'uncertain' : 'rejected', response.status);
+  }
+}
+
+async function readJsonObject(response: Response, errorCode: string): Promise<Record<string, unknown>> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(errorCode);
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error(errorCode);
+  return payload as Record<string, unknown>;
 }
 
 async function graphGetCollection<T>(path: string, token: string): Promise<T[]> {
   const values: T[] = [];
-  let nextUrl: string | undefined = new URL(path, `${GRAPH}/`).toString();
+  let nextUrl: URL | undefined = graphUrl(path);
   let pageCount = 0;
   while (nextUrl) {
-    const url = new URL(nextUrl);
-    if (url.protocol !== 'https:' || url.hostname !== 'graph.microsoft.com') {
-      throw new Error('todo_graph_untrusted_next_link');
-    }
-    const resp = await fetch(url, {
-      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!resp.ok) throw new Error(`todo_graph_get_failed:${resp.status}`);
-    const page = await resp.json() as { value?: T[]; '@odata.nextLink'?: string };
-    values.push(...(page.value ?? []));
-    nextUrl = page['@odata.nextLink'];
+    const response = await graphFetch(nextUrl, token, 'get');
+    const page = await readJsonObject(response, 'todo_graph_malformed_collection');
+    if (!Array.isArray(page.value)) throw new Error('todo_graph_malformed_collection');
+    values.push(...page.value as T[]);
     pageCount += 1;
-    if (pageCount >= 100 && nextUrl) throw new Error('todo_graph_pagination_limit');
+    nextUrl = validateGraphNextLink(page['@odata.nextLink']);
+    if (values.length > GRAPH_MAX_ITEMS) throw new Error('todo_graph_item_limit');
+    if (pageCount >= GRAPH_MAX_PAGES && nextUrl) throw new Error('todo_graph_pagination_limit');
   }
   return values;
 }
 
-async function graphPost<T>(path: string, token: string, body: object): Promise<T> {
-  const resp = await fetch(`${GRAPH}${path}`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': 'application/json',
-      accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok) {
-    throw new Error(`todo_graph_post_failed:${resp.status}`);
+async function executeTodoWithAccessRecovery(
+  action: TodoAction,
+  token: string,
+  env: TodoEnv,
+  onDiagnostic?: (code: string) => void,
+): Promise<string> {
+  try {
+    return await executeTodo(action, token);
+  } catch (error) {
+    if (!(error instanceof TodoGraphError) || error.status !== 401 || error.outcome !== 'rejected') throw error;
+    const cacheKey = env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`;
+    _msTokenCache.delete(cacheKey);
+    const refreshedToken = await getMicrosoftTodoAccessToken(env, onDiagnostic);
+    return executeTodo(action, refreshedToken);
   }
-  return resp.json() as Promise<T>;
+}
+
+async function graphPost<T extends { id?: unknown }>(path: string, token: string, body: object): Promise<T> {
+  const response = await graphFetch(graphUrl(path), token, 'post', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let payload: Record<string, unknown>;
+  try {
+    payload = await readJsonObject(response, 'todo_graph_post_response_missing');
+  } catch {
+    throw new TodoGraphError('post', 'uncertain');
+  }
+  if (typeof payload.id !== 'string' || !payload.id.trim()) throw new TodoGraphError('post', 'uncertain');
+  return payload as T;
 }
 
 async function graphPatch(path: string, token: string, body: object): Promise<void> {
-  const resp = await fetch(`${GRAPH}${path}`, {
+  await graphFetch(graphUrl(path), token, 'patch', {
     method: 'PATCH',
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': 'application/json',
-    },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8_000),
   });
-  if (!resp.ok) {
-    throw new Error(`todo_graph_patch_failed:${resp.status}`);
-  }
 }
 
 async function graphDelete(path: string, token: string): Promise<void> {
-  const resp = await fetch(`${GRAPH}${path}`, {
-    method: 'DELETE',
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(8_000),
-  });
-  if (!resp.ok && resp.status !== 404) {
-    throw new Error(`todo_graph_delete_failed:${resp.status}`);
+  try {
+    await graphFetch(graphUrl(path), token, 'delete', { method: 'DELETE' });
+  } catch (error) {
+    if (error instanceof TodoGraphError && error.status === 404) return;
+    throw error;
   }
 }
 
 /** Build a Graph API dateTimeTimeZone object.
  * The dateTime must NOT include a timezone suffix (no 'Z') when timeZone is provided separately.
  */
-function graphDateTime(isoDate: string, time = '00:00:00.0000000'): { dateTime: string; timeZone: string } {
-  return { dateTime: `${isoDate.slice(0, 10)}T${time}`, timeZone: 'UTC' };
+function parseDateOnly(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value)) throw new Error('todo_invalid_date');
+  const date = value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('todo_invalid_date');
+  const [year, month, day] = date.split('-').map(Number);
+  const normalized = new Date(Date.UTC(year!, month! - 1, day!));
+  if (
+    normalized.getUTCFullYear() !== year
+    || normalized.getUTCMonth() + 1 !== month
+    || normalized.getUTCDate() !== day
+  ) throw new Error('todo_invalid_date');
+  return date;
+}
+
+function graphDateTime(
+  isoDate: string,
+  time = '00:00:00.0000000',
+  timeZone = 'UTC',
+): { dateTime: string; timeZone: string } {
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{7}$/.test(time)) throw new Error('todo_invalid_time');
+  return { dateTime: `${parseDateOnly(isoDate)}T${time}`, timeZone };
 }
 
 // ─── Watched lists (aggregated when no list_name given) ─────────────────────
@@ -517,8 +652,7 @@ function periodFr(period: string): string {
 // ─── List & task finders ──────────────────────────────────────────────────────
 
 async function findList(token: string, listName?: string): Promise<MsTaskList | null> {
-  const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
-  const lists = data.value ?? [];
+  const lists = await graphGetCollection<MsTaskList>('/me/todo/lists', token);
   const resolveDefaultList = (): MsTaskList | null => (
     lists.find((l) => l.wellknownListName === 'defaultList') ??
     lists.find((l) => /^(tasks?|t[âa]ches?)$/i.test(l.displayName.trim())) ??
@@ -541,18 +675,17 @@ async function findList(token: string, listName?: string): Promise<MsTaskList | 
   return lists.find((l) => normalizeForMatch(l.displayName) === needle) ?? null;
 }
 
-async function findTask(token: string, listId: string, title: string, includeCompleted = false): Promise<MsTask | null> {
+async function findTasks(token: string, listId: string, title: string, includeCompleted = false): Promise<MsTask[]> {
   const qs = includeCompleted
     ? '$top=100'
     : `$filter=status ne 'completed'&$top=100`;
-  const data = await graphGet<{ value: MsTask[] }>(
+  const tasks = await graphGetCollection<MsTask>(
     `/me/todo/lists/${listId}/tasks?${qs}`,
     token,
   );
-  const tasks = data.value ?? [];
   const needle = normalizeForMatch(title);
-  if (!needle) return null;
-  return tasks.find((t) => normalizeForMatch(t.title) === needle) ?? null;
+  if (!needle) return [];
+  return tasks.filter((t) => normalizeForMatch(t.title) === needle);
 }
 
 async function findTaskMatchesAcrossWatchedLists(
@@ -560,15 +693,14 @@ async function findTaskMatchesAcrossWatchedLists(
   title: string,
   includeCompleted = false,
 ): Promise<Array<{ list: MsTaskList; task: MsTask }>> {
-  const allData = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
-  const watched = (allData.value ?? []).filter(isWatchedList);
+  const watched = (await graphGetCollection<MsTaskList>('/me/todo/lists', token)).filter(isWatchedList);
   const hits = await Promise.all(
     watched.map(async (l) => {
-      const task = await findTask(token, l.id, title, includeCompleted);
-      return task ? { list: l, task } : null;
+      const tasks = await findTasks(token, l.id, title, includeCompleted);
+      return tasks.map((task) => ({ list: l, task }));
     }),
   );
-  return hits.filter((item): item is { list: MsTaskList; task: MsTask } => item !== null);
+  return hits.flat();
 }
 
 /** Normalize a reminder dateTime string (from LLM) to 'HH:MM:SS.0000000'.
@@ -576,11 +708,14 @@ async function findTaskMatchesAcrossWatchedLists(
  */
 function normalizeReminderTime(reminderDate: string): string {
   const raw = reminderDate.includes('T') ? reminderDate.split('T')[1]! : '09:00';
+  if (!/^\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw)) throw new Error('todo_invalid_time');
   const parts = raw.split(':');
   const h = (parts[0] ?? '09').padStart(2, '0');
   const m = (parts[1] ?? '00').padStart(2, '0');
   const s = (parts[2] ?? '00').split('.')[0]!.padStart(2, '0');
-  return `${h}:${m}:${s}.0000000`;
+  const normalized = `${h}:${m}:${s}.0000000`;
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{7}$/.test(normalized)) throw new Error('todo_invalid_time');
+  return normalized;
 }
 
 // ─── LLM planner ─────────────────────────────────────────────────────────────
@@ -837,19 +972,28 @@ function joinFr(items: string[]): string {
  */
 function buildRecurrence(r: RecurrenceInput, startDate: string): object {
   const interval = r.interval ?? 1;
+  const validTypes = new Set(['daily', 'weekly', 'absoluteMonthly', 'absoluteYearly']);
+  if (!validTypes.has(r.type)) throw new Error('todo_invalid_recurrence');
+  if (!Number.isInteger(interval) || interval < 1 || interval > 99) throw new Error('todo_invalid_recurrence');
+  const validDays = new Set(['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']);
   const pattern: Record<string, unknown> = { type: r.type, interval };
   if (r.type === 'weekly') {
-    pattern['daysOfWeek']    = r.daysOfWeek?.length ? r.daysOfWeek : ['monday'];
+    const days = r.daysOfWeek?.length ? r.daysOfWeek : ['monday'];
+    if (days.some((day) => !validDays.has(day))) throw new Error('todo_invalid_recurrence');
+    pattern['daysOfWeek']    = days;
     pattern['firstDayOfWeek'] = 'monday';
-  } else if (r.type === 'absoluteMonthly' && r.dayOfMonth) {
+  } else if (r.type === 'absoluteMonthly') {
+    if (!Number.isInteger(r.dayOfMonth) || r.dayOfMonth! < 1 || r.dayOfMonth! > 31) throw new Error('todo_invalid_recurrence');
     pattern['dayOfMonth'] = r.dayOfMonth;
   } else if (r.type === 'absoluteYearly') {
-    if (r.dayOfMonth) pattern['dayOfMonth'] = r.dayOfMonth;
-    if (r.month)      pattern['month']      = r.month;
+    if (!Number.isInteger(r.dayOfMonth) || r.dayOfMonth! < 1 || r.dayOfMonth! > 31) throw new Error('todo_invalid_recurrence');
+    if (!Number.isInteger(r.month) || r.month! < 1 || r.month! > 12) throw new Error('todo_invalid_recurrence');
+    pattern['dayOfMonth'] = r.dayOfMonth;
+    pattern['month']      = r.month;
   }
   return {
     pattern,
-    range: { type: 'noEnd', startDate },
+    range: { type: 'noEnd', startDate: parseDateOnly(startDate) },
   };
 }
 
@@ -880,13 +1024,15 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       }
 
       // Fetch from all target lists in parallel.
-      const results = await Promise.all(
-        targetLists.map((l) =>
-          graphGetCollection<MsTask>(`/me/todo/lists/${l.id}/tasks?${qs}`, token)
-            .catch(() => [] as MsTask[]),
-        ),
+      const results = await Promise.allSettled(
+        targetLists.map((l) => graphGetCollection<MsTask>(`/me/todo/lists/${l.id}/tasks?${qs}`, token)),
       );
-      let tasks = results.flat();
+      const failures = results.filter((result) => result.status === 'rejected');
+      if (failures.length === results.length) throw failures[0]!.reason;
+      let tasks = results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
+      const partialSuffix = failures.length > 0
+        ? ` Résultat partiel : ${failures.length} liste${failures.length > 1 ? 's' : ''} indisponible${failures.length > 1 ? 's' : ''}.`
+        : '';
 
       // Period filter: when a temporal context is given, only keep tasks WITH a due date in that period.
       // Tasks without due date are excluded — the user manages those separately.
@@ -903,11 +1049,11 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
 
       if (tasks.length === 0) {
         if (action.period) {
-          return `Tu n'as aucune tâche avec échéance ${periodFr(action.period)}.`;
+          return `Tu n'as aucune tâche avec échéance ${periodFr(action.period)}.${partialSuffix}`;
         }
         return action.status === 'completed'
-          ? 'Tu n\'as aucune tâche terminée dans tes listes.'
-          : 'Tu n\'as aucune tâche en attente.';
+          ? `Tu n'as aucune tâche terminée dans tes listes.${partialSuffix}`
+          : `Tu n'as aucune tâche en attente.${partialSuffix}`;
       }
 
       const count = tasks.length;
@@ -934,7 +1080,7 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const intro = action.status === 'completed'
         ? `Tu as ${count} tâche${count > 1 ? 's' : ''} terminée${count > 1 ? 's' : ''}${periodLabel} :`
         : `Tu as ${count} tâche${count > 1 ? 's' : ''}${periodLabel} :`;
-      return `${intro} ${displayed.join(' ; ')}${more}.`;
+      return `${intro} ${displayed.join(' ; ')}${more}.${partialSuffix}`;
     }
 
     case 'add_task': {
@@ -949,18 +1095,18 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
         body['startDateTime'] = graphDateTime(action.start_date);
       }
       if (action.reminder_date) {
-        body['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date));
+        body['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date), PARIS_GRAPH_TIME_ZONE);
         body['isReminderOn'] = true;
       }
       if (action.importance) body['importance'] = action.importance;
       if (action.notes)      body['body'] = { contentType: 'text', content: action.notes };
       if (action.categories?.length) body['categories'] = action.categories;
       if (action.recurrence) {
-        const startDate = action.due_date ?? new Date().toISOString().slice(0, 10);
+        const startDate = action.due_date ?? todayIsoInParis();
         body['recurrence'] = buildRecurrence(action.recurrence, startDate);
       }
 
-      await graphPost(`/me/todo/lists/${list.id}/tasks`, token, body);
+      await graphPost<MsTask>(`/me/todo/lists/${list.id}/tasks`, token, body);
       const parts: string[] = [];
       if (action.due_date)                     parts.push(`pour ${formatDueDateForUser(action.due_date)}`);
       if (action.importance === 'high')        parts.push('marquée urgente');
@@ -975,8 +1121,10 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.list_name) {
         list = await findList(token, action.list_name);
         if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-        task = await findTask(token, list.id, action.title);
-        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTasks(token, list.id, action.title);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.title} dans ${list.displayName}. Précise laquelle terminer.`;
+        task = matches[0]!;
       } else {
         const matches = await findTaskMatchesAcrossWatchedLists(token, action.title);
         if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
@@ -997,8 +1145,10 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.list_name) {
         list = await findList(token, action.list_name);
         if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-        task = await findTask(token, list.id, action.title, true);
-        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTasks(token, list.id, action.title, true);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.title} dans ${list.displayName}. Précise laquelle supprimer.`;
+        task = matches[0]!;
       } else {
         const matches = await findTaskMatchesAcrossWatchedLists(token, action.title, true);
         if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
@@ -1019,8 +1169,10 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.list_name) {
         list = await findList(token, action.list_name);
         if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-        task = await findTask(token, list.id, action.title, true);
-        if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        const matches = await findTasks(token, list.id, action.title, true);
+        if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
+        if (matches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.title} dans ${list.displayName}. Précise laquelle modifier.`;
+        task = matches[0]!;
       } else {
         const matches = await findTaskMatchesAcrossWatchedLists(token, action.title, true);
         if (matches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.title}.`;
@@ -1045,14 +1197,14 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       if (action.notes)       patch['body']        = { contentType: 'text', content: action.notes };
       if (action.categories)  patch['categories']  = action.categories;
       if (action.reminder_date) {
-        patch['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date));
+        patch['reminderDateTime'] = graphDateTime(action.reminder_date, normalizeReminderTime(action.reminder_date), PARIS_GRAPH_TIME_ZONE);
         patch['isReminderOn'] = true;
       }
       // recurrence: null removes it, object sets it
       if (action.recurrence === null) {
         patch['recurrence'] = null;
       } else if (action.recurrence) {
-        const startDate = action.due_date ?? task.dueDateTime?.dateTime.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
+        const startDate = action.due_date ?? task.dueDateTime?.dateTime.slice(0, 10) ?? todayIsoInParis();
         patch['recurrence'] = buildRecurrence(action.recurrence, startDate);
       }
       if (Object.keys(patch).length === 0) return 'Tu n\'as pas précisé de modification.';
@@ -1079,21 +1231,19 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
     }
 
     case 'list_lists': {
-      const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists?$top=50', token);
-      const lists = data.value ?? [];
+      const lists = await graphGetCollection<MsTaskList>('/me/todo/lists?$top=50', token);
       if (lists.length === 0) return 'Tu n\'as aucune liste de tâches pour le moment.';
       const names = lists.map((l) => l.displayName);
       return `Tu as ${lists.length} liste${lists.length > 1 ? 's' : ''} : ${joinFr(names)}.`;
     }
 
     case 'create_list': {
-      await graphPost(`/me/todo/lists`, token, { displayName: action.name });
+      await graphPost<MsTaskList>(`/me/todo/lists`, token, { displayName: action.name });
       return `La liste ${action.name} a bien été créée.`;
     }
 
     case 'delete_list': {
-      const data = await graphGet<{ value: MsTaskList[] }>('/me/todo/lists', token);
-      const lists = data.value ?? [];
+      const lists = await graphGetCollection<MsTaskList>('/me/todo/lists', token);
       const needle = normalizeForMatch(action.name);
       const matches = lists.filter((l) => normalizeForMatch(l.displayName) === needle);
       if (matches.length === 0) return `Je n'ai pas trouvé de liste correspondant à ${action.name}.`;
@@ -1111,10 +1261,12 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
       const list = await findList(token, action.list_name);
       if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
 
-      const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      const taskMatches = await findTasks(token, list.id, action.task_title);
+      if (taskMatches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      if (taskMatches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.task_title} dans ${list.displayName}. Précise laquelle modifier.`;
+      const task = taskMatches[0]!;
 
-      await graphPost(
+      await graphPost<MsChecklistItem>(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
         { displayName: action.item_title },
@@ -1125,16 +1277,20 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
     case 'complete_checklist_item': {
       const list = await findList(token, action.list_name);
       if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-      const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      const taskMatches = await findTasks(token, list.id, action.task_title);
+      if (taskMatches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      if (taskMatches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.task_title} dans ${list.displayName}. Précise laquelle modifier.`;
+      const task = taskMatches[0]!;
 
-      const checkData = await graphGet<{ value: MsChecklistItem[] }>(
+      const checklist = await graphGetCollection<MsChecklistItem>(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
       );
       const needle = normalizeForMatch(action.item_title);
-      const item = checkData.value?.find((c) => normalizeForMatch(c.displayName) === needle);
-      if (!item) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
+      const matches = checklist.filter((c) => normalizeForMatch(c.displayName) === needle);
+      if (matches.length === 0) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
+      if (matches.length > 1) return `J'ai trouvé plusieurs éléments ${action.item_title} dans ${task.title}. Précise lequel cocher.`;
+      const item = matches[0]!;
       await graphPatch(`/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems/${item.id}`, token, { isChecked: true });
       return `Parfait, ${item.displayName} est cochée dans ${task.title}.`;
     }
@@ -1142,15 +1298,17 @@ async function executeTodo(action: TodoAction, token: string): Promise<string> {
     case 'delete_checklist_item': {
       const list = await findList(token, action.list_name);
       if (!list) return 'Je n\'ai pas trouvé la liste de tâches.';
-      const task = await findTask(token, list.id, action.task_title);
-      if (!task) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      const taskMatches = await findTasks(token, list.id, action.task_title);
+      if (taskMatches.length === 0) return `Je n'ai pas trouvé de tâche correspondant à ${action.task_title}.`;
+      if (taskMatches.length > 1) return `J'ai trouvé plusieurs tâches nommées ${action.task_title} dans ${list.displayName}. Précise laquelle modifier.`;
+      const task = taskMatches[0]!;
 
-      const checkData = await graphGet<{ value: MsChecklistItem[] }>(
+      const checklist = await graphGetCollection<MsChecklistItem>(
         `/me/todo/lists/${list.id}/tasks/${task.id}/checklistItems`,
         token,
       );
       const needle = normalizeForMatch(action.item_title);
-      const matches = (checkData.value ?? []).filter((c) => normalizeForMatch(c.displayName) === needle);
+      const matches = checklist.filter((c) => normalizeForMatch(c.displayName) === needle);
       if (matches.length === 0) return `Je n'ai pas trouvé ${action.item_title} dans la tâche ${task.title}.`;
       if (matches.length > 1) return `J'ai trouvé plusieurs éléments ${action.item_title} dans ${task.title}. Précise lequel supprimer.`;
       const item = matches[0]!;
@@ -1181,25 +1339,21 @@ export async function executeTodoAgentAction(
 
   let token: string;
   try {
-    token = await refreshMicrosoftToken({
-      MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
-      MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
-      MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
-      MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
-      cacheKey:                env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
-      storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
-      OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-      onRefreshToken:          env.onRefreshToken,
-      onConnectionError:      env.onConnectionError,
-      onConnectionHealthy:    env.onConnectionHealthy,
-      onDiagnostic:           (code) => options?.log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
-    });
+    token = await getMicrosoftTodoAccessToken(
+      env,
+      (code) => options?.log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
+    );
   } catch (err) {
     options?.log?.warn({ err: String(err) }, 'todo_agent_token_error');
     return 'Je ne peux pas acceder a Microsoft To Do pour le moment, le token d authentification a expire ou est invalide.';
   }
 
-  const rawResult = await executeTodo(action, token);
+  const rawResult = await executeTodoWithAccessRecovery(
+    action,
+    token,
+    env,
+    (code) => options?.log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
+  );
   options?.log?.info({ action: action.action, result_len: rawResult.length }, 'todo_agent_done');
   if (action.action === 'list_tasks') return compactTodoListForFallback(rawResult);
   return synthesizeTodoReplyWithOpenAi({
@@ -1263,26 +1417,22 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
 
   let token: string;
   try {
-    token = await refreshMicrosoftToken({
-      MICROSOFT_TENANT_ID:     env.MICROSOFT_TENANT_ID,
-      MICROSOFT_CLIENT_ID:     env.MICROSOFT_CLIENT_ID,
-      MICROSOFT_CLIENT_SECRET: env.MICROSOFT_CLIENT_SECRET,
-      MICROSOFT_REFRESH_TOKEN: env.MICROSOFT_REFRESH_TOKEN,
-      cacheKey:                env.credentialKey ?? `todo:${env.MICROSOFT_CLIENT_ID}`,
-      storeKey:                `todo:microsoft:${env.MICROSOFT_CLIENT_ID}`,
-      OAUTH_REFRESH_TOKEN_STORE_PATH: env.OAUTH_REFRESH_TOKEN_STORE_PATH,
-      onRefreshToken:          env.onRefreshToken,
-      onConnectionError:      env.onConnectionError,
-      onConnectionHealthy:    env.onConnectionHealthy,
-      onDiagnostic:           (code) => log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
-    });
+    token = await getMicrosoftTodoAccessToken(
+      env,
+      (code) => log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
+    );
   } catch (err) {
     log?.warn({ err: String(err) }, 'todo_agent_token_error');
     return 'Je ne peux pas accéder à Microsoft To Do pour le moment, le token d\'authentification a expiré ou est invalide.';
   }
 
   try {
-    const rawResult = await executeTodo(action, token);
+    const rawResult = await executeTodoWithAccessRecovery(
+      action,
+      token,
+      env,
+      (code) => log?.warn({ errorCode: code }, 'todo_agent_token_diagnostic'),
+    );
     log?.info({ action: action.action, result_len: rawResult.length }, 'todo_agent_done');
 
     // For list reads, keep deterministic executor output to avoid synthesis drift/hallucinations
@@ -1303,6 +1453,9 @@ log?.info({ action: action.action, due_date: (action as Record<string,unknown>).
     return synthesized;
   } catch (err) {
     log?.warn({ err: String(err), action: action.action }, 'todo_agent_execute_error');
+    if (err instanceof TodoGraphError && err.outcome === 'uncertain') {
+      return 'Microsoft To Do a reçu la demande, mais son résultat ne peut pas être confirmé. Vérifie la tâche avant de réessayer pour éviter un doublon.';
+    }
     return 'Une erreur s\'est produite lors de l\'accès à Microsoft To Do. Réessaie dans un instant.';
   }
 }
