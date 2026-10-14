@@ -146,7 +146,7 @@ export function compileManagedAutomation(
 }
 
 export class HomeAssistantAutomationService {
-  private reconciliationTail: Promise<void> = Promise.resolve();
+  private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly ha: HomeAssistantClient,
@@ -219,39 +219,47 @@ export class HomeAssistantAutomationService {
   }
 
   async create(input: ManagedAutomationInput): Promise<{ automationId: string; operationStatus: 'succeeded' | 'accepted' | 'uncertain' }> {
+    return this.runMutationExclusive(() => this.createUnlocked(input));
+  }
+
+  private async createUnlocked(input: ManagedAutomationInput): Promise<{ automationId: string; operationStatus: 'succeeded' | 'accepted' | 'uncertain' }> {
     const automationId = `jarvis_${randomUUID().replaceAll('-', '')}`;
+    const desired = compileManagedAutomation(this.catalog, input);
     try {
-      await this.ha.saveAutomationConfig(
-        automationId,
-        compileManagedAutomation(this.catalog, input)
-      );
+      await this.ha.saveAutomationConfig(automationId, desired);
     } catch (error) {
       if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) {
         return { automationId, operationStatus: 'uncertain' };
       }
       throw error;
     }
-    const operationStatus = await this.setEnabledWhenLoaded(automationId, input.enabled);
+    const operationStatus = await this.setEnabledWhenLoaded(automationId, input.enabled, desired);
     return { automationId, operationStatus };
   }
 
   async update(automationId: string, input: ManagedAutomationInput): Promise<'succeeded' | 'accepted' | 'uncertain'> {
+    return this.runMutationExclusive(() => this.updateUnlocked(automationId, input));
+  }
+
+  private async updateUnlocked(automationId: string, input: ManagedAutomationInput): Promise<'succeeded' | 'accepted' | 'uncertain'> {
     this.assertAutomationId(automationId);
     const existing = await this.ha.getAutomationConfig(automationId);
     if (!managedMetadata(existing)) throw new Error('home_automation_not_managed');
+    const desired = compileManagedAutomation(this.catalog, input);
     try {
-      await this.ha.saveAutomationConfig(
-        automationId,
-        compileManagedAutomation(this.catalog, input)
-      );
+      await this.ha.saveAutomationConfig(automationId, desired);
     } catch (error) {
       if (error instanceof HomeAssistantRequestError && error.operationMayHaveBeenAccepted) return 'uncertain';
       throw error;
     }
-    return this.setEnabledWhenLoaded(automationId, input.enabled);
+    return this.setEnabledWhenLoaded(automationId, input.enabled, desired);
   }
 
   async setEnabled(automationId: string, enabled: boolean): Promise<'succeeded' | 'accepted' | 'uncertain'> {
+    return this.runMutationExclusive(() => this.setEnabledUnlocked(automationId, enabled));
+  }
+
+  private async setEnabledUnlocked(automationId: string, enabled: boolean): Promise<'succeeded' | 'accepted' | 'uncertain'> {
     await this.assertManaged(automationId);
     const automation = await this.findById(automationId);
     return this.setEnabledAndVerify(automationId, automation.entityId, enabled);
@@ -275,6 +283,10 @@ export class HomeAssistantAutomationService {
   }
 
   async delete(automationId: string): Promise<'succeeded' | 'accepted' | 'uncertain'> {
+    return this.runMutationExclusive(() => this.deleteUnlocked(automationId));
+  }
+
+  private async deleteUnlocked(automationId: string): Promise<'succeeded' | 'accepted' | 'uncertain'> {
     this.assertAutomationId(automationId);
     const existing = await this.ha.getAutomationConfig(automationId);
     if (!managedMetadata(existing)) throw new Error('home_automation_not_managed');
@@ -334,17 +346,7 @@ export class HomeAssistantAutomationService {
     value: T;
     reconciliation: HomeAutomationReconciliationResult;
   }> {
-    const previous = this.reconciliationTail;
-    let release!: () => void;
-    this.reconciliationTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await this.reconcileCatalogMutationUnlocked(mutation);
-    } finally {
-      release();
-    }
+    return this.runMutationExclusive(() => this.reconcileCatalogMutationUnlocked(mutation));
   }
 
   private async reconcileCatalogMutationUnlocked<T>(mutation: () => T | Promise<T>): Promise<{
@@ -365,7 +367,7 @@ export class HomeAssistantAutomationService {
     }
     let reconciliation: HomeAutomationReconciliationResult;
     try {
-      reconciliation = await this.reconcile();
+      reconciliation = await this.reconcileUnlocked();
     } catch (error) {
       const restoreStatus = await this.restoreManagedAutomations(suspended);
       if (restoreStatus !== 'succeeded') {
@@ -400,6 +402,10 @@ export class HomeAssistantAutomationService {
   }
 
   async reconcile(): Promise<HomeAutomationReconciliationResult> {
+    return this.runMutationExclusive(() => this.reconcileUnlocked());
+  }
+
+  private async reconcileUnlocked(): Promise<HomeAutomationReconciliationResult> {
     const operationId = randomUUID();
     const rawStates = await this.ha.getStates();
     const states = (Array.isArray(rawStates) ? rawStates : [])
@@ -477,7 +483,7 @@ export class HomeAssistantAutomationService {
           this.stateRepository?.updateAutomationSuspension(operationId, automationId, 'suspended');
         }
         await this.ha.saveAutomationConfig(automationId, desired);
-        const enabledStatus = await this.setEnabledWhenLoaded(automationId, wasEnabled);
+        const enabledStatus = await this.setEnabledWhenLoaded(automationId, wasEnabled, desired);
         if (enabledStatus !== 'succeeded') {
           uncertain = true;
           if (suspension) {
@@ -512,6 +518,15 @@ export class HomeAssistantAutomationService {
   }
 
   async recoverSuspendedAutomations(options: { includeRecent?: boolean } = {}): Promise<{
+    operationStatus: 'succeeded' | 'partial' | 'uncertain';
+    restored: string[];
+    skipped: string[];
+    failed: string[];
+  }> {
+    return this.runMutationExclusive(() => this.recoverSuspendedAutomationsUnlocked(options));
+  }
+
+  private async recoverSuspendedAutomationsUnlocked(options: { includeRecent?: boolean } = {}): Promise<{
     operationStatus: 'succeeded' | 'partial' | 'uncertain';
     restored: string[];
     skipped: string[];
@@ -671,10 +686,25 @@ export class HomeAssistantAutomationService {
       .find((state) => state.attributes?.id === automationId);
   }
 
-  private async setEnabledWhenLoaded(automationId: string, enabled: boolean): Promise<'succeeded' | 'accepted' | 'uncertain'> {
+  private async setEnabledWhenLoaded(
+    automationId: string,
+    enabled: boolean,
+    expectedConfig?: HomeAssistantAutomationConfig
+  ): Promise<'succeeded' | 'accepted' | 'uncertain'> {
     for (let attempt = 0; attempt < reloadAttempts; attempt += 1) {
       const state = await this.findStateById(automationId);
-      if (state) {
+      let configurationLoaded = !expectedConfig;
+      if (state && expectedConfig) {
+        try {
+          configurationLoaded = this.configurationMatches(
+            await this.ha.getAutomationConfig(automationId),
+            expectedConfig
+          );
+        } catch {
+          configurationLoaded = false;
+        }
+      }
+      if (state && configurationLoaded) {
         return this.setEnabledAndVerify(automationId, state.entity_id, enabled);
       }
       if (attempt < reloadAttempts - 1) {
@@ -682,6 +712,30 @@ export class HomeAssistantAutomationService {
       }
     }
     return 'accepted';
+  }
+
+  private configurationMatches(
+    actual: HomeAssistantAutomationConfig | null,
+    expected: HomeAssistantAutomationConfig
+  ): boolean {
+    if (!actual || actual.alias !== expected.alias || actual.description !== expected.description) {
+      return false;
+    }
+    return JSON.stringify(scheduleFromConfig(actual)) === JSON.stringify(scheduleFromConfig(expected));
+  }
+
+  private async runMutationExclusive<T>(mutation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail;
+    let release!: () => void;
+    this.mutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await mutation();
+    } finally {
+      release();
+    }
   }
 
   private async setEnabledAndVerify(
