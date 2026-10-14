@@ -94,4 +94,75 @@ describe('cleanMailDetailText', () => {
       'La somme a ete creditee sur « Anniv Rob1 ».',
     ].join('\n'));
   });
+
+  it('preserves an important request before a signature and removes the signature', () => {
+    const cleaned = cleanMailDetailText([
+      'Bonjour,',
+      '',
+      'Merci de valider le devis de 1 240 EUR avant le 18 octobre.',
+      'Reference : DV-2026-481',
+      '',
+      'Cordialement,',
+      'Camille Martin',
+      'Responsable achats',
+      'camille@example.com',
+    ].join('\n'));
+
+    expect(cleaned).toContain('Merci de valider le devis de 1 240 EUR avant le 18 octobre.');
+    expect(cleaned).toContain('Reference : DV-2026-481');
+    expect(cleaned).not.toContain('Responsable achats');
+    expect(cleaned).not.toContain('camille@example.com');
+  });
+
+  it('does not truncate important content after a line that merely resembles a footer', () => {
+    const cleaned = cleanMailDetailText([
+      'Bonjour,',
+      'Votre dossier a ete analyse.',
+      'Montant retenu : 89,40 EUR.',
+      'Reference : DOS-8841.',
+      'Contactez-nous si vous avez une question.',
+      'Important : merci de repondre avant le 21 octobre pour conserver votre reservation.',
+    ].join('\n'));
+
+    expect(cleaned).toContain('Important : merci de repondre avant le 21 octobre');
+  });
+
+  it('removes a quoted reply while retaining the new response', () => {
+    const cleaned = cleanMailDetailText([
+      'Bonjour,',
+      'Je confirme le rendez-vous du 22 octobre a 14 h.',
+      '',
+      'Le mar. 20 oct. 2026 a 09:15, Julie <julie@example.com> a ecrit :',
+      '> Bonjour,',
+      '> Pouvez-vous confirmer le rendez-vous ?',
+    ].join('\n'));
+
+    expect(cleaned).toContain('Je confirme le rendez-vous du 22 octobre a 14 h.');
+    expect(cleaned).not.toContain('Pouvez-vous confirmer');
+  });
+
+  it('handles converted HTML text, accents and irregular spacing without losing useful data', () => {
+    const cleaned = cleanMailDetailText([
+      'Voir dans le navigateur',
+      '',
+      '  Réservation   confirmée  ',
+      'Montant :   219,90 €',
+      'Référence :   HÔTEL-42',
+      'Arrivée : 24 octobre 2026',
+      '',
+      '[Gérer ma réservation](https://example.com/reservation)',
+    ].join('\n'));
+
+    expect(cleaned).toContain('Réservation confirmée');
+    expect(cleaned).toContain('Montant : 219,90 €');
+    expect(cleaned).toContain('Référence : HÔTEL-42');
+    expect(cleaned).toContain('Arrivée : 24 octobre 2026');
+    expect(cleaned).not.toContain('Voir dans le navigateur');
+  });
+
+  it('falls back to the original meaningful content instead of returning an empty result', () => {
+    const raw = 'Contactez-nous avant le 20 octobre pour eviter l annulation.';
+
+    expect(cleanMailDetailText(raw)).toBe(raw);
+  });
 });

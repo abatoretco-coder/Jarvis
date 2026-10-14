@@ -164,11 +164,9 @@ const PERSONAL_RULES: MailQualificationRule[] = [
 ];
 
 const ACTION_PATTERNS = [
-  /\b(peux[- ]tu|pouvez[- ]vous|merci de|merci d[' ]|besoin de|j[' ]attends|en attente de)\b/i,
-  /\b(reponds?|réponds?|reponse attendue|réponse attendue|a valider|à valider|validation|valider)\b/i,
+  /\b(peux[- ]tu|pouvez[- ]vous|merci de|merci d[' ]|besoin de (?:ton|votre) aide|j[' ]attends|en attente de (?:ton|votre))\b/i,
+  /\b(reponds?|réponds?|repondre|répondre|reponse attendue|réponse attendue|a valider|à valider|validation requise|a completer|à compléter|a signer|à signer|a payer|à payer|a fournir|à fournir)\b/i,
   /\b(relance|dernier rappel|action requise|required action|please reply|can you|could you)\b/i,
-  /\b(avant le|d[' ]ici|deadline|echeance|échéance|urgent|asap|des que possible|dès que possible)\b/i,
-  /\?$/,
 ];
 
 const HIGH_URGENCY_PATTERNS = [
@@ -190,6 +188,31 @@ const IGNORE_PATTERNS = [
   /\b(code de connexion|security code|verification code|code de verification)\b/i,
 ];
 
+const SECURITY_CONTEXT_PATTERNS = [
+  /\b(securite|security|connexion|login|mot de passe|password|vulnerabilite|vulnerability|faille)\b/i,
+  /\b(activite du compte|account activity|nouvel appareil|new device)\b/i,
+];
+
+const SECURITY_ACTION_PATTERNS = [
+  /\b(si ce n[' ]etait pas vous|if (?:this|it) wasn[' ]t you|connexion (?:inconnue|suspecte)|suspicious (?:login|activity))\b/i,
+  /\b(changez|modifier|reinitialiser|reset|securiser|verifier)\b.{0,40}\b(mot de passe|password|compte|account)\b/i,
+  /\b(compromis|compromised|non autorise|unauthorized)\b/i,
+];
+
+const SECURITY_INFO_PATTERNS = [
+  /\b(avis de securite|security advisory|vulnerabilite|vulnerability|faille de securite)\b/i,
+];
+
+const PAYMENT_ACTION_PATTERNS = [
+  /\b(facture|paiement|payment|solde)\b.{0,50}\b(impayee?|echoue|failed|en retard|overdue|a regulariser|à regulariser)\b/i,
+  /\b(impayee?|echoue|failed|en retard|past due|overdue|a regulariser|à regulariser)\b.{0,50}\b(facture|paiement|payment|solde)\b/i,
+];
+
+const TRANSACTION_CHANGE_PATTERNS = [
+  /\b(annulation|annulee?|cancelled|canceled|changement|modification|modifiee?|reprogramme[er]?)\b.{0,50}\b(commande|reservation|booking|rendez[- ]vous|rdv|voyage|vol|train)\b/i,
+  /\b(commande|reservation|booking|rendez[- ]vous|rdv|voyage|vol|train)\b.{0,50}\b(annulation|annulee?|cancelled|canceled|changement|modification|modifiee?|reprogramme[er]?)\b/i,
+];
+
 const AUTOMATED_SENDER_PATTERNS = [
   /\b(no[-_. ]?reply|noreply|ne[-_. ]?pas[-_. ]?repondre|notification|notifications|newsletter)\b/i,
 ];
@@ -198,6 +221,8 @@ function normalizeText(value: string): string {
   return value
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’‘`]/g, "'")
+    .replace(/[‐‑‒–—]/g, '-')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -231,6 +256,72 @@ function taskTitleFor(input: MailQualificationInput): string {
   const subject = input.subject.trim();
   const from = input.from.replace(/<[^>]+>/g, '').trim() || 'cet expediteur';
   return subject ? `Traiter le mail de ${from}: ${subject}` : `Traiter le mail de ${from}`;
+}
+
+function qualificationFromContentPriority(
+  input: MailQualificationInput,
+  combined: string
+): MailQualification | null {
+  const base = {
+    briefingSummary: buildBriefingSummary(input),
+  };
+
+  if (hasAny(SECURITY_CONTEXT_PATTERNS, combined) && hasAny(SECURITY_ACTION_PATTERNS, combined)) {
+    return {
+      ...base,
+      category: 'action',
+      urgency: 'high',
+      confidence: 0.93,
+      reason: 'Le contenu signale un risque de securite qui demande une verification de l utilisateur.',
+      recommendedAction: 'ask_user',
+      ruleId: 'action.security-alert',
+      groupKey: 'security.account-alerts',
+      task: { title: taskTitleFor(input) },
+    };
+  }
+
+  if (hasAny(PAYMENT_ACTION_PATTERNS, combined)) {
+    return {
+      ...base,
+      category: 'action',
+      urgency: 'high',
+      confidence: 0.92,
+      reason: 'Le contenu signale un paiement ou une facture en echec ou en retard.',
+      recommendedAction: 'create_task',
+      ruleId: 'action.payment-issue',
+      groupKey: 'billing.payment-issues',
+      task: { title: taskTitleFor(input) },
+    };
+  }
+
+  if (hasAny(TRANSACTION_CHANGE_PATTERNS, combined)) {
+    return {
+      ...base,
+      category: 'action',
+      urgency: 'medium',
+      confidence: 0.88,
+      reason: 'Le contenu signale une annulation ou un changement de commande, reservation ou rendez-vous.',
+      recommendedAction: 'create_task',
+      ruleId: 'action.transaction-change',
+      groupKey: 'transactions.changes',
+      task: { title: taskTitleFor(input) },
+    };
+  }
+
+  if (hasAny(SECURITY_INFO_PATTERNS, combined)) {
+    return {
+      ...base,
+      category: 'info',
+      urgency: 'low',
+      confidence: 0.78,
+      reason: 'Le contenu contient un avis de securite utile sans action explicite.',
+      recommendedAction: 'none',
+      ruleId: 'info.security-advisory',
+      groupKey: 'security.advisories',
+    };
+  }
+
+  return null;
 }
 
 function matchPersonalRule(input: MailQualificationInput): MailQualificationRule | null {
@@ -269,7 +360,6 @@ function qualificationFromRule(input: MailQualificationInput, rule: MailQualific
 
 export function qualifyMail(input: MailQualificationInput): MailQualification {
   const personalRule = matchPersonalRule(input);
-  if (personalRule) return qualificationFromRule(input, personalRule);
 
   const subject = input.subject.trim() || '(sans objet)';
   const combinedRaw = [input.from, input.subject, input.snippet, input.listId, input.autoSubmitted]
@@ -286,10 +376,17 @@ export function qualifyMail(input: MailQualificationInput): MailQualification {
   const hasInfoSignal = hasAny(INFO_PATTERNS, combined);
   const hasIgnoreSignal = hasAny(IGNORE_PATTERNS, combined);
 
-  if (hasActionSignal || (input.importantSender && hasInfoSignal)) {
+  if (personalRule?.category === 'action') return qualificationFromRule(input, personalRule);
+
+  const contentPriority = qualificationFromContentPriority(input, combined);
+  if (contentPriority) return contentPriority;
+
+  if (personalRule) return qualificationFromRule(input, personalRule);
+
+  if (hasActionSignal) {
     const urgency: MailUrgency = hasHighUrgencySignal ? 'high' : 'medium';
     const recommendedAction: MailRecommendedAction =
-      /\?|\b(reponds?|réponds?|reponse attendue|réponse attendue|please reply)\b/i.test(combinedRaw)
+      /\?|\b(reponds?|réponds?|repondre|répondre|reponse attendue|réponse attendue|please reply)\b/i.test(combinedRaw)
         ? 'reply'
         : 'create_task';
 
@@ -312,8 +409,10 @@ export function qualifyMail(input: MailQualificationInput): MailQualification {
     return {
       category: 'info',
       urgency: 'low',
-      confidence: 0.74,
-      reason: 'Le mail contient une information potentiellement utile a partager.',
+      confidence: input.importantSender ? 0.8 : 0.74,
+      reason: input.importantSender
+        ? 'Le mail contient une information potentiellement utile provenant d un contact prioritaire.'
+        : 'Le mail contient une information potentiellement utile a partager.',
       briefingSummary: buildBriefingSummary(input),
       recommendedAction: 'none',
     };
