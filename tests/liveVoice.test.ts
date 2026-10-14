@@ -8,6 +8,7 @@ import {
   SqliteThreadRepository,
 } from '../src/conversation/repositories/SqliteRepositories';
 import { loadEnv } from '../src/env';
+import { canUseLivePilot } from '../src/voice/live/LiveAccessPolicy';
 import { LiveContextAdapter } from '../src/voice/live/LiveContextAdapter';
 import {
   deriveLiveIdempotencyKey,
@@ -51,6 +52,17 @@ function loggerStub(): FastifyBaseLogger {
 }
 
 describe('GPT-Live foundations', () => {
+  test('keeps the pilot owner-only until the explicit rollout switch is disabled', () => {
+    const owner = { kind: 'user', roles: ['owner'] } as Parameters<typeof canUseLivePilot>[0];
+    const resident = { kind: 'user', roles: ['resident'] } as Parameters<typeof canUseLivePilot>[0];
+    const service = { kind: 'service', permissions: ['chat'] } as Parameters<typeof canUseLivePilot>[0];
+    expect(canUseLivePilot(owner, true)).toBe(true);
+    expect(canUseLivePilot(resident, true)).toBe(false);
+    expect(canUseLivePilot(service, true)).toBe(false);
+    expect(canUseLivePilot(resident, false)).toBe(true);
+    expect(liveEnv().OPENAI_LIVE_PILOT_OWNER_ONLY).toBe(true);
+  });
+
   test('stores only a device hash and durable delegation metadata', () => {
     const db = createConversationDb(':memory:');
     const registry = new LiveSessionRegistry(db);

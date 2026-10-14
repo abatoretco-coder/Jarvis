@@ -31,6 +31,7 @@ export type Vm400Capabilities = {
       available: boolean;
       reason?: string;
       enabled: boolean;
+      pilotOwnerOnly: boolean;
       desktopEnabled: boolean;
       androidEnabled: boolean;
       homeAssistantTtsEnabled: boolean;

@@ -147,6 +147,10 @@ export class LiveSessionService {
     private readonly transport: LiveProviderTransport = new DefaultLiveProviderTransport()
   ) {}
 
+  get pilotOwnerOnly(): boolean {
+    return this.env.OPENAI_LIVE_PILOT_OWNER_ONLY;
+  }
+
   start(): void {
     if (this.cleanupTimer) return;
     this.cleanupTimer = setInterval(() => void this.closeExpiredSessions(), 10_000);
