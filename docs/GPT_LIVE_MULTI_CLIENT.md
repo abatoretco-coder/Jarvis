@@ -29,7 +29,7 @@ Une même clé peut relire le résultat existant. Une autre clé pour la même d
 
 ## Persistance et confidentialité
 
-La migration SQLite `live_voice_registry` est additive. Elle conserve l'identifiant de session, le propriétaire, un hash de l'appareil, les dates, les états, l'usage et les clés d'opération. Elle ne conserve aucun audio brut ni transcript complet.
+Les migrations SQLite `live_voice_registry` et `live_voice_client_telemetry` sont additives. Elles conservent l'identifiant de session, le propriétaire, un hash de l'appareil, les dates, les états, l'usage, les clés d'opération et les événements techniques bornés du pilote. Elles ne conservent aucun audio brut ni transcript complet.
 
 Le contexte de démarrage contient au plus 20 messages et 6 000 octets UTF-8, borne conservatrice sous 6 000 tokens. Les secrets et métadonnées techniques ne sont pas ajoutés. `contextNote` reste séparé et explicitement marqué comme non fiable.
 
@@ -40,6 +40,14 @@ Les logs ne doivent jamais inclure SDP, audio, transcript complet, bearer token 
 Tous les flags sont désactivés par défaut. `OPENAI_LIVE_PILOT_OWNER_ONLY=true` réserve Desktop et Android aux comptes portant le rôle `owner` pendant le pilote ; la capacité publiée est calculée pour l'identité authentifiée. `voice.live.available` dans `/v1/capabilities` reflète le master flag, le flag client, cette restriction, la configuration OIDC/OpenAI, le budget et le circuit breaker. Le contrat publie aussi `idleTimeoutMs` et `delegationTimeoutMs`, afin que les clients appliquent les limites validées par le serveur.
 
 Le budget convertit la durée cumulée au tarif public actuel de 0,05 USD/minute, facturé à la seconde. Les modèles et outils backend restent facturés séparément. Ce tarif doit être revérifié lors de chaque changement de modèle ou revue tarifaire : [tarification GPT-Live](https://developers.openai.com/api/docs/pricing#live-session-duration).
+
+Le rapport de promotion est généré en lecture seule :
+
+```powershell
+npm run report:live-pilot -- --database <conversation.sqlite> --since 2026-10-15T00:00:00+02:00
+```
+
+Il expose le nombre de sessions connectées, le taux de connexion, les fallbacks, les états de délégation et les p95 de connexion, ingest et premier audio. Il ne lit ni ne produit de contenu conversationnel.
 
 Ordre de promotion :
 

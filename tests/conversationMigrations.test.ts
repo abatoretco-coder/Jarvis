@@ -23,6 +23,28 @@ afterEach(() => {
 });
 
 describe('conversation database migrations', () => {
+  test('upgrades the Live registry with sanitized client telemetry', () => {
+    const database = createConversationDb(':memory:');
+    database.exec(`
+      DROP TABLE live_voice_telemetry;
+      DELETE FROM schema_migrations WHERE version=21;
+      PRAGMA user_version=20;
+    `);
+
+    runConversationMigrations(database);
+
+    expect(database.pragma('user_version', { simple: true })).toBe(CONVERSATION_SCHEMA_VERSION);
+    expect(database.prepare('SELECT name FROM schema_migrations WHERE version=21').get()).toEqual({
+      name: 'live_voice_client_telemetry',
+    });
+    expect(
+      database
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='live_voice_telemetry'")
+        .get()
+    ).toEqual({ name: 'live_voice_telemetry' });
+    database.close();
+  });
+
   test('records the schema version once and is idempotent', () => {
     const directory = mkdtempSync(join(tmpdir(), 'jarvis-schema-version-'));
     directories.push(directory);
@@ -53,12 +75,13 @@ describe('conversation database migrations', () => {
       { version: 18, name: 'lighting_intent_maximum_mode' },
       { version: 19, name: 'durable_home_telemetry' },
       { version: 20, name: 'live_voice_registry' },
+      { version: 21, name: 'live_voice_client_telemetry' },
     ]);
     first.close();
 
     const reopened = createConversationDb(databasePath);
     expect(reopened.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()).toEqual({
-      count: 20,
+      count: 21,
     });
     reopened.close();
   });

@@ -16,6 +16,7 @@ import {
 } from '../src/voice/live/LiveDelegationCoordinator';
 import { LiveEventValidator } from '../src/voice/live/LiveEventValidator';
 import { LiveFallbackCoordinator } from '../src/voice/live/LiveFallbackCoordinator';
+import { buildLivePilotReport } from '../src/voice/live/LivePilotReport';
 import { hashLiveDeviceId, LiveSessionRegistry } from '../src/voice/live/LiveSessionRegistry';
 import {
   type LiveProviderTransport,
@@ -78,6 +79,55 @@ describe('GPT-Live foundations', () => {
     expect(db.prepare('PRAGMA table_info(live_voice_sessions)').all()).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'transcript' })])
     );
+    db.close();
+  });
+
+  test('persists only bounded technical telemetry and builds pilot gates', () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    const session = createSession(registry);
+    registry.observeDelegation({ sessionId: session.sessionId, delegationId: 'delegation-a', nowMs: 2_000 });
+    registry.recordTelemetry({
+      sessionId: session.sessionId,
+      eventType: 'client_connected',
+      elapsedMs: 420,
+      nowMs: 1_500,
+    });
+    registry.recordTelemetry({
+      sessionId: session.sessionId,
+      delegationId: 'delegation-a',
+      eventType: 'ingest_completed',
+      elapsedMs: 1_250,
+      nowMs: 3_000,
+    });
+
+    expect(db.prepare('SELECT * FROM live_voice_telemetry ORDER BY id').all()).toEqual([
+      expect.objectContaining({
+        session_id: session.sessionId,
+        delegation_id: null,
+        event_type: 'client_connected',
+        elapsed_ms: 420,
+      }),
+      expect.objectContaining({
+        session_id: session.sessionId,
+        delegation_id: 'delegation-a',
+        event_type: 'ingest_completed',
+        elapsed_ms: 1_250,
+      }),
+    ]);
+    expect(db.prepare('PRAGMA table_info(live_voice_telemetry)').all()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'transcript' }),
+        expect.objectContaining({ name: 'audio' }),
+      ])
+    );
+    expect(buildLivePilotReport(db, 0)).toMatchObject({
+      sessions: 1,
+      connectedSessions: 1,
+      connectionSuccessRate: 1,
+      latenciesMsP95: { connection: 420, ingest: 1_250, firstAudio: null },
+      gates: { sampleComplete: false, connectionRateAtLeast95Percent: true },
+    });
     db.close();
   });
 

@@ -190,6 +190,12 @@ export function registerLiveVoiceRoutes(
         }
       }
     }
+    live.registry.recordTelemetry({
+      sessionId: parsed.data.sessionId,
+      eventType: parsed.data.type,
+      delegationId: parsed.data.delegationId,
+      elapsedMs: parsed.data.elapsedMs,
+    });
     request.log.info(
       {
         liveSessionId: parsed.data.sessionId,
