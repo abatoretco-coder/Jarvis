@@ -223,6 +223,7 @@ const envSchema = z
     // GPT-Live is an opt-in voice transport. Every client flag remains gated by
     // the master flag and effective runtime health.
     OPENAI_LIVE_ENABLED: booleanFromEnv.default(false),
+    OPENAI_LIVE_PILOT_OWNER_ONLY: booleanFromEnv.default(true),
     OPENAI_LIVE_DESKTOP_ENABLED: booleanFromEnv.default(false),
     OPENAI_LIVE_ANDROID_ENABLED: booleanFromEnv.default(false),
     OPENAI_LIVE_HA_TTS_ENABLED: booleanFromEnv.default(false),
