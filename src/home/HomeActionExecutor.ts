@@ -13,7 +13,7 @@ import type { RequestPrincipal } from '../identity/requestIdentity';
 import { HOME_PRESETS } from './devicePresets';
 import { homeActionStateAlreadySatisfied, homeActionStateConflict } from './HomeActionPolicy';
 import { homeActionTiming } from './HomeActionTiming';
-import { type HomeActionName, type HomeCatalog, type HomeScene, isHomeActionValueValid, TV_REMOTE_KEYS } from './HomeCatalog';
+import { type HomeActionName, type HomeCatalog, type HomeScene, isHomeActionValueValid, sceneHasDeviceConflicts, TV_REMOTE_KEYS } from './HomeCatalog';
 import { ensureTelevisionReady } from './TelevisionReadiness';
 
 export type ExecutableHomeAction = {
@@ -698,6 +698,21 @@ export async function executeCatalogHomeScene(input: {
   ha?: HomeAssistantClient;
   principal?: RequestPrincipal;
 }): Promise<HomeSceneExecution> {
+  if (sceneHasDeviceConflicts(input.scene.steps)) {
+    return {
+      contractVersion: 2,
+      outcome: 'failed',
+      status: 'failed',
+      errorCode: 'home_scene_device_conflict',
+      steps: input.scene.steps.map((step) => ({
+        deviceId: step.deviceId,
+        action: step.action,
+        status: 'failed',
+        outcome: 'failed',
+        error: 'home_scene_device_conflict',
+      })),
+    };
+  }
   // Preflight every step first so a denied or malformed scene never executes partially.
   for (const step of input.scene.steps) {
     const resolved = resolveCatalogHomeAction(input.catalog, step);

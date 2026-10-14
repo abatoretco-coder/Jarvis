@@ -341,6 +341,25 @@ function setup(
 }
 
 describe('home routes', () => {
+  test('keeps legacy routine creation retired in favor of Home Assistant automations', async () => {
+    const { app } = setup('owner', ['home', 'admin'], true);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/home/routines',
+      payload: {
+        expectedRevision: 'aaaaaaaaaaaaaaaa',
+        name: 'Ancien horaire',
+        sceneId: 'scene-film',
+        at: '20:30',
+        weekdays: [5],
+      },
+    });
+
+    expect(response.statusCode).toBe(410);
+    expect(response.json()).toEqual({ error: 'home_routines_moved_to_home_assistant' });
+    await app.close();
+  });
+
   test('exposes and changes the four room-wide lighting modes for household members', async () => {
     const { app, callService } = setup('resident', ['home'], false, true, undefined, true);
 
@@ -1752,6 +1771,55 @@ describe('home routes', () => {
     const afterDelete = await app.inject({ method: 'GET', url: '/v1/home' });
     expect(afterDelete.json().scenes).toEqual([]);
     expect(afterDelete.json().routines).toEqual([]);
+    await app.close();
+  });
+
+  test('rejects a scene containing contradictory actions for the same device', async () => {
+    const { app, callService } = setup('owner', ['home', 'admin'], true);
+    const initial = await app.inject({ method: 'GET', url: '/v1/home' });
+    const turnOn = await app.inject({
+      method: 'POST',
+      url: '/v1/home/quick-actions',
+      payload: {
+        expectedRevision: initial.json().revision,
+        name: 'Salon allumé',
+        icon: 'light',
+        deviceId: 'living-light',
+        action: 'turn_on',
+        voicePhrases: [],
+      },
+    });
+    const turnOff = await app.inject({
+      method: 'POST',
+      url: '/v1/home/quick-actions',
+      payload: {
+        expectedRevision: turnOn.json().revision,
+        name: 'Salon éteint',
+        icon: 'light',
+        deviceId: 'living-light',
+        action: 'turn_off',
+        voicePhrases: [],
+      },
+    });
+
+    const scene = await app.inject({
+      method: 'POST',
+      url: '/v1/home/scenes',
+      payload: {
+        expectedRevision: turnOff.json().revision,
+        name: 'Salon contradictoire',
+        icon: 'light',
+        quickActionIds: [
+          turnOn.json().quickAction.quickActionId,
+          turnOff.json().quickAction.quickActionId,
+        ],
+        voicePhrases: [],
+      },
+    });
+
+    expect(scene.statusCode).toBe(400);
+    expect(scene.json()).toEqual({ error: 'home_scene_device_conflict' });
+    expect(callService).not.toHaveBeenCalled();
     await app.close();
   });
 });
