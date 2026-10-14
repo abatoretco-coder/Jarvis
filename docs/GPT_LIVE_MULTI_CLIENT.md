@@ -37,7 +37,7 @@ Les logs ne doivent jamais inclure SDP, audio, transcript complet, bearer token 
 
 ## Exploitation
 
-Tous les flags sont désactivés par défaut. `voice.live.available` dans `/v1/capabilities` reflète le master flag, le flag client, la configuration OIDC/OpenAI, le budget et le circuit breaker. Le contrat publie aussi `idleTimeoutMs` et `delegationTimeoutMs`, afin que les clients appliquent les limites validées par le serveur.
+Tous les flags sont désactivés par défaut. `OPENAI_LIVE_PILOT_OWNER_ONLY=true` réserve Desktop et Android aux comptes portant le rôle `owner` pendant le pilote ; la capacité publiée est calculée pour l'identité authentifiée. `voice.live.available` dans `/v1/capabilities` reflète le master flag, le flag client, cette restriction, la configuration OIDC/OpenAI, le budget et le circuit breaker. Le contrat publie aussi `idleTimeoutMs` et `delegationTimeoutMs`, afin que les clients appliquent les limites validées par le serveur.
 
 Le budget convertit la durée cumulée au tarif public actuel de 0,05 USD/minute, facturé à la seconde. Les modèles et outils backend restent facturés séparément. Ce tarif doit être revérifié lors de chaque changement de modèle ou revue tarifaire : [tarification GPT-Live](https://developers.openai.com/api/docs/pricing#live-session-duration).
 

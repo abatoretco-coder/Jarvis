@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { SqliteThreadRepository } from '../conversation/repositories/SqliteRepositories';
 import { hasRequestPermission, requireUserPrincipal } from '../identity/requestIdentity';
+import { canUseLivePilot } from '../voice/live/LiveAccessPolicy';
 import type { LiveVoiceRuntime } from '../voice/live/runtime';
 
 const sessionIdSchema = z.string().trim().regex(/^[A-Za-z0-9._:-]{8,160}$/u);
@@ -61,6 +62,9 @@ export function registerLiveIngestValidationHook(
       return reply.code(401).send({ error: 'oidc_user_required' });
     }
     if (!hasRequestPermission(request, 'chat')) return reply.code(403).send({ error: 'forbidden' });
+    if (!canUseLivePilot(user, live.sessions.pilotOwnerOnly)) {
+      return reply.code(403).send({ error: 'live_pilot_owner_required' });
+    }
     const parsedIds = z.object({
       liveSessionId: sessionIdSchema,
       liveDelegationId: delegationIdSchema,
@@ -105,6 +109,9 @@ export function registerLiveVoiceRoutes(
       return reply.code(401).send({ error: 'oidc_user_required' });
     }
     if (!hasRequestPermission(request, 'chat')) return reply.code(403).send({ error: 'forbidden' });
+    if (!canUseLivePilot(user, live.sessions.pilotOwnerOnly)) {
+      return reply.code(403).send({ error: 'live_pilot_owner_required' });
+    }
     try {
       await threads.getOrCreate(parsed.data.threadId, { channel: parsed.data.client });
     } catch {
