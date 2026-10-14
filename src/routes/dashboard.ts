@@ -118,6 +118,9 @@ type GmailFullMessage = {
 
 const MS_GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const GMAIL_METADATA_CONCURRENCY = 6;
+const MAX_MAIL_PAGE = 20;
+const MAX_DASHBOARD_MAIL_ITEMS = 100;
 
 const LOCAL_LINKS = [
   {
@@ -358,13 +361,17 @@ async function refreshGoogleAccessToken(account: MailAccount, env: AppDeps['env'
   });
 
   if (!response.ok) {
-    const rawBody = await response.text().catch(() => '');
-    throw new Error(`google_token_refresh_failed:${response.status}:${rawBody.slice(0, 200)}`);
+    await response.text().catch(() => '');
+    throw new Error(`google_token_refresh_failed:${response.status}`);
   }
 
-  const payload = await response.json() as { access_token?: string };
+  const payload = await response.json() as { access_token?: string; refresh_token?: string };
   if (!payload.access_token) {
     throw new Error('google_token_refresh_no_token');
+  }
+  if (payload.refresh_token && payload.refresh_token !== account.refreshToken) {
+    await account.onRefreshToken?.(payload.refresh_token);
+    account.refreshToken = payload.refresh_token;
   }
 
   return payload.access_token;
@@ -530,11 +537,18 @@ async function gmailGet<T>(path: string, token: string): Promise<T> {
   });
 
   if (!response.ok) {
-    const rawBody = await response.text().catch(() => '');
-    throw new Error(`gmail_get_failed:${response.status}:${rawBody.slice(0, 200)}`);
+    await response.text().catch(() => '');
+    throw new GmailGetError(response.status);
   }
 
   return response.json() as Promise<T>;
+}
+
+class GmailGetError extends Error {
+  constructor(readonly status: number) {
+    super(`gmail_get_failed:${status}`);
+    this.name = 'GmailGetError';
+  }
 }
 
 class GmailApiError extends Error {
@@ -568,6 +582,17 @@ async function gmailPost<T>(
   const text = await response.text().catch(() => '');
   if (!text.trim()) return {} as T;
   return JSON.parse(text) as T;
+}
+
+async function trashGmailMessage(account: MailAccount, env: AppDeps['env'], messageId: string): Promise<void> {
+  let token = await refreshGoogleAccessToken(account, env);
+  try {
+    await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || (error.status !== 401 && error.status !== 403)) throw error;
+    token = await refreshGoogleAccessToken(account, env);
+    await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
+  }
 }
 
 function decodeMimeHeader(value: string): string {
@@ -778,7 +803,13 @@ export async function buildTasksSection(env: AppDeps['env']): Promise<DashboardS
 }
 
 function gmailHeader(message: GmailDashboardMessage, headerName: string): string {
-  const raw = message.payload?.headers?.find((header) => header.name.toLowerCase() === headerName.toLowerCase())?.value ?? '';
+  const headers = Array.isArray(message.payload?.headers) ? message.payload.headers : [];
+  const raw = headers.find((header) =>
+    header
+    && typeof header.name === 'string'
+    && header.name.toLowerCase() === headerName.toLowerCase()
+    && typeof header.value === 'string'
+  )?.value ?? '';
   return decodeMimeHeader(raw);
 }
 
@@ -837,8 +868,8 @@ function collectMessageBodies(part: GmailMessageBodyPart | undefined): { plain: 
 }
 
 async function fetchMailMessageText(account: MailAccount, env: AppDeps['env'], messageId: string): Promise<{ text: string; snippet?: string }> {
-  const token = await refreshGoogleAccessToken(account, env);
-  const full = await gmailGet<GmailFullMessage>(`/messages/${encodeURIComponent(messageId)}?format=full`, token);
+  const reader = await createGmailAccountReader(account, env);
+  const full = await reader.get<GmailFullMessage>(`/messages/${encodeURIComponent(messageId)}?format=full`);
   const bodies = collectMessageBodies(full.payload);
   const plainText = cleanMailDetailText(bodies.plain.join('\n\n').trim());
   if (plainText) {
@@ -853,36 +884,74 @@ async function fetchMailMessageText(account: MailAccount, env: AppDeps['env'], m
   return { text: full.snippet?.trim() || '', snippet: full.snippet?.trim() || undefined };
 }
 
-async function fetchMailMessageTextFromAnyAccount(
-  accounts: MailAccount[],
-  preferredAccount: MailAccount | null,
+async function createGmailAccountReader(
+  account: MailAccount,
   env: AppDeps['env'],
-  messageId: string,
-): Promise<{ account: MailAccount; payload: { text: string; snippet?: string } }> {
-  if (accounts.length === 0) {
-    throw new Error('mail_not_configured');
-  }
+): Promise<{ get<T>(path: string): Promise<T> }> {
+  let accessToken = await refreshGoogleAccessToken(account, env);
+  let authRefresh: Promise<string> | undefined;
+  const refreshAccessToken = (): Promise<string> => {
+    authRefresh ??= (async () => {
+      try {
+        const token = await refreshGoogleAccessToken(account, env);
+        accessToken = token;
+        return token;
+      } finally {
+        authRefresh = undefined;
+      }
+    })();
+    return authRefresh;
+  };
 
-  const orderedAccounts = preferredAccount
-    ? [preferredAccount, ...accounts.filter((account) => account !== preferredAccount)]
-    : [...accounts];
-
-  let lastError: unknown = null;
-  for (const account of orderedAccounts) {
-    try {
-      const payload = await fetchMailMessageText(account, env, messageId);
-      return { account, payload };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('mail_message_failed');
+  return {
+    async get<T>(path: string): Promise<T> {
+      const attemptedToken = accessToken;
+      try {
+        return await gmailGet<T>(path, attemptedToken);
+      } catch (error) {
+        if (!(error instanceof GmailGetError) || (error.status !== 401 && error.status !== 403)) {
+          throw error;
+        }
+        const retryToken = attemptedToken === accessToken
+          ? await refreshAccessToken()
+          : accessToken;
+        return gmailGet<T>(path, retryToken);
+      }
+    },
+  };
 }
 
-async function fetchMailItemsForAccount(account: MailAccount, env: AppDeps['env']): Promise<DashboardMailItem[]> {
-  const payload = await fetchMailItemsPageForAccount(account, env, 0, 40);
-  return payload.items;
+async function mapSettledWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results = new Array<PromiseSettledResult<R>>(values.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        results[index] = { status: 'fulfilled', value: await mapper(values[index]!, index) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  };
+  const workerCount = Math.min(Math.max(1, concurrency), values.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+type MailAccountPage = {
+  items: DashboardMailItem[];
+  hasMore: boolean;
+  failedMessages: number;
+};
+
+async function fetchMailItemsForAccount(account: MailAccount, env: AppDeps['env']): Promise<MailAccountPage> {
+  return fetchMailItemsPageForAccount(account, env, 0, 40);
 }
 
 async function fetchMailItemsPageForAccount(
@@ -890,8 +959,8 @@ async function fetchMailItemsPageForAccount(
   env: AppDeps['env'],
   page: number,
   pageSize: number,
-): Promise<{ items: DashboardMailItem[]; hasMore: boolean }> {
-  const token = await refreshGoogleAccessToken(account, env);
+): Promise<MailAccountPage> {
+  const reader = await createGmailAccountReader(account, env);
   const safePage = Math.max(0, Math.floor(page));
   const safePageSize = Math.max(1, Math.min(100, Math.floor(pageSize)));
 
@@ -903,23 +972,50 @@ async function fetchMailItemsPageForAccount(
       maxResults: String(safePageSize),
     });
     if (pageToken) params.set('pageToken', pageToken);
-    listPayload = await gmailGet<GmailListPayload>(`/messages?${params.toString()}`, token);
+    listPayload = await reader.get<GmailListPayload>(`/messages?${params.toString()}`);
     pageToken = listPayload.nextPageToken ?? '';
     if (!pageToken && idx < safePage) {
-      return { items: [], hasMore: false };
+      return { items: [], hasMore: false, failedMessages: 0 };
     }
   }
 
-  const messages = listPayload.messages ?? [];
-  if (messages.length === 0) return { items: [], hasMore: false };
+  if (listPayload.messages !== undefined && !Array.isArray(listPayload.messages)) {
+    throw new Error('gmail_list_payload_malformed');
+  }
+  const rawMessages = listPayload.messages ?? [];
+  let invalidReferences = 0;
+  const seenIds = new Set<string>();
+  const messages: GmailMessageRef[] = [];
+  for (const candidate of rawMessages) {
+    const id = candidate && typeof candidate.id === 'string' ? candidate.id.trim() : '';
+    if (!id) {
+      invalidReferences += 1;
+      continue;
+    }
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    messages.push({ id });
+  }
+  if (messages.length === 0) {
+    return { items: [], hasMore: Boolean(listPayload.nextPageToken), failedMessages: invalidReferences };
+  }
 
-  const detailedPayloads = await Promise.allSettled(
-    messages.map((message) =>
-      gmailGet<GmailDashboardMessage>(
+  const detailedPayloads = await mapSettledWithConcurrency(
+    messages,
+    GMAIL_METADATA_CONCURRENCY,
+    async (message) => {
+      const payload = await reader.get<unknown>(
         `/messages/${message.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-ID&metadataHeaders=Auto-Submitted`,
-        token,
-      ),
-    ),
+      );
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('gmail_message_payload_malformed');
+      }
+      const parsed = payload as GmailDashboardMessage;
+      if (typeof parsed.id === 'string' && parsed.id.trim() && parsed.id.trim() !== message.id) {
+        throw new Error('gmail_message_id_mismatch');
+      }
+      return { ...parsed, id: message.id };
+    },
   );
 
   const items = detailedPayloads
@@ -951,7 +1047,41 @@ async function fetchMailItemsPageForAccount(
   return {
     items,
     hasMore: Boolean(listPayload.nextPageToken),
+    failedMessages: invalidReferences + detailedPayloads.filter((result) => result.status === 'rejected').length,
   };
+}
+
+function stableMailSort(left: DashboardMailItem, right: DashboardMailItem): number {
+  const leftDated = left.receivedAt > 0;
+  const rightDated = right.receivedAt > 0;
+  if (leftDated !== rightDated) return leftDated ? -1 : 1;
+  if (left.receivedAt !== right.receivedAt) return right.receivedAt - left.receivedAt;
+  const accountOrder = left.accountLabel.localeCompare(right.accountLabel, 'fr');
+  return accountOrder || left.id.localeCompare(right.id, 'fr');
+}
+
+function withUniqueMailAccountLabels(accounts: readonly MailAccount[]): MailAccount[] {
+  const used = new Set<string>();
+  return accounts.map((account, index) => {
+    const base = account.label.trim() || `gmail-${index + 1}`;
+    let label = base;
+    let suffix = 2;
+    while (used.has(label.toLowerCase())) {
+      label = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    used.add(label.toLowerCase());
+    return label === account.label ? account : { ...account, label };
+  });
+}
+
+function mailErrorCode(error: unknown): string {
+  if (error instanceof GmailGetError) return `gmail_get_failed_${error.status}`;
+  if (error instanceof DOMException && error.name === 'TimeoutError') return 'mail_provider_timeout';
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith('google_token_refresh_failed:')) return message;
+  if (message.startsWith('gmail_')) return message.slice(0, 128);
+  return 'mail_provider_failed';
 }
 
 export async function buildMailSection(
@@ -959,29 +1089,56 @@ export async function buildMailSection(
   log: FastifyInstance['log'],
   accounts: MailAccount[] = buildMailAccounts(env),
 ): Promise<DashboardSection> {
-  if (accounts.length === 0) {
+  const dashboardAccounts = withUniqueMailAccountLabels(accounts);
+  if (dashboardAccounts.length === 0) {
     return makeSection('Mail', 'jarvis-mail', 'La gestion des emails n est pas configuree (identifiants Gmail ou Outlook manquants).');
   }
 
-  const results = await Promise.allSettled(accounts.map((account) => fetchMailItemsForAccount(account, env)));
-  const availableItems = results
-    .filter((result): result is PromiseFulfilledResult<DashboardMailItem[]> => result.status === 'fulfilled')
-    .flatMap((result) => result.value)
-    .sort((left, right) => right.receivedAt - left.receivedAt);
+  const results = await Promise.allSettled(dashboardAccounts.map((account) => fetchMailItemsForAccount(account, env)));
+  const successful = results
+    .filter((result): result is PromiseFulfilledResult<MailAccountPage> => result.status === 'fulfilled');
+  const uniqueItems = new Map<string, DashboardMailItem>();
+  for (const result of successful) {
+    for (const item of result.value.items) {
+      uniqueItems.set(`${item.accountLabel}\u0000${item.id}`, item);
+    }
+  }
+  const allAvailableItems = [...uniqueItems.values()].sort(stableMailSort);
+  const availableItems = allAvailableItems.slice(0, MAX_DASHBOARD_MAIL_ITEMS);
+  const failedMessages = successful.reduce((total, result) => total + result.value.failedMessages, 0);
 
   const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
   if (failures.length > 0) {
     log.warn(
       {
-        failures: failures.map((failure) => failure.reason instanceof Error ? failure.reason.message : String(failure.reason)),
+        failureCodes: failures.map((failure) => mailErrorCode(failure.reason)),
       },
       'dashboard_mail_accounts_partial_failure',
     );
   }
 
   if (availableItems.length === 0) {
-    if (failures.length === results.length) {
+    const hasReliableEmptyResult = successful.some((result) => result.value.failedMessages === 0);
+    if (failures.length === results.length || !hasReliableEmptyResult) {
       return makeSection('Mail', 'jarvis-mail', 'Impossible de recuperer les boites mail connectees pour le moment.');
+    }
+    if (failures.length > 0 || failedMessages > 0) {
+      const unavailableParts = [
+        failures.length > 0
+          ? `${failures.length} boite${failures.length > 1 ? 's' : ''} indisponible${failures.length > 1 ? 's' : ''}`
+          : '',
+        failedMessages > 0
+          ? `${failedMessages} message${failedMessages > 1 ? 's' : ''} indisponible${failedMessages > 1 ? 's' : ''}`
+          : '',
+      ].filter(Boolean);
+      return {
+        title: 'Mail',
+        source: 'jarvis-mail',
+        summary: `Aucun email exploitable recupere; ${unavailableParts.join(' et ')}.`,
+        lines: [],
+        status: 'partial',
+        items: [],
+      };
     }
     return makeSection('Mail', 'jarvis-mail', 'Aucun email recent dans les boites de reception connectees.');
   }
@@ -1000,13 +1157,13 @@ export async function buildMailSection(
     return `[${item.accountLabel}] ${prefix} - ${receivedAt} - ${item.from} - ${item.subject}`;
   });
 
-  const summary = `Mail: ${actionCount} action${actionCount > 1 ? 's' : ''}, ${infoCount} info${infoCount > 1 ? 's' : ''} utile${infoCount > 1 ? 's' : ''}, ${ignoredCount} ignore${ignoredCount > 1 ? 's' : ''}${failures.length > 0 ? `, ${failures.length} boite${failures.length > 1 ? 's' : ''} indisponible${failures.length > 1 ? 's' : ''}` : ''}.`;
+  const summary = `Mail: ${actionCount} action${actionCount > 1 ? 's' : ''}, ${infoCount} info${infoCount > 1 ? 's' : ''} utile${infoCount > 1 ? 's' : ''}, ${ignoredCount} ignore${ignoredCount > 1 ? 's' : ''}${failures.length > 0 ? `, ${failures.length} boite${failures.length > 1 ? 's' : ''} indisponible${failures.length > 1 ? 's' : ''}` : ''}${failedMessages > 0 ? `, ${failedMessages} message${failedMessages > 1 ? 's' : ''} indisponible${failedMessages > 1 ? 's' : ''}` : ''}.`;
   return {
     title: 'Mail',
     source: 'jarvis-mail',
     summary,
     lines,
-    status: failures.length > 0 ? 'partial' : 'ok',
+    status: failures.length > 0 || failedMessages > 0 ? 'partial' : 'ok',
     items: availableItems,
   };
 }
@@ -1021,25 +1178,85 @@ function resolveMailRequestContext(
     return { env: deps.env, accounts: buildMailAccounts(deps.env) };
   }
 
-  const refreshToken = deps.integrations?.resolveRefreshToken(
-    principal.userId,
-    'gmail',
-    connectionId,
-  );
   const env = {
     ...deps.env,
     OAUTH_REFRESH_TOKEN_STORE_PATH: '',
   };
-  const accounts: MailAccount[] = refreshToken && deps.env.GOOGLE_CLIENT_ID && deps.env.GOOGLE_CLIENT_SECRET
-    ? [{
-        label: 'gmail',
-        provider: 'gmail',
-        clientId: deps.env.GOOGLE_CLIENT_ID,
-        clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
-        refreshToken,
-      }]
-    : [];
-  return { env, accounts };
+  if (!deps.integrations || !deps.env.GOOGLE_CLIENT_ID || !deps.env.GOOGLE_CLIENT_SECRET) {
+    return { env, accounts: [] };
+  }
+
+  const visibleConnections = deps.integrations.repository?.listForUser(principal.userId);
+  if (Array.isArray(visibleConnections)) {
+    const accounts = visibleConnections
+      .filter((connection) =>
+        connection.provider === 'gmail'
+        && connection.status === 'active'
+        && (!connectionId || connection.connectionId === connectionId)
+      )
+      .flatMap((connection): MailAccount[] => {
+        const refreshToken = deps.integrations?.resolveRefreshToken(
+          principal.userId,
+          'gmail',
+          connection.connectionId,
+        );
+        if (!refreshToken) return [];
+        return [{
+          label: connection.displayName?.trim() || connection.providerEmail?.trim() || 'gmail',
+          provider: 'gmail',
+          clientId: deps.env.GOOGLE_CLIENT_ID!,
+          clientSecret: deps.env.GOOGLE_CLIENT_SECRET!,
+          refreshToken,
+          credentialKey: connection.connectionId,
+          onRefreshToken: (token) => deps.integrations?.rotateRefreshToken(
+            principal.userId,
+            'gmail',
+            token,
+            connection.connectionId,
+          ),
+        }];
+      });
+    return { env, accounts: withUniqueMailAccountLabels(accounts) };
+  }
+
+  // Compatibility for lightweight test/service adapters which predate the
+  // repository-backed multi-account contract.
+  const refreshToken = deps.integrations.resolveRefreshToken(principal.userId, 'gmail', connectionId);
+  return {
+    env,
+    accounts: refreshToken
+      ? [{
+          label: 'gmail',
+          provider: 'gmail',
+          clientId: deps.env.GOOGLE_CLIENT_ID,
+          clientSecret: deps.env.GOOGLE_CLIENT_SECRET,
+          refreshToken,
+          onRefreshToken: (token) => deps.integrations?.rotateRefreshToken(
+            principal.userId,
+            'gmail',
+            token,
+            connectionId,
+          ),
+        }]
+      : [],
+  };
+}
+
+class MailAccountSelectionError extends Error {
+  constructor(readonly code: 'mail_account_not_found' | 'mail_account_required', readonly status: 400 | 404) {
+    super(code);
+    this.name = 'MailAccountSelectionError';
+  }
+}
+
+function selectMailAccount(accounts: readonly MailAccount[], requestedLabel: string): MailAccount {
+  if (requestedLabel) {
+    const selected = accounts.find((item) => item.label.trim().toLowerCase() === requestedLabel);
+    if (!selected) throw new MailAccountSelectionError('mail_account_not_found', 404);
+    return selected;
+  }
+  if (accounts.length > 1) throw new MailAccountSelectionError('mail_account_required', 400);
+  return accounts[0]!;
 }
 
 type DashboardGeoLocation = {
@@ -1280,11 +1497,9 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
 
-      const account = accountLabel
-        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
-        : accounts[0];
+      const account = selectMailAccount(accounts, accountLabel);
 
-      const safePage = Number.isFinite(page) ? Math.max(0, Math.floor(page)) : 0;
+      const safePage = Number.isFinite(page) ? Math.max(0, Math.min(MAX_MAIL_PAGE, Math.floor(page))) : 0;
       const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.min(100, Math.floor(pageSize))) : 40;
       const payload = await fetchMailItemsPageForAccount(account, env, safePage, safePageSize);
       return reply.code(200).send({
@@ -1294,7 +1509,10 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         items: payload.items,
       });
     } catch (error) {
-      app.log.warn({ error }, 'dashboard_mail_messages_failed');
+      if (error instanceof MailAccountSelectionError) {
+        return reply.code(error.status).send({ error: error.code });
+      }
+      app.log.warn({ errorCode: mailErrorCode(error) }, 'dashboard_mail_messages_failed');
       return reply.code(500).send({ error: 'mail_messages_failed' });
     }
   });
@@ -1315,11 +1533,8 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
 
-      const preferredAccount = accountLabel
-        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
-        : accounts[0];
-
-      const { account, payload } = await fetchMailMessageTextFromAnyAccount(accounts, preferredAccount, env, messageId);
+      const account = selectMailAccount(accounts, accountLabel);
+      const payload = await fetchMailMessageText(account, env, messageId);
       return reply.code(200).send({
         messageId,
         accountLabel: account.label,
@@ -1327,11 +1542,12 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         snippet: payload.snippet,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'mail_message_failed';
-      const statusMatch = message.match(/^gmail_get_failed:(\d+):/);
-      const status = statusMatch ? Number(statusMatch[1]) : 500;
-      app.log.warn({ error }, 'dashboard_mail_message_failed');
-      return reply.code(Number.isFinite(status) ? status : 500).send({ error: 'mail_message_failed' });
+      if (error instanceof MailAccountSelectionError) {
+        return reply.code(error.status).send({ error: error.code });
+      }
+      const status = error instanceof GmailGetError ? error.status : 500;
+      app.log.warn({ errorCode: mailErrorCode(error) }, 'dashboard_mail_message_failed');
+      return reply.code(status).send({ error: 'mail_message_failed' });
     }
   });
 
@@ -1351,19 +1567,19 @@ export function registerDashboardRoute(app: FastifyInstance, deps: AppDeps): voi
         return reply.code(400).send({ error: 'mail_not_configured' });
       }
 
-      const account = accountLabel
-        ? accounts.find((item) => item.label.trim().toLowerCase() === accountLabel) ?? accounts[0]
-        : accounts[0];
+      const account = selectMailAccount(accounts, accountLabel);
 
-      const token = await refreshGoogleAccessToken(account, env);
       // Gmail's users.messages.trash contract requires an empty request body.
-      await gmailPost(`/messages/${encodeURIComponent(messageId)}/trash`, token);
+      await trashGmailMessage(account, env, messageId);
       return reply.code(200).send({ ok: true });
     } catch (error) {
+      if (error instanceof MailAccountSelectionError) {
+        return reply.code(error.status).send({ error: error.code });
+      }
       const upstreamStatus = error instanceof GmailApiError ? error.status : undefined;
       app.log.warn(
         {
-          err: error,
+          errorCode: mailErrorCode(error),
           provider: 'gmail',
           ...(upstreamStatus === undefined ? {} : { upstreamStatus }),
         },

@@ -191,4 +191,54 @@ describe('dashboard personal Gmail connection', () => {
       await app.close();
     },
   );
+
+  it('refreshes authentication once when Gmail rejects trash before applying the mutation', async () => {
+    const env = loadEnv({
+      REQUIRE_API_KEY: 'false',
+      LOG_LEVEL: 'silent',
+      GOOGLE_CLIENT_ID: 'client',
+      GOOGLE_CLIENT_SECRET: 'secret',
+    });
+    const app = Fastify({ logger: false });
+    app.addHook('preHandler', async (request) => {
+      setRequestPrincipal(request, principal('alice'));
+    });
+    registerDashboardRoute(app, {
+      env,
+      integrations: { resolveRefreshToken: () => 'refresh-alice' } as unknown as IntegrationService,
+      spotifyWebApi: { isConfigured: () => false } as AppDeps['spotifyWebApi'],
+    });
+    let refreshCount = 0;
+    let trashCount = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        refreshCount += 1;
+        return new Response(JSON.stringify({ access_token: `access-${refreshCount}` }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/messages/message-alice/trash')) {
+        trashCount += 1;
+        expect(init?.body).toBeUndefined();
+        return trashCount === 1
+          ? new Response('{}', { status: 401 })
+          : new Response('{}', { status: 200 });
+      }
+      throw new Error(`unavailable test dependency: ${url}`);
+    }) as typeof fetch;
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/mail/trash',
+      payload: { messageId: 'message-alice', accountLabel: 'gmail' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true });
+    expect(refreshCount).toBe(2);
+    expect(trashCount).toBe(2);
+    await app.close();
+  });
 });
