@@ -67,9 +67,9 @@ Avant toute tentative d'ingest, le client peut reprendre avec un transcript fina
 ## État des gates
 
 - Phase 0 fournisseur : WebRTC Desktop réel, sideband corrélé et fermeture gracieuse validés le 15 octobre 2026.
-- Backend : déployé sur le runtime PC public le 15 octobre 2026, migration SQLite 20 et sondes HTTPS/OIDC validées.
-- Desktop : release installée sur le PC et pilote propriétaire actif avec `OPENAI_LIVE_ENABLED=true`, `OPENAI_LIVE_DESKTOP_ENABLED=true` et `OPENAI_LIVE_PILOT_OWNER_ONLY=true`.
-- Promotion Desktop : en attente des 30 conversations représentatives et des mesures de connexion, latence, interruption et mutation exactement une fois.
+- Backend : déployé sur le runtime PC public le 15 octobre 2026, migration SQLite 21 et sondes HTTPS/OIDC validées.
+- Desktop : release instrumentée installée sur le PC et pilote propriétaire actif avec `OPENAI_LIVE_ENABLED=true`, `OPENAI_LIVE_DESKTOP_ENABLED=true` et `OPENAI_LIVE_PILOT_OWNER_ONLY=true`.
+- Promotion Desktop : campagne mesurable ouverte à 0/30 conversations ; Android reste bloqué jusqu'à validation des mesures de connexion, latence, interruption et mutation exactement une fois.
 - Android : contrat et machine d'état compilent; choix WebRTC et activation bloqués jusqu'au test sur appareil réel.
 - Home Assistant : validateur de fidélité implémenté; activation bloquée jusqu'au corpus de 50 phrases.
 
