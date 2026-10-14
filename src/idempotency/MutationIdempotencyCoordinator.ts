@@ -15,8 +15,19 @@ export type PersistedMutationEntry = {
 
 export interface MutationIdempotencyStore {
   get(identity: string, idempotencyKey: string, now: number): PersistedMutationEntry | undefined;
-  reserve(identity: string, idempotencyKey: string, fingerprint: string, createdAt: number, expiresAt: number): 'created' | 'exists';
-  complete(identity: string, idempotencyKey: string, response: CachedMutationResponse): void;
+  reserve(
+    identity: string,
+    idempotencyKey: string,
+    fingerprint: string,
+    createdAt: number,
+    expiresAt: number
+  ): 'created' | 'exists';
+  complete(
+    identity: string,
+    idempotencyKey: string,
+    response: CachedMutationResponse,
+    expiresAt: number
+  ): void;
   prune(now: number): void;
 }
 
@@ -54,9 +65,7 @@ function canonicalJson(value: unknown): string {
 }
 
 export function mutationFingerprint(action: string, parameters: unknown): string {
-  return createHash('sha256')
-    .update(canonicalJson({ action, parameters }))
-    .digest('hex');
+  return createHash('sha256').update(canonicalJson({ action, parameters })).digest('hex');
 }
 
 export class MutationIdempotencyCoordinator {
@@ -67,10 +76,45 @@ export class MutationIdempotencyCoordinator {
       ttlMs?: number;
       maxEntries?: number;
       pendingTimeoutMs?: number;
+      pendingRetentionMs?: number;
+      uncertainRetentionMs?: number;
+      maxCachedResponseBytes?: number;
       now?: () => number;
       store?: MutationIdempotencyStore;
+      onPersistenceError?: (error: unknown) => void;
     } = {}
   ) {}
+
+  private uncertainResponse(reason = 'mutation_result_unknown'): CachedMutationResponse {
+    return {
+      statusCode: 503,
+      contentType: 'application/json; charset=utf-8',
+      payload: JSON.stringify({ error: reason, operationStatus: 'uncertain' }),
+    };
+  }
+
+  private boundedResponse(response: CachedMutationResponse): CachedMutationResponse {
+    const size = Buffer.isBuffer(response.payload)
+      ? response.payload.byteLength
+      : Buffer.byteLength(response.payload, 'utf8');
+    return size <= (this.options.maxCachedResponseBytes ?? 1024 * 1024)
+      ? response
+      : this.uncertainResponse('mutation_result_too_large');
+  }
+
+  private settle(entry: Entry, response: CachedMutationResponse, expiresAt: number): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    clearTimeout(entry.pendingTimer);
+    entry.response = this.boundedResponse(response);
+    entry.expiresAt = expiresAt;
+    try {
+      this.options.store?.complete(entry.identity, entry.idempotencyKey, entry.response, expiresAt);
+    } catch (error) {
+      this.options.onPersistenceError?.(error);
+    }
+    entry.resolve(entry.response);
+  }
 
   reserve(identity: string, idempotencyKey: string, fingerprint: string): MutationReservation {
     const now = (this.options.now ?? Date.now)();
@@ -90,14 +134,7 @@ export class MutationIdempotencyCoordinator {
       }
       return {
         kind: 'replay',
-        response: Promise.resolve({
-          statusCode: 503,
-          contentType: 'application/json; charset=utf-8',
-          payload: JSON.stringify({
-            error: 'mutation_result_unknown',
-            operationStatus: 'uncertain',
-          }),
-        }),
+        response: Promise.resolve(this.uncertainResponse()),
       };
     }
 
@@ -108,39 +145,31 @@ export class MutationIdempotencyCoordinator {
     const promise = new Promise<CachedMutationResponse>((done) => {
       resolve = done;
     });
-    const ttlMs = this.options.ttlMs ?? 5 * 60_000;
+    const pendingRetentionMs = this.options.pendingRetentionMs ?? 24 * 60 * 60_000;
     const pendingTimeoutMs = this.options.pendingTimeoutMs ?? 65_000;
     const entry: Entry = {
       identity,
       idempotencyKey,
       fingerprint,
       createdAt: now,
-      expiresAt: now + ttlMs,
+      expiresAt: now + pendingRetentionMs,
       promise,
       resolve,
       settled: false,
       pendingTimer: setTimeout(() => {
         if (entry.settled) return;
-        entry.settled = true;
-        const response: CachedMutationResponse = {
-          statusCode: 503,
-          contentType: 'application/json; charset=utf-8',
-          payload: JSON.stringify({
-            error: 'mutation_result_unknown',
-            operationStatus: 'uncertain',
-          }),
-        };
-        try {
-          this.options.store?.complete(entry.identity, entry.idempotencyKey, response);
-        } catch {
-          // The in-memory waiter must still be released if persistence is no
-          // longer available during shutdown.
-        }
-        entry.response = response;
-        entry.resolve(response);
+        const timeoutNow = (this.options.now ?? Date.now)();
+        this.settle(
+          entry,
+          this.uncertainResponse(),
+          timeoutNow + (this.options.uncertainRetentionMs ?? 24 * 60 * 60_000)
+        );
       }, pendingTimeoutMs),
     };
-    if (this.options.store?.reserve(identity, idempotencyKey, fingerprint, now, entry.expiresAt) === 'exists') {
+    if (
+      this.options.store?.reserve(identity, idempotencyKey, fingerprint, now, entry.expiresAt) ===
+      'exists'
+    ) {
       clearTimeout(entry.pendingTimer);
       return this.reserve(identity, idempotencyKey, fingerprint);
     }
@@ -152,11 +181,8 @@ export class MutationIdempotencyCoordinator {
   complete(cacheKey: string, response: CachedMutationResponse): void {
     const entry = this.entries.get(cacheKey);
     if (!entry || entry.settled) return;
-    entry.settled = true;
-    clearTimeout(entry.pendingTimer);
-    this.options.store?.complete(entry.identity, entry.idempotencyKey, response);
-    entry.response = response;
-    entry.resolve(response);
+    const now = (this.options.now ?? Date.now)();
+    this.settle(entry, response, now + (this.options.ttlMs ?? 5 * 60_000));
   }
 
   lookup(identity: string, idempotencyKey: string): MutationResultLookup {
@@ -173,7 +199,7 @@ export class MutationIdempotencyCoordinator {
     if (!persisted) return { state: 'missing' };
     return persisted.state === 'completed' && persisted.response
       ? { state: 'completed', response: persisted.response }
-      : { state: 'pending' };
+      : { state: 'completed', response: this.uncertainResponse() };
   }
 
   private prune(now: number): void {
