@@ -190,7 +190,8 @@ async function getAccountTokenWithStore(acc: MailAccount, refreshStorePath?: str
 interface CachedToken { accessToken: string; expiresAt: number }
 const _googleTokenCache         = new Map<string, CachedToken>();
 const _googleLiveRefreshToken   = new Map<string, string>(); // captures rotated tokens
-const _googleKeepaliveScheduled = new Set<string>();
+const _googleKeepaliveTimers = new Map<string, ReturnType<typeof setInterval>>();
+const _googleKeepaliveWork = new Set<Promise<unknown>>();
 const TOKEN_EXPIRY_BUFFER_MS    = 60_000;           // refresh access token 60 s before expiry
 const KEEPALIVE_DAYS            = 30;
 const KEEPALIVE_TICK_MS         = 24 * 3_600_000; // 1 day — safe for Node.js 32-bit timer range
@@ -245,21 +246,33 @@ async function refreshGoogleToken(env: {
     expiresAt:   Date.now() + expiresIn * 1_000 - TOKEN_EXPIRY_BUFFER_MS,
   });
 
-  if (!_googleKeepaliveScheduled.has(cacheKey)) {
-    _googleKeepaliveScheduled.add(cacheKey);
+  if (!_googleKeepaliveTimers.has(cacheKey)) {
     let dayCount = 0;
     const timer = setInterval(() => {
       dayCount += 1;
       if (dayCount >= KEEPALIVE_DAYS) {
         dayCount = 0;
         _googleTokenCache.delete(cacheKey);
-        refreshGoogleToken(env).catch(() => {});
+        const work = refreshGoogleToken(env)
+          .catch(() => undefined)
+          .finally(() => _googleKeepaliveWork.delete(work));
+        _googleKeepaliveWork.add(work);
       }
     }, KEEPALIVE_TICK_MS);
+    _googleKeepaliveTimers.set(cacheKey, timer);
     if (timer.unref) timer.unref();
   }
 
   return data.access_token;
+}
+
+export async function stopMailTokenKeepalives(): Promise<void> {
+  for (const timer of _googleKeepaliveTimers.values()) clearInterval(timer);
+  _googleKeepaliveTimers.clear();
+  await Promise.allSettled([..._googleKeepaliveWork]);
+  for (const timer of _googleKeepaliveTimers.values()) clearInterval(timer);
+  _googleKeepaliveTimers.clear();
+  _googleTokenCache.clear();
 }
 
 // ─── LLM synthesis ───────────────────────────────────────────────────────────

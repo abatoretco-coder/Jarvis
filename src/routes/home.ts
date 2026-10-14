@@ -311,7 +311,9 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
   deps.homeLightingService = adaptiveLightingService ?? undefined;
   adaptiveLightingService?.start();
   if (adaptiveLightingService) {
-    app.addHook('onClose', async () => adaptiveLightingService.stop());
+    app.addHook('onClose', async () => {
+      await adaptiveLightingService.stop();
+    });
   }
   const reconcileManagedAutomations = async (reason: string) => {
     if (!automationService) return null;
@@ -342,6 +344,8 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
     return result;
   };
   let automationRecoveryTimer: NodeJS.Timeout | undefined;
+  let automationRecoveryWork: Promise<void> | undefined;
+  let automationRecoveryClosing = false;
   const recoverManagedAutomations = async (reason: string, includeRecent = false) => {
     if (!automationService) return;
     try {
@@ -357,17 +361,26 @@ export function registerHomeRoutes(app: FastifyInstance, deps: AppDeps): void {
       );
     }
   };
+  const scheduleManagedAutomationRecovery = (reason: string) => {
+    if (automationRecoveryClosing || automationRecoveryWork) return;
+    const work = recoverManagedAutomations(reason).finally(() => {
+      if (automationRecoveryWork === work) automationRecoveryWork = undefined;
+    });
+    automationRecoveryWork = work;
+  };
   app.addHook('onReady', async () => {
     await recoverManagedAutomations('startup_recovery', true);
     if (!automationService) return;
     automationRecoveryTimer = setInterval(
-      () => void recoverManagedAutomations('periodic_recovery'),
+      () => scheduleManagedAutomationRecovery('periodic_recovery'),
       60_000
     );
     automationRecoveryTimer.unref();
   });
   app.addHook('onClose', async () => {
+    automationRecoveryClosing = true;
     if (automationRecoveryTimer) clearInterval(automationRecoveryTimer);
+    await automationRecoveryWork;
   });
 
   app.get('/v1/home/configuration/home-assistant-sync', async (request, reply) => {

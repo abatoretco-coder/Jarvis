@@ -13,6 +13,7 @@ import { HomeRuntimeStateRepository } from '../src/home/HomeRuntimeStateReposito
 
 const roots: string[] = [];
 afterEach(() => {
+  jest.useRealTimers();
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -125,6 +126,96 @@ function lightState(state = 'on', brightness = 128, kelvin = 3_000) {
 }
 
 describe('room lighting modes', () => {
+  test('logs a scheduled SQLite failure and allows the next lighting cycle to run', async () => {
+    jest.useFakeTimers();
+    const listLightingIntents = jest
+      .fn()
+      .mockReturnValueOnce([])
+      .mockImplementationOnce(() => {
+        throw new Error('sqlite_read_failed');
+      })
+      .mockReturnValue([]);
+    const warn = jest.fn();
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => []),
+        getState: jest.fn(async () => undefined),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn },
+      { listLightingIntents } as unknown as HomeRuntimeStateRepository
+    );
+
+    service.start();
+    await Promise.resolve();
+    await jest.advanceTimersByTimeAsync(30_000);
+
+    expect(warn).toHaveBeenCalledWith(
+      { errorCode: 'sqlite_read_failed' },
+      'adaptive lighting scheduled tick failed'
+    );
+    expect(listLightingIntents).toHaveBeenCalledTimes(3);
+    await service.stop();
+  });
+
+  test('keeps direct tick failures observable and always releases the running guard', async () => {
+    const listLightingIntents = jest
+      .fn()
+      .mockReturnValueOnce([])
+      .mockImplementationOnce(() => {
+        throw new Error('sqlite_read_failed');
+      })
+      .mockReturnValue([]);
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates: jest.fn(async () => []),
+        getState: jest.fn(async () => undefined),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() },
+      { listLightingIntents } as unknown as HomeRuntimeStateRepository
+    );
+
+    await expect(service.tick()).rejects.toThrow('sqlite_read_failed');
+    await expect(service.tick()).resolves.toBeUndefined();
+    expect(listLightingIntents).toHaveBeenCalledTimes(3);
+  });
+
+  test('waits for an active scheduled tick to finish before stop resolves', async () => {
+    let releaseStates!: () => void;
+    const statesPending = new Promise<void>((resolve) => {
+      releaseStates = resolve;
+    });
+    const getStates = jest.fn(async () => {
+      await statesPending;
+      return [];
+    });
+    const service = new HomeAdaptiveLightingService(
+      fixture(),
+      {
+        getStates,
+        getState: jest.fn(async () => undefined),
+        callService: jest.fn(async () => ({ status: 200, data: [] })),
+      } as unknown as HomeAssistantClient,
+      { info: jest.fn(), warn: jest.fn() }
+    );
+
+    service.start();
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    releaseStates();
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(getStates).toHaveBeenCalledTimes(1);
+  });
+
   test('automatically includes a newly mapped light in the room group', () => {
     expect(fixture(true).getRoomLightDeviceIds('living')).toEqual(['living-light', 'living-wall-light']);
   });

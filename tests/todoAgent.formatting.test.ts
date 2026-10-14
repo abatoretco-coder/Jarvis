@@ -6,15 +6,36 @@ import {
   formatDueDateForUser,
   formatTodoActionPreview,
   getMicrosoftTodoAccessToken,
+  stopTodoTokenKeepalives,
 } from '../src/todo/todoAgent';
 
 const originalFetch = global.fetch;
 
 describe('todoAgent formatting', () => {
-  afterEach(() => {
+  afterEach(async () => {
+    await stopTodoTokenKeepalives();
     jest.useRealTimers();
     global.fetch = originalFetch;
     jest.restoreAllMocks();
+  });
+
+  it('cancels Microsoft token keepalive work at shutdown', async () => {
+    jest.useFakeTimers();
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({
+      access_token: 'access-for-shutdown',
+      expires_in: 3600,
+    }), { status: 200 })) as typeof fetch;
+
+    await getMicrosoftTodoAccessToken({
+      MICROSOFT_CLIENT_ID: 'shutdown-test',
+      MICROSOFT_CLIENT_SECRET: 'secret',
+      MICROSOFT_REFRESH_TOKEN: 'refresh',
+    });
+    expect(jest.getTimerCount()).toBeGreaterThan(0);
+
+    await stopTodoTokenKeepalives();
+
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it("follows Microsoft Graph pagination and returns every task due today", async () => {
