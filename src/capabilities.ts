@@ -36,6 +36,7 @@ export type Vm400Capabilities = {
       homeAssistantTtsEnabled: boolean;
       voice: string;
       idleTimeoutMs: number;
+      delegationTimeoutMs: number;
     };
   };
 };

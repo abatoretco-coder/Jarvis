@@ -27,6 +27,7 @@ export function registerCapabilitiesRoute(app: FastifyInstance, deps: AppDeps): 
         homeAssistantTtsEnabled: deps.env.OPENAI_LIVE_HA_TTS_ENABLED,
         voice: deps.env.OPENAI_LIVE_VOICE,
         idleTimeoutMs: deps.env.OPENAI_LIVE_IDLE_TIMEOUT_MS,
+        delegationTimeoutMs: deps.env.OPENAI_LIVE_DELEGATION_TIMEOUT_MS,
       },
     });
 

@@ -1,10 +1,13 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, jest, test } from '@jest/globals';
+import type { FastifyBaseLogger } from 'fastify';
+import type WebSocket from 'ws';
 
 import {
   createConversationDb,
   SqliteMessageRepository,
   SqliteThreadRepository,
 } from '../src/conversation/repositories/SqliteRepositories';
+import { loadEnv } from '../src/env';
 import { LiveContextAdapter } from '../src/voice/live/LiveContextAdapter';
 import {
   deriveLiveIdempotencyKey,
@@ -13,6 +16,10 @@ import {
 import { LiveEventValidator } from '../src/voice/live/LiveEventValidator';
 import { LiveFallbackCoordinator } from '../src/voice/live/LiveFallbackCoordinator';
 import { hashLiveDeviceId, LiveSessionRegistry } from '../src/voice/live/LiveSessionRegistry';
+import {
+  type LiveProviderTransport,
+  LiveSessionService,
+} from '../src/voice/live/LiveSessionService';
 import { LiveTtsAdapter } from '../src/voice/live/LiveTtsAdapter';
 
 function createSession(registry: LiveSessionRegistry, sessionId = 'live_session_a') {
@@ -25,6 +32,22 @@ function createSession(registry: LiveSessionRegistry, sessionId = 'live_session_
     nowMs: 1_000,
     expiresAtMs: 301_000,
   });
+}
+
+function liveEnv() {
+  return loadEnv({
+    REQUIRE_API_KEY: 'false',
+    OIDC_ENABLED: 'true',
+    OIDC_ISSUER_URL: 'https://issuer.example.test/realms/jarvis',
+    OIDC_AUDIENCE: 'jarvis-api',
+    OPENAI_API_KEY: 'test-live-key',
+    OPENAI_LIVE_ENABLED: 'true',
+    OPENAI_LIVE_DESKTOP_ENABLED: 'true',
+  });
+}
+
+function loggerStub(): FastifyBaseLogger {
+  return { warn: jest.fn() } as unknown as FastifyBaseLogger;
 }
 
 describe('GPT-Live foundations', () => {
@@ -146,5 +169,72 @@ describe('GPT-Live foundations', () => {
     expect(tts.validateCandidate({ ...base, outputTranscript: 'Bonjour.' })).toMatchObject({ ok: false });
     expect(tts.validateCandidate({ ...base, quietWindowElapsed: false })).toMatchObject({ ok: false });
     expect(tts.validateCandidate({ ...base, durationMs: 13_000 })).toMatchObject({ ok: false });
+  });
+
+  test('does not return a client session before the sideband is attached', async () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    const threads = new SqliteThreadRepository(db);
+    const messages = new SqliteMessageRepository(db);
+    await threads.getOrCreate('thread-a');
+    const events: string[] = [];
+    const socket = { readyState: 1 } as WebSocket;
+    const transport: LiveProviderTransport = {
+      create: async () => {
+        events.push('created');
+        return { session: { id: 'live_provider_a' }, transport: { type: 'webrtc', sdp: 'answer' } };
+      },
+      attach: async () => {
+        events.push('attached');
+        return socket;
+      },
+      hangup: async () => { events.push('hung_up'); },
+    };
+    const coordinator = new LiveDelegationCoordinator(registry, 10);
+    const service = new LiveSessionService(
+      liveEnv(), registry, coordinator, new LiveContextAdapter(threads, messages),
+      new LiveEventValidator(65_536), loggerStub(), transport
+    );
+
+    await expect(service.create({
+      ownerUserId: 'owner-a', threadId: 'thread-a', client: 'desktop',
+      deviceId: 'desktop-a', sdp: 'offer',
+    })).resolves.toMatchObject({ sessionId: 'live_provider_a', sdp: 'answer' });
+    expect(events).toEqual(['created', 'attached']);
+    expect(registry.find('live_provider_a')).toMatchObject({ state: 'active', sidebandAttached: true });
+    db.close();
+  });
+
+  test('hangs up and records an unconfirmed close when sideband attachment fails', async () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    const threads = new SqliteThreadRepository(db);
+    const messages = new SqliteMessageRepository(db);
+    await threads.getOrCreate('thread-a');
+    const hangup = jest.fn<LiveProviderTransport['hangup']>(async () => undefined);
+    const transport: LiveProviderTransport = {
+      create: async () => ({
+        session: { id: 'live_provider_failed' },
+        transport: { type: 'webrtc', sdp: 'answer' },
+      }),
+      attach: async () => { throw new Error('attach_failed'); },
+      hangup,
+    };
+    const coordinator = new LiveDelegationCoordinator(registry, 10);
+    const service = new LiveSessionService(
+      liveEnv(), registry, coordinator, new LiveContextAdapter(threads, messages),
+      new LiveEventValidator(65_536), loggerStub(), transport
+    );
+
+    await expect(service.create({
+      ownerUserId: 'owner-a', threadId: 'thread-a', client: 'desktop',
+      deviceId: 'desktop-a', sdp: 'offer',
+    })).rejects.toThrow('attach_failed');
+    expect(hangup).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'live_provider_failed' }));
+    expect(registry.find('live_provider_failed')).toMatchObject({
+      state: 'finalization_unconfirmed',
+      lastErrorCode: 'sideband_attach_failed',
+    });
+    db.close();
   });
 });
