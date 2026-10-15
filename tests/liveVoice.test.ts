@@ -241,8 +241,10 @@ describe('GPT-Live foundations', () => {
     await threads.getOrCreate('thread-a');
     const events: string[] = [];
     const socket = { readyState: 1 } as WebSocket;
+    let createBody: unknown;
     const transport: LiveProviderTransport = {
-      create: async () => {
+      create: async (input) => {
+        createBody = input.body;
         events.push('created');
         return { session: { id: 'live_provider_a' }, transport: { type: 'webrtc', sdp: 'answer' } };
       },
@@ -263,6 +265,9 @@ describe('GPT-Live foundations', () => {
       deviceId: 'desktop-a', sdp: 'offer',
     })).resolves.toMatchObject({ sessionId: 'live_provider_a', sdp: 'answer' });
     expect(events).toEqual(['created', 'attached']);
+    expect(JSON.stringify(createBody)).toContain('reste silencieux si aucune réponse n\'est utile');
+    expect(JSON.stringify(createBody)).toContain('aucun raisonnement, plan, étape');
+    expect(JSON.stringify(createBody)).toContain('seulement la réponse finale fournie par le client');
     expect(registry.find('live_provider_a')).toMatchObject({ state: 'active', sidebandAttached: true });
     db.close();
   });

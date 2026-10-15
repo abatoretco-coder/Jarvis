@@ -12,6 +12,8 @@ Desktop / Android -- WebRTC audio + events -- GPT-Live
 
 Jarvis conserve seul l'historique, les permissions, le routage, les confirmations, l'idempotence et le résultat réel. Le pipeline STT → ingest → TTS reste le fallback de référence.
 
+Les réactions locales sans demande d'information ni d'action restent silencieuses lorsqu'une réponse n'est pas utile, ou tiennent en une phrase très courte. GPT-Live ne verbalise ni raisonnement, ni plan, ni commentaire d'attente pendant une délégation ; seule la réponse finale fournie par Jarvis est restituée.
+
 ## Contrats HTTP
 
 - `POST /v1/voice/live/sessions` — OIDC + permission `chat`; crée la session, attache le sideband puis retourne `{ sessionId, sdp, expiresAt }`.
