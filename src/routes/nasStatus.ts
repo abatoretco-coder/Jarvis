@@ -30,6 +30,7 @@ export function registerNasStatusRoute(app: FastifyInstance, deps: AppDeps): voi
       const snapshot = await deps.nasStatus.getStatus();
       return reply.code(200).send({
         status: 'ok',
+        ...(snapshot.freshness ? { freshness: snapshot.freshness } : {}),
         nas: toPublicNasStatus(snapshot),
       });
     } catch (error) {

@@ -164,6 +164,20 @@ function freshness(stale: boolean): 'fresh' | 'stale' {
   return stale ? 'stale' : 'fresh';
 }
 
+function sourceFreshness(
+  snapshot: ProactiveContextSnapshot,
+  fallbackFetchedAt: string,
+): { stale: boolean; fetchedAt: string } {
+  const staleAnswers = snapshot.preparedAnswers
+    .filter((answer) => answer.freshness === 'stale')
+    .filter((answer) => Number.isFinite(Date.parse(answer.fetchedAt)))
+    .sort((left, right) => Date.parse(left.fetchedAt) - Date.parse(right.fetchedAt));
+  return {
+    stale: staleAnswers.length > 0,
+    fetchedAt: staleAnswers[0]?.fetchedAt ?? fallbackFetchedAt,
+  };
+}
+
 function formatTemperature(value: number): string {
   return `${Math.round(value)}°C`;
 }
@@ -473,13 +487,17 @@ export class ProactiveContextCache {
       const debug = provider?.cache.peek();
       const age = debug ? Date.now() - debug.fetchedAt : Number.POSITIVE_INFINITY;
       const options = provider?.cache.getOptions();
+      const cacheFetchedAt = debug ? new Date(debug.fetchedAt).toISOString() : undefined;
+      const source = debug && cacheFetchedAt
+        ? sourceFreshness(debug.value, cacheFetchedAt)
+        : undefined;
       return {
         domain,
         enabled: this.isDomainEnabled(domain),
         configured: Boolean(provider?.configured()),
         cached: Boolean(debug),
-        stale: Boolean(debug && options && age > options.ttlMs),
-        ...(debug ? { fetchedAt: new Date(debug.fetchedAt).toISOString() } : {}),
+        stale: Boolean((debug && options && age > options.ttlMs) || source?.stale),
+        ...(source ? { fetchedAt: source.fetchedAt } : {}),
         ...(provider?.lastError ? { lastError: provider.lastError } : {}),
         ...(provider?.retryAfterMs && provider.retryAfterMs > Date.now()
           ? { nextRetryAt: new Date(provider.retryAfterMs).toISOString() }
@@ -563,18 +581,21 @@ export class ProactiveContextCache {
     domain: ProactiveContextDomain,
     result: { value: ProactiveContextSnapshot; cached: boolean; stale: boolean; fetchedAt: number },
   ): ProactiveContextResult {
+    const cacheFetchedAt = new Date(result.fetchedAt).toISOString();
+    const source = sourceFreshness(result.value, cacheFetchedAt);
+    const effectiveStale = result.stale || source.stale;
     return {
       domain,
       enabled: true,
       cached: result.cached,
-      stale: result.stale,
-      fetchedAt: new Date(result.fetchedAt).toISOString(),
+      stale: effectiveStale,
+      fetchedAt: source.stale ? source.fetchedAt : cacheFetchedAt,
       snapshot: {
         ...result.value,
         preparedAnswers: result.value.preparedAnswers.map((answer) => ({
           ...answer,
-          fetchedAt: new Date(result.fetchedAt).toISOString(),
-          freshness: freshness(result.stale),
+          fetchedAt: answer.freshness === 'stale' ? answer.fetchedAt : cacheFetchedAt,
+          freshness: freshness(result.stale || answer.freshness === 'stale'),
         })),
       },
     };
@@ -842,7 +863,8 @@ export class ProactiveContextCache {
     const nas = await this.deps.nasStatus.getStatus();
     const hottest = nas.temperatures.slice().sort((left, right) => right.celsius - left.celsius)[0];
     const fullest = nas.filesystems.slice().sort((left, right) => right.usedPercent - left.usedPercent)[0];
-    const fetchedAt = new Date().toISOString();
+    const fetchedAt = nas.freshness?.fetchedAt ?? new Date().toISOString();
+    const stale = nas.freshness?.state === 'stale';
     const healthParts = [
       `charge ${nas.load.one.toFixed(2)}`,
       `memoire ${Math.round(nas.memory.usedPercent)}%`,
@@ -857,21 +879,21 @@ export class ProactiveContextCache {
           domain: 'nas',
           questionKey: 'nas.health',
           answerText: `${nas.hostname} repond. ${healthParts.join(', ')}.`,
-        }, fetchedAt, false),
+        }, fetchedAt, stale),
         withFreshness({
           domain: 'nas',
           questionKey: 'nas.storage',
           answerText: fullest
             ? `Le volume le plus rempli est ${fullest.mount}, utilise a ${Math.round(fullest.usedPercent)}%.`
             : 'Aucun volume disque remonte dans le snapshot NAS.',
-        }, fetchedAt, false),
+        }, fetchedAt, stale),
         withFreshness({
           domain: 'nas',
           questionKey: 'nas.thermal',
           answerText: hottest
             ? `Temperature la plus haute : ${hottest.label}, ${Math.round(hottest.celsius)}°C.`
             : 'Aucune temperature remontee par le NAS.',
-        }, fetchedAt, false),
+        }, fetchedAt, stale),
       ],
     };
   }

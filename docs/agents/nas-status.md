@@ -30,7 +30,7 @@ When the stale duration is lower than the TTL, the TTL remains authoritative unt
 
 Freshness uses the older of the local cache age and the collector's `generatedAt` age. A collector snapshot older than the configured cache window (with a five-second minimum tolerance for second-precision timestamps) is rejected, and a timestamp more than five minutes in the future is invalid. This prevents a newly fetched but already obsolete collector response from being described as current.
 
-The optional `freshness` field is local cache metadata and cannot be supplied by the collector. Existing HTTP serialization remains unchanged because `src/routes/nasStatus.ts` explicitly selects the original public fields.
+The optional `freshness` field is local cache metadata and cannot be supplied by the collector. `GET /v1/nas/status` exposes it additively at the response root while preserving `status` and the existing `nas` object. `status: "ok"` means that the API request succeeded; consumers must inspect `freshness.state` before describing the measurement as current.
 
 ## Conversational Diagnostics
 
@@ -59,10 +59,8 @@ Errors and logs expose stable operational codes rather than provider response bo
 
 There is no retry loop, so HTTP 429 and 5xx remain visible and cannot amplify an outage.
 
-## Out-of-scope Follow-up
+## Proactive Context Propagation
 
-`src/routes/nasStatus.ts` is read-only in this change. It deliberately maps only the original snapshot fields and therefore cannot expose cache freshness to direct `/v1/nas/status` consumers. A later route-specific change may add compatible `freshness` metadata and distinguish stale data from a fully current `status: ok`, but only with route contract tests for existing clients.
-
-The proactive context cache also records its own fetch timestamp after reading the NAS client. It should eventually preserve the collector freshness metadata rather than presenting the outer cache timestamp as proof that the underlying measurement is recent; that module is outside this change's allowed files.
+The proactive context cache combines its own cache age with source freshness. A successful proactive refresh does not turn a stale NAS measurement into fresh data: the result, provider status and prepared answers remain `stale`, and retain the source `fetchedAt` timestamp. An old source therefore cannot be presented as a newly confirmed NAS state.
 
 All tests use mocked HTTP responses. No real NAS or Proxmox endpoint is contacted.

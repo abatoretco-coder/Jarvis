@@ -333,6 +333,52 @@ describe('ProactiveContextCache', () => {
     await app.close();
   });
 
+  it('does not make an old NAS measurement fresh after a proactive refresh', async () => {
+    const sourceFetchedAt = '2026-10-15T08:01:00.000Z';
+    const getStatus = jest.fn(async () => ({
+      hostname: 'nas-test',
+      generatedAt: '2026-10-15T08:00:00.000Z',
+      uptimeSeconds: 123,
+      load: { one: 0.2, five: 0.3, fifteen: 0.4 },
+      memory: { totalBytes: 100, availableBytes: 40, usedPercent: 60 },
+      swap: { totalBytes: 0, freeBytes: 0, usedPercent: 0 },
+      filesystems: [{ mount: '/', totalBytes: 100, availableBytes: 55, usedPercent: 45 }],
+      temperatures: [{ label: 'CPU', celsius: 41 }],
+      protocols: [],
+      freshness: { state: 'stale' as const, fetchedAt: sourceFetchedAt },
+    }));
+    const contextCache = new ProactiveContextCache({
+      env: makeEnv({
+        NAS_STATUS_ENABLED: 'true',
+        PROACTIVE_CONTEXT_CACHE_AGENTS: 'nas',
+      }),
+      spotifyWebApi: makeSpotifyStub(),
+      nasStatus: { isConfigured: () => true, getStatus } as unknown as AppDeps['nasStatus'],
+    });
+
+    const first = await contextCache.get('nas', { force: true });
+    const refreshed = await contextCache.get('nas', { force: true });
+
+    expect(getStatus).toHaveBeenCalledTimes(2);
+    for (const result of [first, refreshed]) {
+      expect(result).toMatchObject({ stale: true, fetchedAt: sourceFetchedAt });
+      expect(result?.snapshot.preparedAnswers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            questionKey: 'nas.health',
+            freshness: 'stale',
+            fetchedAt: sourceFetchedAt,
+          }),
+        ]),
+      );
+    }
+    expect(contextCache.status()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ domain: 'nas', stale: true, fetchedAt: sourceFetchedAt }),
+      ]),
+    );
+  });
+
   it('builds a news headline prepared answer from Helix items', async () => {
     const fetchMock = jest.fn(async (..._args: unknown[]) => new Response(JSON.stringify({
       items: [
