@@ -9,6 +9,7 @@ import Fastify from 'fastify';
 
 import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
 import {
+  mutationFingerprint,
   MutationIdempotencyCoordinator,
   type MutationIdempotencyStore,
 } from '../src/idempotency/MutationIdempotencyCoordinator';
@@ -52,6 +53,42 @@ describe('mutation idempotency', () => {
       statusCode: 503,
       payload: expect.stringContaining('mutation_result_unknown'),
     });
+    restartedDb.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('does not replay the same uncertain calendar operation after restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'jarvis-calendar-idempotency-'));
+    const databasePath = join(directory, 'runtime.sqlite');
+    const operationKey = 'calendar-create-20261015-0001';
+    const fingerprint = mutationFingerprint('POST /v1/ingest', {
+      text: 'Ajoute Dentiste lundi à 9 heures',
+      threadId: 'calendar-thread',
+    });
+    let calendarPosts = 0;
+
+    const firstDb = createConversationDb(databasePath);
+    const first = new MutationIdempotencyCoordinator({
+      store: new SqliteMutationIdempotencyStore(firstDb),
+    });
+    const initial = first.reserve('user:a', operationKey, fingerprint);
+    expect(initial.kind).toBe('owner');
+    calendarPosts += 1;
+    firstDb.close();
+
+    const restartedDb = createConversationDb(databasePath);
+    const restarted = new MutationIdempotencyCoordinator({
+      store: new SqliteMutationIdempotencyStore(restartedDb),
+    });
+    const replay = restarted.reserve('user:a', operationKey, fingerprint);
+    expect(replay.kind).toBe('replay');
+    if (replay.kind !== 'replay') throw new Error('expected_replay');
+    await expect(replay.response).resolves.toMatchObject({
+      statusCode: 503,
+      payload: expect.stringContaining('mutation_result_unknown'),
+    });
+    expect(calendarPosts).toBe(1);
+
     restartedDb.close();
     rmSync(directory, { recursive: true, force: true });
   });

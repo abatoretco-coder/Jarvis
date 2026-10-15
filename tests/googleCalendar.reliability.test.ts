@@ -222,26 +222,15 @@ describe('Google Calendar reliability', () => {
     expect(posts).toBe(1);
   });
 
-  it('reuses a client event id to reconcile a repeated create after a lost response', async () => {
+  it('creates two intentionally identical events for two independent requests', async () => {
     const postedIds: string[] = [];
-    let posts = 0;
     global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes('oauth2.googleapis.com/token')) return token();
       if (init?.method === 'POST') {
-        posts += 1;
         const body = JSON.parse(String(init.body)) as { id?: string; summary?: string; start?: unknown; end?: unknown };
         postedIds.push(body.id ?? '');
-        if (posts === 1) throw new DOMException('response lost', 'NetworkError');
-        return json({ error: { code: 409, message: 'The requested identifier already exists.' } }, 409);
-      }
-      if (url.includes('/events/') && init?.method !== 'POST') {
-        return json({
-          id: postedIds[0],
-          summary: 'Dentiste',
-          start: { dateTime: '2026-10-26T09:00:00', timeZone: 'Europe/Paris' },
-          end: { dateTime: '2026-10-26T10:00:00', timeZone: 'Europe/Paris' },
-        });
+        return json(body);
       }
       throw new Error(`unexpected_fetch:${url}`);
     }) as typeof fetch;
@@ -253,14 +242,45 @@ describe('Google Calendar reliability', () => {
       end: '2026-10-26T10:00:00',
       calendarId: 'primary',
     };
-    await expect(executeCalendarAgentAction(action, env('reconcile-create')))
-      .rejects.toThrow('calendar_api_post_uncertain');
-    await expect(executeCalendarAgentAction(action, env('reconcile-create')))
+    await expect(executeCalendarAgentAction(action, env('independent-create')))
+      .resolves.toContain("C'est ajouté");
+    await expect(executeCalendarAgentAction(action, env('independent-create')))
       .resolves.toContain("C'est ajouté");
 
-    expect(posts).toBe(2);
+    expect(postedIds).toHaveLength(2);
     expect(postedIds[0]).toMatch(/^[0-9a-v]{5,1024}$/u);
-    expect(postedIds[1]).toBe(postedIds[0]);
+    expect(postedIds[1]).toMatch(/^[0-9a-v]{5,1024}$/u);
+    expect(postedIds[1]).not.toBe(postedIds[0]);
+  });
+
+  it('reconciles a provider duplicate for the client id of the current create attempt', async () => {
+    let postedId = '';
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) return token();
+      if (init?.method === 'POST') {
+        postedId = (JSON.parse(String(init.body)) as { id?: string }).id ?? '';
+        return json({ error: { code: 409, message: 'The requested identifier already exists.' } }, 409);
+      }
+      if (url.endsWith(`/events/${postedId}`)) {
+        return json({
+          id: postedId,
+          summary: 'Dentiste',
+          start: { dateTime: '2026-10-26T09:00:00', timeZone: 'Europe/Paris' },
+          end: { dateTime: '2026-10-26T10:00:00', timeZone: 'Europe/Paris' },
+        });
+      }
+      throw new Error(`unexpected_fetch:${url}`);
+    }) as typeof fetch;
+
+    await expect(executeCalendarAgentAction({
+      action: 'create_event',
+      summary: 'Dentiste',
+      start: '2026-10-26T09:00:00',
+      end: '2026-10-26T10:00:00',
+      calendarId: 'primary',
+    }, env('provider-duplicate'))).resolves.toContain("C'est ajouté");
+    expect(postedId).toMatch(/^[0-9a-v]{5,1024}$/u);
   });
 
   it('does not replay an uncertain PATCH mutation', async () => {

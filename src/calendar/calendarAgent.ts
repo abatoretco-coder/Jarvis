@@ -11,7 +11,7 @@
  *  - create_event   : "Ajoute un RDV dentiste vendredi 15h"
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 import { z } from 'zod';
 
@@ -739,41 +739,14 @@ function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): str
   });
 }
 
-const CREATE_OPERATION_TTL_MS = 30 * 60_000;
-const CREATE_OPERATION_MAX_ENTRIES = 1_000;
-const _createOperationIds = new Map<string, { eventId: string; expiresAt: number }>();
-
-function createOperationKey(calendarId: string, body: Record<string, unknown>): string {
-  return createHash('sha256')
-    .update(calendarId)
-    .update('\0')
-    .update(JSON.stringify(body))
-    .digest('hex');
-}
-
-function eventIdForCreateOperation(calendarId: string, body: Record<string, unknown>): string {
-  const now = Date.now();
-  for (const [key, value] of _createOperationIds) {
-    if (value.expiresAt <= now) _createOperationIds.delete(key);
-  }
-  const key = createOperationKey(calendarId, body);
-  const existing = _createOperationIds.get(key);
-  if (existing) return existing.eventId;
-  if (_createOperationIds.size >= CREATE_OPERATION_MAX_ENTRIES) {
-    const oldest = _createOperationIds.keys().next().value as string | undefined;
-    if (oldest) _createOperationIds.delete(oldest);
-  }
-  const eventId = createHash('sha256').update(randomBytes(32)).digest('hex').slice(0, 32);
-  _createOperationIds.set(key, { eventId, expiresAt: now + CREATE_OPERATION_TTL_MS });
-  return eventId;
-}
-
 async function createCalendarEvent(
   calendarId: string,
   token: string,
   body: Record<string, unknown>,
 ): Promise<GoogleCalendarEvent> {
-  const eventId = eventIdForCreateOperation(calendarId, body);
+  // This identifier belongs to this execution, not to the event contents.
+  // Stable replay identity is enforced persistently at the /v1/ingest boundary.
+  const eventId = randomBytes(16).toString('hex');
   try {
     const created = await calendarApiRequest<GoogleCalendarEvent>(
       `/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
