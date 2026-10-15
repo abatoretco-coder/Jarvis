@@ -229,7 +229,7 @@ const envSchema = z
     OPENAI_LIVE_HA_TTS_ENABLED: booleanFromEnv.default(false),
     OPENAI_LIVE_MODEL: z.string().trim().min(1).max(128).default('gpt-live-1'),
     OPENAI_LIVE_VOICE: z.string().trim().min(1).max(64).default('vesper'),
-    OPENAI_LIVE_IDLE_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(5_000).max(120_000)).default(20_000),
+    OPENAI_LIVE_IDLE_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(3_000).max(120_000)).default(3_000),
     OPENAI_LIVE_MAX_SESSION_MS: numberFromEnv.pipe(z.number().min(30_000).max(7_200_000)).default(300_000),
     OPENAI_LIVE_HA_TTS_TIMEOUT_MS: numberFromEnv.pipe(z.number().min(1_000).max(60_000)).default(12_000),
     OPENAI_LIVE_MAX_SESSIONS_PER_USER: numberFromEnv.pipe(z.number().min(1).max(10)).default(2),
