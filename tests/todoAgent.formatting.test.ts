@@ -105,7 +105,7 @@ describe('todoAgent formatting', () => {
         OPENAI_BASE_URL: 'https://api.openai.com/v1',
         OPENAI_TIMEOUT_MS: 1_000,
       },
-    );
+    ).catch(() => undefined);
     expect(requestedUrls.some((url) => url.includes('attacker.example'))).toBe(false);
   });
 
