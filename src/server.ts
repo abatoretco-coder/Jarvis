@@ -8,6 +8,7 @@ import { DailyLifeRepository } from './dailyLife/DailyLifeRepository';
 import { HouseholdAgendaService } from './dailyLife/HouseholdAgendaService';
 import type { Env } from './env';
 import { HomeAssistantClient } from './haClient';
+import { HealthDiagnostics } from './health/healthDiagnostics';
 import type { HomeAdaptiveLightingService } from './home/HomeAdaptiveLightingService';
 import type { HomeCatalog } from './home/HomeCatalog';
 import { HomeRuntimeStateRepository } from './home/HomeRuntimeStateRepository';
@@ -176,7 +177,7 @@ export function buildApp(env: Env): FastifyInstance {
   deps.spotifyClients = new SpotifyClientResolver(env, spotifyWebApi, integrations, app.log);
   app.addHook('onClose', async () => {
     if (dailyLifeTimer) clearInterval(dailyLifeTimer);
-    contextCache.stop();
+    await contextCache.stop();
     spotifyWebApi.stopSituationPrefetch();
     await Promise.allSettled([
       stopGoogleCalendarTokenKeepalives(),
@@ -224,7 +225,8 @@ export function buildApp(env: Env): FastifyInstance {
 
   // Hooks must be registered before routes so every route receives the same
   // edge, authentication and rate-limit policy.
-  registerHealthRoute(app, deps);
+  const healthDiagnostics = new HealthDiagnostics(deps);
+  registerHealthRoute(app, deps, {}, healthDiagnostics);
   registerHomeRoutes(app, deps);
   registerHomeTelemetryRoutes(app, deps);
 
@@ -254,7 +256,7 @@ export function buildApp(env: Env): FastifyInstance {
 
   if (identityService && adminRepository) {
     registerIdentityRoutes(app, identityService, adminRepository);
-    registerAdminRoutes(app, deps, adminRepository);
+    registerAdminRoutes(app, deps, adminRepository, healthDiagnostics);
     if (integrations) registerIntegrationRoutes(app, integrations);
     if (dailyLifeRepository) registerDailyLifeRoutes(
       app,

@@ -386,10 +386,12 @@ export class IntegrationRepository {
   }
 
   markRuntimeHealthy(connectionId: string): void {
+    const now = Date.now();
     this.db.prepare(
-      `UPDATE integration_connections SET status='active',last_error_code=NULL,updated_at_ms=?
+      `UPDATE integration_connections SET
+       status='active',last_sync_at_ms=?,last_error_code=NULL,updated_at_ms=?
        WHERE connection_id=? AND status<>'revoked'`
-    ).run(Date.now(), connectionId);
+    ).run(now, now, connectionId);
   }
 
   getCredentialForUser(input: {

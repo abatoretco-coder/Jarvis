@@ -314,6 +314,9 @@ describe('personal integration isolation', () => {
     });
     service.markConnectionHealthy('owner', 'microsoft-todo');
     expect(repository.listForUser('owner')[0]).toMatchObject({ status: 'active', lastErrorCode: null });
+    expect(db.prepare(
+      'SELECT last_sync_at_ms lastSyncAtMs FROM integration_connections WHERE connection_id=?'
+    ).get(connectionId)).toEqual({ lastSyncAtMs: expect.any(Number) });
     service.markConnectionError('owner', 'microsoft-todo', 'microsoft_invalid_grant', true);
     expect(repository.listForUser('owner')[0]).toMatchObject({
       status: 'error', lastErrorCode: 'microsoft_invalid_grant',

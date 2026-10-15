@@ -136,6 +136,7 @@ export class LiveSessionService {
   private failureCount = 0;
   private circuitOpenUntilMs = 0;
   private cleanupTimer?: NodeJS.Timeout;
+  private scheduledCleanup?: Promise<void>;
 
   constructor(
     private readonly env: Env,
@@ -153,16 +154,32 @@ export class LiveSessionService {
 
   start(): void {
     if (this.cleanupTimer) return;
-    this.cleanupTimer = setInterval(() => void this.closeExpiredSessions(), 10_000);
+    this.cleanupTimer = setInterval(() => this.scheduleExpiredSessionCleanup(), 10_000);
     this.cleanupTimer.unref();
   }
 
   async stop(): Promise<void> {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     this.cleanupTimer = undefined;
+    await this.scheduledCleanup;
     await Promise.allSettled(
       [...this.sidebands.keys()].map((sessionId) => this.close(sessionId, undefined, true))
     );
+  }
+
+  private scheduleExpiredSessionCleanup(): void {
+    if (this.scheduledCleanup) return;
+    const work = this.closeExpiredSessions()
+      .catch((error) => {
+        this.log.warn(
+          { errorCode: error instanceof Error ? error.message : 'live_session_cleanup_failed' },
+          'live session cleanup failed'
+        );
+      })
+      .finally(() => {
+        if (this.scheduledCleanup === work) this.scheduledCleanup = undefined;
+      });
+    this.scheduledCleanup = work;
   }
 
   availability(client?: LiveClient, nowMs = Date.now()): LiveAvailability {

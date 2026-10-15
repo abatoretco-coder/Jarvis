@@ -372,4 +372,30 @@ describe('ProactiveContextCache', () => {
       }),
     }));
   });
+
+  it('waits for an active scheduled refresh before stopping', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const getNowPlaying = jest.fn(async () => {
+      await gate;
+      return { ok: false as const, error: 'no_active_playback' };
+    });
+    const contextCache = new ProactiveContextCache({
+      env: makeEnv({ PROACTIVE_CONTEXT_CACHE_AGENTS: 'spotify' }),
+      spotifyWebApi: {
+        ...makeSpotifyStub(), isConfigured: () => true, getNowPlaying,
+      } as unknown as AppDeps['spotifyWebApi'],
+    });
+
+    contextCache.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    let stopped = false;
+    const stopping = contextCache.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(getNowPlaying).toHaveBeenCalledTimes(1);
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
 });

@@ -398,4 +398,34 @@ describe('durable home telemetry', () => {
       lastErrorCode: 'home_telemetry_sync_failed',
     });
   });
+
+  test('contains scheduled SQLite failures and allows a later cycle to resume', async () => {
+    const warn = jest.fn();
+    const markSyncAttempt = jest.spyOn(repository, 'markSyncAttempt')
+      .mockImplementationOnce(() => { throw new Error('sqlite_busy'); });
+    const collector = new HomeTelemetryCollector(
+      {
+        getStates: jest.fn(async () => []),
+        getHistoryForEntities: jest.fn(async () => []),
+      } as unknown as HomeAssistantClient,
+      {
+        getTelemetryEntities: () => [{ entityId: 'light.room', deviceId: 'light', role: 'primary' }],
+      } as unknown as HomeCatalog,
+      repository,
+      {
+        homeId: 'home-a', intervalMs: 300_000, initialLookbackMs: 86_400_000,
+        maximumCatchupMs: 1_209_600_000, retentionMs: 63_072_000_000,
+      },
+      { info: jest.fn(), warn } as never
+    );
+
+    collector.start();
+    await expect(collector.stop()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ homeId: 'home-a', errorCode: 'sqlite_busy' }),
+      'home telemetry scheduled synchronization failed'
+    );
+    await expect(collector.syncNow()).resolves.toBe(0);
+    expect(markSyncAttempt).toHaveBeenCalledTimes(2);
+  });
 });

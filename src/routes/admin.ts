@@ -12,6 +12,11 @@ import {
   sendAdminMutationError,
 } from '../admin/adminHttp';
 import { isHassState } from '../hass';
+import {
+  type DependencyDiagnostic,
+  HealthDiagnostics,
+  integrationConnectionDiagnostic,
+} from '../health/healthDiagnostics';
 import { HomeCatalog } from '../home/HomeCatalog';
 import { getOpenAiResilienceSnapshot } from '../openai/resilience';
 import type { AppDeps } from '../server';
@@ -99,7 +104,8 @@ function models(env: AppDeps['env']): Record<string, string> {
 export function registerAdminRoutes(
   app: FastifyInstance,
   deps: AppDeps,
-  admin: AdminControlPlaneRepository
+  admin: AdminControlPlaneRepository,
+  healthDiagnostics = new HealthDiagnostics(deps)
 ): void {
   let homeCatalog: HomeCatalog | null = null;
   try {
@@ -285,7 +291,19 @@ export function registerAdminRoutes(
 
   app.get('/v1/admin/integrations', async (request, reply) => {
     if (!requireAdminActor(request, reply, admin)) return;
-    return { integrations: admin.listIntegrations() };
+    return {
+      integrations: admin.listIntegrations().map((connection) => ({
+        ...connection,
+        diagnostic: integrationConnectionDiagnostic(
+          connection as {
+            status: unknown;
+            lastSyncAtMs: unknown;
+            lastErrorCode: unknown;
+            updatedAtMs: unknown;
+          }
+        ),
+      })),
+    };
   });
 
   app.post<{ Params: { connectionId: string }; Body: unknown }>(
@@ -329,40 +347,80 @@ export function registerAdminRoutes(
 
   app.get('/v1/admin/services', async (request, reply) => {
     if (!requireAdminActor(request, reply, admin)) return;
-    const haStatus = deps.ha ? await deps.ha.probeHealth() : 'not_configured';
-    const personalSpotifyConnected = admin.listIntegrations().some(
+    const snapshot = (await healthDiagnostics.getSnapshot()).diagnostics;
+    const integrations = admin.listIntegrations();
+    const personalSpotifyConnection = integrations.find(
       (connection) => connection.provider === 'spotify' && connection.status === 'active'
     );
-    const spotifyConfigured = deps.spotifyWebApi.isConfigured() || personalSpotifyConnected;
+    const spotifyConfigured = deps.spotifyWebApi.isConfigured() || Boolean(personalSpotifyConnection);
+    const configurationOnly = (configured: boolean): DependencyDiagnostic => ({
+      status: configured ? 'degraded' : 'not_configured',
+      required: false,
+      configured,
+      observedAt: null,
+      cached: true,
+      lastCheckedAt: null,
+      lastSuccessAt: null,
+      freshness: 'unknown',
+      reason: configured ? 'availability_not_checked' : 'configuration_missing',
+      recoveryAction: configured ? 'retry' : 'configure',
+      requiresUserIntervention: !configured,
+    });
+    const checkedAt = new Date().toISOString();
+    const disabledDiagnostic: DependencyDiagnostic = {
+      ...configurationOnly(false),
+      reason: 'disabled',
+      recoveryAction: 'none',
+      requiresUserIntervention: false,
+    };
+    const apiDiagnostic: DependencyDiagnostic = {
+      status: 'healthy',
+      required: true,
+      configured: true,
+      observedAt: checkedAt,
+      cached: false,
+      lastCheckedAt: checkedAt,
+      lastSuccessAt: checkedAt,
+      freshness: 'fresh',
+      recoveryAction: 'none',
+      requiresUserIntervention: false,
+    };
+    const service = (key: string, diagnostic: DependencyDiagnostic) => ({
+      key,
+      status: diagnostic.status,
+      configured: diagnostic.configured,
+      diagnostic,
+    });
     return {
       version: '0.1.0',
       services: [
-        { key: 'jarvis-api', status: 'ok', configured: true },
-        {
-          key: 'identity',
-          status: deps.env.OIDC_ENABLED ? 'configured' : 'not_configured',
-          configured: deps.env.OIDC_ENABLED,
-        },
-        { key: 'home-assistant', status: haStatus, configured: Boolean(deps.ha) },
-        {
-          key: 'openai',
-          status: deps.env.OPENAI_API_KEY ? 'configured' : 'not_configured',
-          configured: Boolean(deps.env.OPENAI_API_KEY),
-        },
-        {
-          key: 'spotify',
-          status: personalSpotifyConnected ? 'connected' : spotifyConfigured ? 'configured' : 'not_configured',
-          configured: spotifyConfigured,
-        },
-        {
-          key: 'nas-status',
-          status: !deps.env.NAS_STATUS_ENABLED
-            ? 'disabled'
-            : deps.nasStatus?.isConfigured()
-              ? 'configured'
-              : 'not_configured',
-          configured: Boolean(deps.env.NAS_STATUS_ENABLED && deps.nasStatus?.isConfigured()),
-        },
+        service('jarvis-api', apiDiagnostic),
+        service('conversation-database', snapshot.dependencies.conversationDatabase),
+        service('identity', configurationOnly(deps.env.OIDC_ENABLED)),
+        service('home-assistant', snapshot.dependencies.homeAssistant),
+        service('home-telemetry', snapshot.dependencies.homeTelemetry),
+        service('openai', configurationOnly(Boolean(deps.env.OPENAI_API_KEY))),
+        service(
+          'spotify',
+          personalSpotifyConnection
+            ? integrationConnectionDiagnostic(
+                personalSpotifyConnection as {
+                  status: unknown;
+                  lastSyncAtMs: unknown;
+                  lastErrorCode: unknown;
+                  updatedAtMs: unknown;
+                }
+              )
+            : spotifyConfigured
+              ? snapshot.dependencies.spotifyWebApi
+              : configurationOnly(false)
+        ),
+        service(
+          'nas-status',
+          deps.env.NAS_STATUS_ENABLED
+            ? configurationOnly(Boolean(deps.nasStatus?.isConfigured()))
+            : disabledDiagnostic
+        ),
       ],
     };
   });

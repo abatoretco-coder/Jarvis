@@ -103,6 +103,7 @@ export type HomeTelemetryCollectorOptions = {
 export class HomeTelemetryCollector {
   private timer?: NodeJS.Timeout;
   private activeSync?: Promise<number>;
+  private scheduledSync?: Promise<void>;
 
   constructor(
     private readonly ha: HomeAssistantClient,
@@ -114,15 +115,19 @@ export class HomeTelemetryCollector {
 
   start(): void {
     if (this.timer) return;
-    void this.syncNow();
-    this.timer = setInterval(() => void this.syncNow(), this.options.intervalMs);
+    this.scheduleSync();
+    this.timer = setInterval(() => this.scheduleSync(), this.options.intervalMs);
     this.timer.unref();
   }
 
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    await this.activeSync;
+    await Promise.allSettled(
+      [this.scheduledSync, this.activeSync].filter(
+        (work): work is Promise<void> | Promise<number> => work !== undefined
+      )
+    );
   }
 
   syncNow(nowMs = Date.now()): Promise<number> {
@@ -131,6 +136,25 @@ export class HomeTelemetryCollector {
       this.activeSync = undefined;
     });
     return this.activeSync;
+  }
+
+  private scheduleSync(): void {
+    if (this.scheduledSync) return;
+    const work = this.syncNow()
+      .then(() => undefined)
+      .catch((error) => {
+        this.log?.warn(
+          {
+            homeId: this.options.homeId,
+            errorCode: error instanceof Error ? error.message : 'home_telemetry_scheduler_failed',
+          },
+          'home telemetry scheduled synchronization failed'
+        );
+      })
+      .finally(() => {
+        if (this.scheduledSync === work) this.scheduledSync = undefined;
+      });
+    this.scheduledSync = work;
   }
 
   private trackedMappings(): Map<string, HomeTelemetryEntityMapping> {

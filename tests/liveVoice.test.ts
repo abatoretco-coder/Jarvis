@@ -1,4 +1,4 @@
-import { describe, expect, jest, test } from '@jest/globals';
+import { afterEach, describe, expect, jest, test } from '@jest/globals';
 import type { FastifyBaseLogger } from 'fastify';
 import type WebSocket from 'ws';
 
@@ -51,6 +51,10 @@ function liveEnv() {
 function loggerStub(): FastifyBaseLogger {
   return { warn: jest.fn() } as unknown as FastifyBaseLogger;
 }
+
+afterEach(() => {
+  jest.useRealTimers();
+});
 
 describe('GPT-Live foundations', () => {
   test('keeps the pilot owner-only until the explicit rollout switch is disabled', () => {
@@ -303,6 +307,36 @@ describe('GPT-Live foundations', () => {
       state: 'finalization_unconfirmed',
       lastErrorCode: 'sideband_attach_failed',
     });
+    db.close();
+  });
+
+  test('contains cleanup failures and retries on the next scheduled cycle', async () => {
+    jest.useFakeTimers();
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    const listOpen = jest.spyOn(registry, 'listOpen')
+      .mockImplementationOnce(() => { throw new Error('sqlite_busy'); })
+      .mockReturnValue([]);
+    const threads = new SqliteThreadRepository(db);
+    const messages = new SqliteMessageRepository(db);
+    const log = loggerStub();
+    const service = new LiveSessionService(
+      liveEnv(), registry, new LiveDelegationCoordinator(registry, 10),
+      new LiveContextAdapter(threads, messages), new LiveEventValidator(65_536), log,
+      {
+        create: jest.fn(), attach: jest.fn(), hangup: jest.fn(),
+      } as unknown as LiveProviderTransport
+    );
+
+    service.start();
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(log.warn).toHaveBeenCalledWith(
+      { errorCode: 'sqlite_busy' },
+      'live session cleanup failed'
+    );
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(listOpen).toHaveBeenCalledTimes(2);
+    await service.stop();
     db.close();
   });
 });

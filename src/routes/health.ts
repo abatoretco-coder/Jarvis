@@ -10,10 +10,9 @@ import type { AppDeps } from '../server';
 export function registerHealthRoute(
   app: FastifyInstance,
   deps?: AppDeps,
-  options: HealthDiagnosticsOptions = {}
+  options: HealthDiagnosticsOptions = {},
+  diagnostics = deps ? new HealthDiagnostics(deps, options) : undefined
 ): void {
-  const healthDiagnostics = deps ? new HealthDiagnostics(deps, options) : undefined;
-
   app.get('/live', async () => ({
     status: 'healthy',
     contractVersion: HEALTH_CONTRACT_VERSION,
@@ -22,7 +21,7 @@ export function registerHealthRoute(
 
   app.get('/ready', async (_request, reply) => {
     if (!deps) return { status: 'ok' };
-    const database = await healthDiagnostics!.getReadiness();
+    const database = await diagnostics!.getReadiness();
     if (database.status === 'healthy') {
       return {
         status: 'ready',
@@ -43,14 +42,14 @@ export function registerHealthRoute(
 
   app.get('/health', async () => {
     const timestamp = new Date().toISOString();
-    
+
     // Basic health
     const basic = { status: 'ok', timestamp };
-    
+
     // If no deps, return basic health only
     if (!deps) return basic;
 
-    const snapshot = await healthDiagnostics!.getSnapshot();
+    const snapshot = await diagnostics!.getSnapshot();
 
     // Legacy fields remain stable for Desktop, Android and deployment scripts.
     const spotifyWebApiConfigured = deps.spotifyWebApi.isConfigured();

@@ -422,6 +422,7 @@ function extractHomeStates(states: HaStateLike[]): Array<Record<string, unknown>
 export class ProactiveContextCache {
   private providers = new Map<ProactiveContextDomain, Provider>();
   private refreshTimer?: ReturnType<typeof setInterval>;
+  private scheduledRefresh?: Promise<void>;
   private readonly enabledAgents: Set<ProactiveContextDomain> | null;
 
   constructor(private readonly deps: Deps) {
@@ -431,14 +432,11 @@ export class ProactiveContextCache {
 
   start(): void {
     if (!this.deps.env.PROACTIVE_CONTEXT_CACHE_ENABLED || this.refreshTimer) return;
-    void this.refreshAll().catch((error) => {
-      this.deps.log?.warn({ error }, 'proactive_context_cache_start_refresh_failed');
-    });
-    this.refreshTimer = setInterval(() => {
-      void this.refreshAll().catch((error) => {
-        this.deps.log?.warn({ error }, 'proactive_context_cache_periodic_refresh_failed');
-      });
-    }, this.deps.env.PROACTIVE_CONTEXT_CACHE_REFRESH_MS);
+    this.scheduleRefresh('start');
+    this.refreshTimer = setInterval(
+      () => this.scheduleRefresh('periodic'),
+      this.deps.env.PROACTIVE_CONTEXT_CACHE_REFRESH_MS
+    );
     this.refreshTimer.unref?.();
     this.deps.log?.info(
       { intervalMs: this.deps.env.PROACTIVE_CONTEXT_CACHE_REFRESH_MS },
@@ -446,10 +444,23 @@ export class ProactiveContextCache {
     );
   }
 
-  stop(): void {
-    if (!this.refreshTimer) return;
-    clearInterval(this.refreshTimer);
+  async stop(): Promise<void> {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = undefined;
+    await this.scheduledRefresh;
+  }
+
+  private scheduleRefresh(source: 'start' | 'periodic'): void {
+    if (this.scheduledRefresh) return;
+    const work = this.refreshAll()
+      .then(() => undefined)
+      .catch((error) => {
+        this.deps.log?.warn({ error }, `proactive_context_cache_${source}_refresh_failed`);
+      })
+      .finally(() => {
+        if (this.scheduledRefresh === work) this.scheduledRefresh = undefined;
+      });
+    this.scheduledRefresh = work;
   }
 
   domains(): ProactiveContextDomain[] {

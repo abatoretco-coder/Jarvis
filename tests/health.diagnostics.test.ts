@@ -13,7 +13,8 @@ import type { AppDeps } from '../src/server';
 const directories: string[] = [];
 
 afterEach(() => {
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of directories.splice(0))
+    rmSync(directory, { recursive: true, force: true });
 });
 
 function createDatabasePath(initialized: boolean): string {
@@ -21,9 +22,7 @@ function createDatabasePath(initialized: boolean): string {
   directories.push(directory);
   const databasePath = join(directory, 'conversation.sqlite');
   if (initialized) {
-    initializeRuntime(
-      loadEnv({ REQUIRE_API_KEY: 'false', CONVERSATION_DB_PATH: databasePath })
-    );
+    initializeRuntime(loadEnv({ REQUIRE_API_KEY: 'false', CONVERSATION_DB_PATH: databasePath }));
   }
   return databasePath;
 }
@@ -59,7 +58,11 @@ describe('health diagnostics contract', () => {
     const app = Fastify({ logger: false });
     registerHealthRoute(
       app,
-      createDeps({ databasePath, homeAssistantProbe: probeHealth, secretMarker: 'never-expose-me' }),
+      createDeps({
+        databasePath,
+        homeAssistantProbe: probeHealth,
+        secretMarker: 'never-expose-me',
+      }),
       { homeAssistantCacheTtlMs: 100, now: () => nowMs }
     );
 
@@ -80,6 +83,11 @@ describe('health diagnostics contract', () => {
             status: 'unavailable',
             configured: true,
             reason: 'unreachable',
+            lastCheckedAt: expect.any(String),
+            lastSuccessAt: null,
+            freshness: 'unknown',
+            recoveryAction: 'retry',
+            requiresUserIntervention: false,
           },
         },
       },
@@ -137,9 +145,62 @@ describe('health diagnostics contract', () => {
             configured: false,
             observedAt: null,
             reason: 'configuration_missing',
+            recoveryAction: 'configure',
+            requiresUserIntervention: true,
+          },
+          homeTelemetry: {
+            status: 'not_configured',
+            reason: 'configuration_missing',
+            recoveryAction: 'configure',
           },
         },
       },
+    });
+    await app.close();
+  });
+
+  test('reports telemetry freshness from its durable synchronization state', async () => {
+    const nowMs = Date.UTC(2026, 9, 10, 12, 0, 0);
+    const deps = createDeps({ databasePath: createDatabasePath(true) });
+    deps.env.HOME_TELEMETRY_ENABLED = true;
+    deps.env.HOME_TELEMETRY_SYNC_INTERVAL_MS = 60_000;
+    deps.homeTelemetry = {
+      getSyncState: () => ({
+        lastAttemptAtMs: nowMs - 10_000,
+        lastSuccessAtMs: nowMs - 180_000,
+      }),
+    } as unknown as AppDeps['homeTelemetry'];
+    const app = Fastify({ logger: false });
+    registerHealthRoute(app, deps, { now: () => nowMs });
+
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.json().diagnostics.dependencies.homeTelemetry).toMatchObject({
+      status: 'degraded',
+      freshness: 'stale',
+      reason: 'stale_data',
+      lastCheckedAt: new Date(nowMs - 10_000).toISOString(),
+      lastSuccessAt: new Date(nowMs - 180_000).toISOString(),
+      recoveryAction: 'retry',
+    });
+    await app.close();
+  });
+
+  test('keeps health available when telemetry state cannot be read', async () => {
+    const deps = createDeps({ databasePath: createDatabasePath(true) });
+    deps.env.HOME_TELEMETRY_ENABLED = true;
+    deps.homeTelemetry = {
+      getSyncState: () => { throw new Error('sqlite_busy'); },
+    } as unknown as AppDeps['homeTelemetry'];
+    const app = Fastify({ logger: false });
+    registerHealthRoute(app, deps);
+
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.statusCode).toBe(200);
+    expect(health.body).not.toContain('sqlite_busy');
+    expect(health.json().diagnostics.dependencies.homeTelemetry).toMatchObject({
+      status: 'unavailable',
+      reason: 'unreachable',
+      recoveryAction: 'retry',
     });
     await app.close();
   });

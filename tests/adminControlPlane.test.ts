@@ -41,7 +41,13 @@ function setup(ha?: AppDeps['ha']) {
   const admin = new AdminControlPlaneRepository(db);
   const env = loadEnv({
     REQUIRE_API_KEY: 'true',
-    SERVICE_API_KEYS_JSON: JSON.stringify([{ id: 'admin-test-service', token: 'admin-test-service-token-0123456789', permissions: ['admin'] }]),
+    SERVICE_API_KEYS_JSON: JSON.stringify([
+      {
+        id: 'admin-test-service',
+        token: 'admin-test-service-token-0123456789',
+        permissions: ['admin'],
+      },
+    ]),
     OIDC_ENABLED: 'true',
     OIDC_ISSUER_URL: 'https://issuer.example.test/realms/jarvis',
     OIDC_AUDIENCE: 'jarvis-api',
@@ -530,6 +536,11 @@ describe('admin control plane', () => {
     expect(listed.body).not.toContain('top-secret');
     expect(listed.body).not.toContain('also-secret');
     expect(listed.json().integrations[0].lastErrorCode).toBe('integration_error');
+    expect(listed.json().integrations[0].diagnostic).toMatchObject({
+      status: 'degraded',
+      reason: 'unreachable',
+      recoveryAction: 'retry',
+    });
 
     const revoked = await app.inject({
       method: 'POST',
@@ -658,7 +669,7 @@ describe('admin control plane', () => {
     db.close();
   });
 
-  test('reports Spotify connected when an active personal connection exists', async () => {
+  test('does not present an unverified active Spotify connection as healthy', async () => {
     const { app, db } = setup();
     const owner = await ensureOwner(app);
     db.prepare(
@@ -674,9 +685,20 @@ describe('admin control plane', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().services).toEqual(expect.arrayContaining([
-      expect.objectContaining({ key: 'spotify', status: 'connected', configured: true }),
-    ]));
+    expect(response.json().services).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'spotify',
+          status: 'degraded',
+          configured: true,
+          diagnostic: expect.objectContaining({
+            reason: 'availability_not_checked',
+            lastSuccessAt: null,
+            freshness: 'unknown',
+          }),
+        }),
+      ])
+    );
     await app.close();
     db.close();
   });
