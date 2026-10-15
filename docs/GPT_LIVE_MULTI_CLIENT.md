@@ -73,8 +73,8 @@ Avant toute tentative d'ingest, le client peut reprendre avec un transcript fina
 - Phase 0 fournisseur : WebRTC Desktop réel, sideband corrélé et fermeture gracieuse validés le 15 octobre 2026.
 - Backend : déployé sur le runtime PC public le 15 octobre 2026, migration SQLite 21 et sondes HTTPS/OIDC validées.
 - Desktop : release instrumentée installée sur le PC et pilote propriétaire actif avec `OPENAI_LIVE_ENABLED=true`, `OPENAI_LIVE_DESKTOP_ENABLED=true` et `OPENAI_LIVE_PILOT_OWNER_ONLY=true`.
-- Promotion Desktop : campagne mesurable ouverte à 0/30 conversations ; Android reste bloqué jusqu'à validation des mesures de connexion, latence, interruption et mutation exactement une fois.
-- Android : contrat et machine d'état compilent; choix WebRTC et activation bloqués jusqu'au test sur appareil réel.
+- Promotion Desktop : campagne mesurable ouverte ; les mesures de connexion, latence, interruption et mutation exactement une fois restent requises avant promotion générale.
+- Android : WebRTC, `session.started`, audio bidirectionnel et copie PCM validés sur Samsung SM-S906U1 / Android 16. Le pilote backend propriétaire est actif, mais le transport reste limité au build Android de diagnostic et le bouton micro utilise toujours le pipeline classique. Bluetooth, appels, arrière-plan et reconnexion restent des gates de promotion.
 - Home Assistant : validateur de fidélité implémenté; activation bloquée jusqu'au corpus de 50 phrases.
 
-Le runtime actif de cette promotion est le PC, pas VM400. Android et Home Assistant restent désactivés.
+Le runtime actif de cette promotion est le PC, pas VM400. Desktop et le pilote backend Android sont actifs uniquement pour le propriétaire ; Home Assistant reste désactivé.
