@@ -385,58 +385,26 @@ export async function synthesizeAgentResponses(params: {
     log?: MinLogger;
   };
 }): Promise<string> {
-  const { options } = params;
-
-  const agentLines = params.parts
-    .map((p, i) => `[Sous-agent ${i + 1}]: ${p.text.trim()}`)
-    .join('\n');
-
-  const systemPrompt =
-    'Tu es un assistant vocal français. ' +
-    "Plusieurs sous-agents ont chacun traité une partie de la demande de l'utilisateur. " +
-    'Synthétise leurs réponses en une seule réponse naturelle, fluide et concise. ' +
-    'Ne répète pas les réponses mot pour mot — fusionne-les intelligemment. ' +
-    "Ne mentionne jamais les noms d'agents ni les termes techniques. " +
-    "Réponds uniquement par la synthèse, sans phrase d'introduction ni de conclusion.";
-
-  const userPrompt =
-    `Demande originale de l'utilisateur : "${params.userText}"\n\n` +
-    `Réponses des sous-agents :\n${agentLines}\n\nSynthèse :`;
-
-  try {
-    const content = await completeOpenAiResponse({
-      apiKey: options.openAiApiKey,
-      baseUrl: options.openAiBaseUrl,
-      model: options.model,
-      capability: 'synthesis',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      maxOutputTokens: options.maxOutputTokens ?? 768,
-      timeoutMs: options.timeoutMs,
-      reasoningEffort: 'low',
-    });
-    return content.trim() || fallbackJoin(params.parts);
-  } catch (err) {
-    options.log?.warn({ err }, 'synthesize_agent_responses_failed_fallback');
-    return fallbackJoin(params.parts);
-  }
+  // Multi-agent results are already business responses. Rewriting them through
+  // another model can silently drop a negation, condition, or operation status.
+  // Keep composition deterministic and lossless; presentation remains the
+  // responsibility of the text/voice renderers downstream.
+  void params.userText;
+  void params.options;
+  return fallbackJoin(params.parts);
 }
 
 function fallbackJoin(parts: { text: string }[]): string {
-  const snippets = parts
+  const seen = new Set<string>();
+  return parts
     .map((p) => p.text.trim())
     .filter(Boolean)
-    .map((text) => {
-      const m = text.match(/^(.+?[.!?])(?:\s|$)/);
-      const first = (m ? m[1] : text).trim();
-      return first.replace(/\.?\s*$/, '');
+    .map((text) => text.replace(/\s+/gu, ' '))
+    .filter((text) => {
+      if (seen.has(text)) return false;
+      seen.add(text);
+      return true;
     })
-    .slice(0, 4);
-
-  if (snippets.length === 0) return '';
-  if (snippets.length === 1) return `${snippets[0]}.`;
-  if (snippets.length === 2) return `${snippets[0]}. ${snippets[1]}.`;
-  return `${snippets.slice(0, -1).join('. ')}. Et aussi: ${snippets[snippets.length - 1]}.`;
+    .join('\n')
+    .trim();
 }

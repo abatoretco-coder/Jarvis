@@ -51,6 +51,27 @@ describe('voiceUx', () => {
     expect(state?.lastMailTop?.length).toBe(3);
   });
 
+  it.each([
+    "Impossible d'envoyer le mail : accès refusé",
+    'Échec de suppression : message introuvable',
+    'Aucun email disponible : compte déconnecté',
+  ])('does not turn a mail failure into inbox state: %s', (reply) => {
+    expect(extractMailStateFromReply(reply)).toBeNull();
+  });
+
+  it('recognizes a real multi-email recap without inventing a count', () => {
+    const state = extractMailStateFromReply(
+      'Emails non lus : Alice : Contrat ; Bob : Livraison ; Carol : Réunion.'
+    );
+
+    expect(state?.lastMailTop).toEqual([
+      'Alice : Contrat',
+      'Bob : Livraison',
+      'Carol : Réunion.',
+    ]);
+    expect(state?.lastMailCount).toBeUndefined();
+  });
+
   it('builds a last-mail follow-up summary', () => {
     const text = buildLastMailSummaryFromState({
       lastMailCount: 5,

@@ -209,20 +209,28 @@ export function isLastMailSummaryRequest(text: string): boolean {
 
 export function extractMailStateFromReply(text: string): VoiceThreadState | null {
   const compactText = compact(text);
-  const countMatch = compactText.match(/Tu as\s+(\d+)\s+email/i);
-  const count = countMatch ? Number.parseInt(countMatch[1] ?? '0', 10) : undefined;
+  const countedSummary = compactText.match(
+    /^Tu as\s+(\d+)\s+emails?\s+(?:(?:non\s+lus?|r[eé]cents?|importants?)\s+)?\s*:\s*(.+)$/iu
+  );
+  const uncountedSummary = compactText.match(
+    /^Emails?\s+(?:non\s+lus?|r[eé]cents?|importants?)\s*:\s*(.+)$/iu
+  );
+  if (!countedSummary && !uncountedSummary) return null;
 
-  const idx = compactText.indexOf(':');
-  const itemsPart = idx >= 0 ? compactText.slice(idx + 1).trim() : '';
+  const count = countedSummary
+    ? Number.parseInt(countedSummary[1] ?? '', 10)
+    : undefined;
+  const itemsPart = (countedSummary?.[2] ?? uncountedSummary?.[1] ?? '')
+    .trim();
   const top = itemsPart
     .split(';')
     .map((s) => s.trim())
     .filter(Boolean)
     .slice(0, 3);
 
-  if (!count && top.length === 0) return null;
+  if (top.length === 0 || (!countedSummary && top.length < 2)) return null;
   return {
-    lastMailCount: count,
+    ...(Number.isFinite(count) ? { lastMailCount: count } : {}),
     lastMailTop: top,
     lastMailRaw: compactText,
   };
@@ -340,6 +348,7 @@ export function formatVoiceResponse(input: {
   mode: VoiceResponseMode;
 }): string {
   const sanitized = stripOralNoise(sanitizeResponseAttribution(input.text, input.domain));
+  const isMultiAgentComposition = sanitized.includes('\n');
   const clean = compact(sanitized);
   if (!clean) return clean;
 
@@ -364,7 +373,11 @@ export function formatVoiceResponse(input: {
       body = formatCultureOral(sanitized, input.mode);
       break;
     default:
-      body = input.mode === 'short' ? shortWithCriticalContext(clean) : selectInformativeSentences(clean, input.mode === 'detailed' ? 4 : 2);
+      body = isMultiAgentComposition
+        ? clean
+        : input.mode === 'short'
+          ? shortWithCriticalContext(clean)
+          : selectInformativeSentences(clean, input.mode === 'detailed' ? 4 : 2);
       break;
   }
 
