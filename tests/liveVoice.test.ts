@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, jest, test } from '@jest/globals';
-import type { FastifyBaseLogger } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyRequest } from 'fastify';
 import type WebSocket from 'ws';
 
 import {
@@ -8,6 +12,14 @@ import {
   SqliteThreadRepository,
 } from '../src/conversation/repositories/SqliteRepositories';
 import { loadEnv } from '../src/env';
+import { MutationIdempotencyCoordinator } from '../src/idempotency/MutationIdempotencyCoordinator';
+import type { UserPrincipal } from '../src/identity/IdentityService';
+import {
+  runWithRequestIdentityContext,
+  setRequestPrincipal,
+} from '../src/identity/requestIdentity';
+import { registerLiveIngestValidationHook } from '../src/routes/liveVoice';
+import { registerMutationIdempotencyHooks } from '../src/routes/mutationIdempotency';
 import { canUseLivePilot } from '../src/voice/live/LiveAccessPolicy';
 import { LiveContextAdapter } from '../src/voice/live/LiveContextAdapter';
 import {
@@ -25,14 +37,15 @@ import {
 import { LiveTtsAdapter } from '../src/voice/live/LiveTtsAdapter';
 
 function createSession(registry: LiveSessionRegistry, sessionId = 'live_session_a') {
+  const nowMs = Date.now();
   return registry.create({
     sessionId,
     ownerUserId: 'owner-a',
     deviceHash: hashLiveDeviceId('desktop-installation-a'),
     threadId: 'thread-a',
     client: 'desktop',
-    nowMs: 1_000,
-    expiresAtMs: 301_000,
+    nowMs,
+    expiresAtMs: nowMs + 300_000,
   });
 }
 
@@ -50,6 +63,68 @@ function liveEnv() {
 
 function loggerStub(): FastifyBaseLogger {
   return { warn: jest.fn() } as unknown as FastifyBaseLogger;
+}
+
+const ownerPrincipal: UserPrincipal = {
+  kind: 'user' as const,
+  userId: 'owner-a',
+  email: 'owner-a@example.test',
+  displayName: 'Owner A',
+  roles: ['owner'],
+  permissions: ['chat' as const],
+  status: 'active' as const,
+  sessionId: 'identity-session-a',
+};
+
+async function createOwnedThread(db: ReturnType<typeof createConversationDb>, threadId: string) {
+  await runWithRequestIdentityContext(async () => {
+    const request = {} as FastifyRequest;
+    setRequestPrincipal(request, ownerPrincipal);
+    await new SqliteThreadRepository(db).getOrCreate(threadId);
+  });
+}
+
+async function createLiveIngestHarness() {
+  const db = createConversationDb(':memory:');
+  db.prepare(
+    `INSERT INTO users(user_id,email_normalized,display_name,status,created_at_ms,updated_at_ms)
+     VALUES (?,?,?,?,?,?)`
+  ).run('owner-a', 'owner-a@example.test', 'Owner A', 'active', 1, 1);
+  await createOwnedThread(db, 'thread-a');
+  await createOwnedThread(db, 'thread-b');
+  const registry = new LiveSessionRegistry(db);
+  const nowMs = Date.now();
+  for (const [sessionId, threadId] of [
+    ['live_session_a', 'thread-a'],
+    ['live_session_b', 'thread-a'],
+  ] as const) {
+    registry.create({
+      sessionId,
+      ownerUserId: 'owner-a',
+      deviceHash: hashLiveDeviceId(`device-${sessionId}`),
+      threadId,
+      client: 'desktop',
+      nowMs,
+      expiresAtMs: nowMs + 300_000,
+    });
+  }
+  const delegations = new LiveDelegationCoordinator(registry, 30);
+  delegations.observe('live_session_a', 'delegation-a');
+  delegations.observe('live_session_b', 'delegation-b');
+  const live = {
+    sessions: { pilotOwnerOnly: true },
+    registry,
+    delegations,
+    fallback: new LiveFallbackCoordinator(),
+    tts: new LiveTtsAdapter(),
+  } as unknown as Parameters<typeof registerLiveIngestValidationHook>[1];
+  const app = Fastify();
+  app.addHook('onRequest', (_request, _reply, done) => runWithRequestIdentityContext(done));
+  app.addHook('preHandler', async (request) => setRequestPrincipal(request, ownerPrincipal));
+  registerLiveIngestValidationHook(app, live, db);
+  const idempotency = new MutationIdempotencyCoordinator();
+  registerMutationIdempotencyHooks(app, idempotency);
+  return { app, db, registry, delegations };
 }
 
 afterEach(() => {
@@ -153,7 +228,8 @@ describe('GPT-Live foundations', () => {
     coordinator.markClientState('live_session_a', 'delegation-a', 'completed');
     expect(() => coordinator.markIngestSent('live_session_a', 'delegation-a', key)).not.toThrow();
     expect(() => coordinator.markClientState('live_session_a', 'delegation-a', 'ingest_running'))
-      .toThrow('live_delegation_state_regression');
+      .not.toThrow();
+    expect(registry.requireDelegation('live_session_a', 'delegation-a').state).toBe('completed');
     expect(() => coordinator.markIngestSent('live_session_a', 'delegation-a', `${key}bad`))
       .toThrow('live_idempotency_key_mismatch');
     db.close();
@@ -338,5 +414,413 @@ describe('GPT-Live foundations', () => {
     expect(listOpen).toHaveBeenCalledTimes(2);
     await service.stop();
     db.close();
+  });
+
+  test('closes persisted open sessions on shutdown even without an in-memory sideband', async () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    createSession(registry);
+    const hangup = jest.fn<LiveProviderTransport['hangup']>(async () => undefined);
+    const service = new LiveSessionService(
+      liveEnv(), registry, new LiveDelegationCoordinator(registry, 10),
+      new LiveContextAdapter(new SqliteThreadRepository(db), new SqliteMessageRepository(db)),
+      new LiveEventValidator(65_536), loggerStub(),
+      { create: jest.fn(), attach: jest.fn(), hangup } as unknown as LiveProviderTransport
+    );
+
+    await service.stop();
+
+    expect(hangup).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'live_session_a' }));
+    expect(registry.require('live_session_a')).toMatchObject({
+      state: 'finalization_unconfirmed',
+      lastErrorCode: 'close_unconfirmed',
+    });
+    db.close();
+  });
+
+  test('releases an attached socket if persisting the attachment fails', async () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    const threads = new SqliteThreadRepository(db);
+    const messages = new SqliteMessageRepository(db);
+    await threads.getOrCreate('thread-a');
+    const terminate = jest.fn();
+    const socket = { readyState: 1, terminate } as unknown as WebSocket;
+    const hangup = jest.fn<LiveProviderTransport['hangup']>(async () => undefined);
+    const transport: LiveProviderTransport = {
+      create: async () => ({
+        session: { id: 'live_provider_registry_failure' },
+        transport: { type: 'webrtc', sdp: 'answer' },
+      }),
+      attach: async () => socket,
+      hangup,
+    };
+    jest.spyOn(registry, 'markSidebandAttached').mockImplementationOnce(() => {
+      throw new Error('sqlite_write_failed');
+    });
+    const service = new LiveSessionService(
+      liveEnv(), registry, new LiveDelegationCoordinator(registry, 10),
+      new LiveContextAdapter(threads, messages), new LiveEventValidator(65_536),
+      loggerStub(), transport
+    );
+
+    await expect(service.create({
+      ownerUserId: 'owner-a', threadId: 'thread-a', client: 'desktop',
+      deviceId: 'desktop-a', sdp: 'offer',
+    })).rejects.toThrow('sqlite_write_failed');
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(hangup).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'live_provider_registry_failure',
+    }));
+    db.close();
+  });
+
+  test('does not close an existing registry row when provider creation returns a duplicate id', async () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    createSession(registry, 'live_duplicate_id');
+    const threads = new SqliteThreadRepository(db);
+    const messages = new SqliteMessageRepository(db);
+    await threads.getOrCreate('thread-a');
+    jest.spyOn(registry, 'create').mockImplementationOnce(() => {
+      throw new Error('sqlite_unique_constraint');
+    });
+    const hangup = jest.fn<LiveProviderTransport['hangup']>(async () => undefined);
+    const service = new LiveSessionService(
+      liveEnv(), registry, new LiveDelegationCoordinator(registry, 10),
+      new LiveContextAdapter(threads, messages), new LiveEventValidator(65_536),
+      loggerStub(), {
+        create: async () => ({
+          session: { id: 'live_duplicate_id' },
+          transport: { type: 'webrtc', sdp: 'answer' },
+        }),
+        attach: jest.fn(),
+        hangup,
+      } as LiveProviderTransport
+    );
+
+    await expect(service.create({
+      ownerUserId: 'owner-b', threadId: 'thread-a', client: 'desktop',
+      deviceId: 'desktop-b', sdp: 'offer',
+    })).rejects.toThrow();
+    expect(registry.require('live_duplicate_id').state).toBe('active');
+    expect(hangup).toHaveBeenCalledTimes(1);
+    db.close();
+  });
+});
+
+describe('GPT-Live ingest integrity', () => {
+  test('rejects a Live session used with another owned thread before mutation execution', async () => {
+    const { app, db } = await createLiveIngestHarness();
+    const mutation = jest.fn(async () => ({ operationStatus: 'succeeded' }));
+    app.post('/v1/ingest', mutation);
+    const key = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': key },
+      payload: {
+        threadId: 'thread-b',
+        text: 'Éteins le salon',
+        clientContext: {
+          voiceTransport: 'gpt-live',
+          liveSessionId: 'live_session_a',
+          liveDelegationId: 'delegation-a',
+          deviceType: 'desktop',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: 'live_thread_mismatch' });
+    expect(mutation).not.toHaveBeenCalled();
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    expect(recovery.statusCode).toBe(404);
+    await app.close();
+    db.close();
+  });
+
+  test('revalidates thread ownership before accepting a Live ingest', async () => {
+    const { app, db } = await createLiveIngestHarness();
+    db.prepare(
+      `INSERT INTO users(user_id,email_normalized,display_name,status,created_at_ms,updated_at_ms)
+       VALUES (?,?,?,?,?,?)`
+    ).run('owner-b', 'owner-b@example.test', 'Owner B', 'active', 1, 1);
+    db.prepare('UPDATE conversation_threads SET owner_user_id=? WHERE thread_id=?')
+      .run('owner-b', 'thread-a');
+    const mutation = jest.fn(async () => ({ operationStatus: 'succeeded' }));
+    app.post('/v1/ingest', mutation);
+    const key = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': key },
+      payload: {
+        threadId: 'thread-a',
+        text: 'Éteins le salon',
+        clientContext: {
+          voiceTransport: 'gpt-live', liveSessionId: 'live_session_a',
+          liveDelegationId: 'delegation-a', deviceType: 'desktop',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'thread_forbidden' });
+    expect(mutation).not.toHaveBeenCalled();
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    expect(recovery.statusCode).toBe(404);
+    await app.close();
+    db.close();
+  });
+
+  test('rejects a foreign delegation, wrong client, and wrong operation key', async () => {
+    const { app, db } = await createLiveIngestHarness();
+    const mutation = jest.fn(async () => ({ operationStatus: 'succeeded' }));
+    app.post('/v1/ingest', mutation);
+    const base = {
+      threadId: 'thread-a',
+      text: 'Éteins le salon',
+      clientContext: {
+        voiceTransport: 'gpt-live',
+        liveSessionId: 'live_session_a',
+        liveDelegationId: 'delegation-a',
+        deviceType: 'desktop',
+      },
+    };
+
+    const foreign = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': deriveLiveIdempotencyKey('live_session_a', 'delegation-b') },
+      payload: {
+        ...base,
+        clientContext: { ...base.clientContext, liveDelegationId: 'delegation-b' },
+      },
+    });
+    expect(foreign.statusCode).toBe(409);
+    expect(foreign.json()).toEqual({ error: 'live_delegation_not_observed' });
+
+    const wrongClient = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': deriveLiveIdempotencyKey('live_session_a', 'delegation-a') },
+      payload: {
+        ...base,
+        clientContext: { ...base.clientContext, deviceType: 'android' },
+      },
+    });
+    expect(wrongClient.statusCode).toBe(409);
+    expect(wrongClient.json()).toEqual({ error: 'live_client_mismatch' });
+
+    const wrongKey = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': 'live-00000000000000000000000000000000' },
+      payload: base,
+    });
+    expect(wrongKey.statusCode).toBe(409);
+    expect(wrongKey.json()).toEqual({ error: 'live_idempotency_key_mismatch' });
+    expect(mutation).not.toHaveBeenCalled();
+    await app.close();
+    db.close();
+  });
+
+  test('coalesces two Live ingests with the same key into one mutation', async () => {
+    const { app, db } = await createLiveIngestHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const mutation = jest.fn(async () => {
+      await gate;
+      return { operationStatus: 'accepted' };
+    });
+    app.post('/v1/ingest', mutation);
+    const key = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+    const request = {
+      method: 'POST' as const,
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': key },
+      payload: {
+        threadId: 'thread-a',
+        text: 'Éteins le salon',
+        clientContext: {
+          voiceTransport: 'gpt-live',
+          liveSessionId: 'live_session_a',
+          liveDelegationId: 'delegation-a',
+          deviceType: 'desktop',
+        },
+      },
+    };
+    const first = app.inject(request);
+    const second = app.inject(request);
+    for (let attempt = 0; attempt < 10 && mutation.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(mutation).toHaveBeenCalledTimes(1);
+    release();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    expect(secondResponse.json()).toEqual(firstResponse.json());
+    expect(secondResponse.headers['idempotent-replay']).toBe('true');
+    expect(mutation).toHaveBeenCalledTimes(1);
+    await app.close();
+    db.close();
+  });
+
+  test('rejects closure before ingest but preserves recovery after business transmission', async () => {
+    const { app, db, registry } = await createLiveIngestHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const mutation = jest.fn(async () => {
+      await gate;
+      return { operationStatus: 'uncertain' };
+    });
+    app.post('/v1/ingest', mutation);
+    const keyA = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+    const payloadA = {
+      threadId: 'thread-a',
+      text: 'Éteins le salon',
+      clientContext: {
+        voiceTransport: 'gpt-live', liveSessionId: 'live_session_a',
+        liveDelegationId: 'delegation-a', deviceType: 'desktop',
+      },
+    };
+    const inFlight = app.inject({
+      method: 'POST', url: '/v1/ingest', headers: { 'idempotency-key': keyA }, payload: payloadA,
+    });
+    for (let attempt = 0; attempt < 10 && mutation.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    registry.markClosed({ sessionId: 'live_session_a', confirmed: true });
+    release();
+    await expect(inFlight.then((response) => response.json())).resolves.toEqual({
+      operationStatus: 'uncertain',
+    });
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${keyA}` });
+    expect(recovery.statusCode).toBe(200);
+    expect(Buffer.from(recovery.json().payloadBase64, 'base64').toString('utf8'))
+      .toContain('"operationStatus":"uncertain"');
+
+    registry.markClosed({ sessionId: 'live_session_b', confirmed: true });
+    const keyB = deriveLiveIdempotencyKey('live_session_b', 'delegation-b');
+    const before = await app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': keyB },
+      payload: {
+        ...payloadA,
+        clientContext: {
+          ...payloadA.clientContext,
+          liveSessionId: 'live_session_b',
+          liveDelegationId: 'delegation-b',
+        },
+      },
+    });
+    expect(before.statusCode).toBe(403);
+    expect(mutation).toHaveBeenCalledTimes(1);
+    await app.close();
+    db.close();
+  });
+
+  test('does not admit a delegation when the session closes during sideband correlation', async () => {
+    const { app, db, registry, delegations } = await createLiveIngestHarness();
+    const waitUntilObserved = jest.spyOn(delegations, 'waitUntilObserved');
+    const mutation = jest.fn(async () => ({ operationStatus: 'succeeded' }));
+    app.post('/v1/ingest', mutation);
+    const delegationId = 'delegation-late';
+    const key = deriveLiveIdempotencyKey('live_session_a', delegationId);
+    const pending = app.inject({
+      method: 'POST',
+      url: '/v1/ingest',
+      headers: { 'idempotency-key': key },
+      payload: {
+        threadId: 'thread-a',
+        text: 'Éteins le salon',
+        clientContext: {
+          voiceTransport: 'gpt-live', liveSessionId: 'live_session_a',
+          liveDelegationId: delegationId, deviceType: 'desktop',
+        },
+      },
+    });
+    for (let attempt = 0; attempt < 10 && waitUntilObserved.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(waitUntilObserved).toHaveBeenCalledTimes(1);
+    delegations.observe('live_session_a', delegationId);
+    registry.markClosed({ sessionId: 'live_session_a', confirmed: true });
+
+    const response = await pending;
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: 'live_session_closed_during_validation' });
+    expect(mutation).not.toHaveBeenCalled();
+    const recovery = await app.inject({ method: 'GET', url: `/v1/mutation-results/${key}` });
+    expect(recovery.statusCode).toBe(404);
+    await app.close();
+    db.close();
+  });
+
+  test('allows a persisted uncertain delegation to advance when recovery finds the result', () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    createSession(registry);
+    const coordinator = new LiveDelegationCoordinator(registry, 30);
+    coordinator.observe('live_session_a', 'delegation-a');
+    const key = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+    coordinator.markIngestSent('live_session_a', 'delegation-a', key);
+    coordinator.markClientState('live_session_a', 'delegation-a', 'uncertain');
+
+    expect(() => coordinator.markClientState('live_session_a', 'delegation-a', 'ingest_completed'))
+      .not.toThrow();
+    expect(registry.requireDelegation('live_session_a', 'delegation-a')).toMatchObject({
+      operationKey: key,
+      state: 'ingest_completed',
+    });
+    coordinator.markClientState('live_session_a', 'delegation-a', 'uncertain');
+    expect(registry.requireDelegation('live_session_a', 'delegation-a').state)
+      .toBe('ingest_completed');
+    db.close();
+  });
+
+  test('rejects late sideband delegations after session closure', () => {
+    const db = createConversationDb(':memory:');
+    const registry = new LiveSessionRegistry(db);
+    createSession(registry);
+    const coordinator = new LiveDelegationCoordinator(registry, 30);
+    registry.markClosed({ sessionId: 'live_session_a', confirmed: true });
+
+    expect(() => coordinator.observe('live_session_a', 'delegation-late'))
+      .toThrow('live_session_inactive');
+    expect(registry.findDelegation('live_session_a', 'delegation-late')).toBeNull();
+    db.close();
+  });
+
+  test('retains the operation key and uncertain state across a registry restart', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'jarvis-live-restart-'));
+    const databasePath = join(directory, 'runtime.sqlite');
+    const firstDb = createConversationDb(databasePath);
+    const firstRegistry = new LiveSessionRegistry(firstDb);
+    createSession(firstRegistry);
+    const firstCoordinator = new LiveDelegationCoordinator(firstRegistry, 30);
+    firstCoordinator.observe('live_session_a', 'delegation-a');
+    const key = deriveLiveIdempotencyKey('live_session_a', 'delegation-a');
+    firstCoordinator.markIngestSent('live_session_a', 'delegation-a', key);
+    firstCoordinator.markClientState('live_session_a', 'delegation-a', 'uncertain');
+    firstDb.close();
+
+    const restartedDb = createConversationDb(databasePath);
+    const restartedRegistry = new LiveSessionRegistry(restartedDb);
+    const restartedCoordinator = new LiveDelegationCoordinator(restartedRegistry, 30);
+    expect(restartedRegistry.requireDelegation('live_session_a', 'delegation-a')).toMatchObject({
+      state: 'uncertain',
+      operationKey: key,
+    });
+    restartedCoordinator.markClientState('live_session_a', 'delegation-a', 'completed');
+    expect(restartedRegistry.requireDelegation('live_session_a', 'delegation-a')).toMatchObject({
+      state: 'completed',
+      operationKey: key,
+    });
+    restartedDb.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 });

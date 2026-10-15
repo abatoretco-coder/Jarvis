@@ -9,6 +9,7 @@ import type { LiveVoiceRuntime } from '../voice/live/runtime';
 
 const sessionIdSchema = z.string().trim().regex(/^[A-Za-z0-9._:-]{8,160}$/u);
 const delegationIdSchema = z.string().trim().regex(/^[A-Za-z0-9._:-]{1,160}$/u);
+const threadIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
 
 const createSessionSchema = z.object({
   sdp: z.string().min(1).max(65_536),
@@ -50,8 +51,10 @@ function liveContext(request: FastifyRequest): Record<string, unknown> | null {
 
 export function registerLiveIngestValidationHook(
   app: FastifyInstance,
-  live: LiveVoiceRuntime
+  live: LiveVoiceRuntime,
+  db: Database.Database
 ): void {
+  const threads = new SqliteThreadRepository(db);
   app.addHook('preHandler', async (request, reply) => {
     const context = liveContext(request);
     if (!context) return;
@@ -65,24 +68,50 @@ export function registerLiveIngestValidationHook(
     if (!canUseLivePilot(user, live.sessions.pilotOwnerOnly)) {
       return reply.code(403).send({ error: 'live_pilot_owner_required' });
     }
-    const parsedIds = z.object({
-      liveSessionId: sessionIdSchema,
-      liveDelegationId: delegationIdSchema,
-    }).safeParse(context);
-    if (!parsedIds.success) return reply.code(400).send({ error: 'live_context_invalid' });
-    const session = live.registry.findOwnedActive(parsedIds.data.liveSessionId, user.userId);
+    const parsedRequest = z.object({
+      threadId: threadIdSchema,
+      clientContext: z.object({
+        liveSessionId: sessionIdSchema,
+        liveDelegationId: delegationIdSchema,
+        deviceType: z.enum(['desktop', 'android']).optional(),
+      }).passthrough(),
+    }).safeParse(request.body);
+    if (!parsedRequest.success) return reply.code(400).send({ error: 'live_context_invalid' });
+    const { threadId, clientContext } = parsedRequest.data;
+    const session = live.registry.findOwnedActive(clientContext.liveSessionId, user.userId);
     if (!session) return reply.code(403).send({ error: 'live_session_forbidden_or_inactive' });
+    if (session.threadId !== threadId) {
+      return reply.code(409).send({ error: 'live_thread_mismatch' });
+    }
+    if (clientContext.deviceType && session.client !== clientContext.deviceType) {
+      return reply.code(409).send({ error: 'live_client_mismatch' });
+    }
+    // Use the same owner-scoped repository lookup as the ingest route. The
+    // session owner match alone is insufficient if thread ownership changed or
+    // the thread was removed after session creation.
+    if (!await threads.findById(threadId)) {
+      return reply.code(403).send({ error: 'thread_forbidden' });
+    }
     const observed = await live.delegations.waitUntilObserved(
-      parsedIds.data.liveSessionId,
-      parsedIds.data.liveDelegationId,
+      clientContext.liveSessionId,
+      clientContext.liveDelegationId,
       1_000
     );
     if (!observed) return reply.code(409).send({ error: 'live_delegation_not_observed' });
+    if (!await threads.findById(threadId)) {
+      return reply.code(403).send({ error: 'thread_forbidden' });
+    }
+    // Re-check after the bounded sideband wait. No asynchronous boundary exists
+    // between this check and binding the operation key, so a concurrent close
+    // cannot admit a fresh mutation after the session became inactive.
+    if (!live.registry.findOwnedActive(clientContext.liveSessionId, user.userId)) {
+      return reply.code(409).send({ error: 'live_session_closed_during_validation' });
+    }
     const operationKey = firstHeader(request.headers['idempotency-key']).trim();
     try {
       live.delegations.markIngestSent(
-        parsedIds.data.liveSessionId,
-        parsedIds.data.liveDelegationId,
+        clientContext.liveSessionId,
+        clientContext.liveDelegationId,
         operationKey
       );
     } catch (error) {
@@ -114,8 +143,12 @@ export function registerLiveVoiceRoutes(
     }
     try {
       await threads.getOrCreate(parsed.data.threadId, { channel: parsed.data.client });
-    } catch {
-      return reply.code(403).send({ error: 'thread_forbidden' });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'conversation_thread_not_found') {
+        return reply.code(403).send({ error: 'thread_forbidden' });
+      }
+      request.log.warn({ errorCode: 'live_thread_access_failed' }, 'Live thread access failed');
+      return reply.code(500).send({ error: 'live_thread_access_failed' });
     }
     try {
       const result = await live.sessions.create({ ownerUserId: user.userId, ...parsed.data });
@@ -150,6 +183,7 @@ export function registerLiveVoiceRoutes(
         if (error instanceof Error && error.message === 'live_session_forbidden') {
           return reply.code(403).send({ error: 'forbidden' });
         }
+        request.log.warn({ errorCode: 'live_session_close_failed' }, 'Live session close failed');
         return reply.code(502).send({ error: 'live_session_close_failed' });
       }
     }
@@ -169,6 +203,9 @@ export function registerLiveVoiceRoutes(
       return reply.code(403).send({ error: 'forbidden' });
     }
     if (parsed.data.delegationId) {
+      if (!live.registry.findDelegation(parsed.data.sessionId, parsed.data.delegationId)) {
+        return reply.code(409).send({ error: 'live_delegation_not_observed' });
+      }
       const state = parsed.data.type === 'ingest_started'
         ? 'ingest_running'
         : parsed.data.type === 'ingest_completed'
@@ -185,8 +222,9 @@ export function registerLiveVoiceRoutes(
             parsed.data.delegationId,
             state
           );
-        } catch {
-          return reply.code(409).send({ error: 'live_delegation_not_observed' });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'live_delegation_state_invalid';
+          return reply.code(409).send({ error: code });
         }
       }
     }

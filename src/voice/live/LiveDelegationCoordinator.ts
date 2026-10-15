@@ -24,6 +24,9 @@ export class LiveDelegationCoordinator {
     if (!LIVE_ID.test(sessionId) || !LIVE_ID.test(delegationId)) {
       throw new Error('live_delegation_invalid');
     }
+    if (!this.registry.findActive(sessionId)) {
+      throw new Error('live_session_inactive');
+    }
     const existing = this.registry.findDelegation(sessionId, delegationId);
     if (!existing && this.registry.countDelegations(sessionId) >= this.maxDelegationsPerSession) {
       throw new Error('live_delegation_limit');

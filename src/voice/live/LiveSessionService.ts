@@ -5,7 +5,7 @@ import type { Env } from '../../env';
 import type { LiveContextAdapter } from './LiveContextAdapter';
 import type { LiveDelegationCoordinator } from './LiveDelegationCoordinator';
 import type { LiveEventValidator, ValidatedLiveEvent } from './LiveEventValidator';
-import { hashLiveDeviceId,LiveSessionRegistry } from './LiveSessionRegistry';
+import { hashLiveDeviceId, LiveSessionRegistry } from './LiveSessionRegistry';
 import type { LiveAvailability, LiveClient } from './types';
 
 type OpenAiLiveSession = {
@@ -119,6 +119,14 @@ export class DefaultLiveProviderTransport implements LiveProviderTransport {
 
 type Sideband = { socket: WebSocket; closed?: ValidatedLiveEvent };
 
+function safeErrorCode(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message.slice(0, 128);
+  return /^(?:live_|openai_live_|sqlite_)[A-Za-z0-9._:-]*$/u.test(message)
+    ? message
+    : fallback;
+}
+
 function startOfUtcDay(nowMs: number): number {
   const date = new Date(nowMs);
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
@@ -162,9 +170,29 @@ export class LiveSessionService {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     this.cleanupTimer = undefined;
     await this.scheduledCleanup;
-    await Promise.allSettled(
-      [...this.sidebands.keys()].map((sessionId) => this.close(sessionId, undefined, true))
+    let openSessionIds: string[] = [];
+    try {
+      openSessionIds = this.registry.listOpen().map((session) => session.sessionId);
+    } catch (error) {
+      this.log.warn(
+        { errorCode: safeErrorCode(error, 'live_session_shutdown_list_failed') },
+        'could not list Live sessions during shutdown'
+      );
+    }
+    const sessionIds = new Set([...openSessionIds, ...this.sidebands.keys()]);
+    const results = await Promise.allSettled(
+      [...sessionIds].map((sessionId) => this.close(sessionId, undefined, true))
     );
+    results.forEach((result) => {
+      if (result.status === 'rejected') {
+        this.log.warn(
+          { errorCode: safeErrorCode(result.reason, 'live_session_shutdown_close_failed') },
+          'Live session shutdown close failed'
+        );
+      }
+    });
+    // A database failure must not leave network resources alive.
+    for (const sessionId of this.sidebands.keys()) this.releaseSideband(sessionId);
   }
 
   private scheduleExpiredSessionCleanup(): void {
@@ -172,7 +200,7 @@ export class LiveSessionService {
     const work = this.closeExpiredSessions()
       .catch((error) => {
         this.log.warn(
-          { errorCode: error instanceof Error ? error.message : 'live_session_cleanup_failed' },
+          { errorCode: safeErrorCode(error, 'live_session_cleanup_failed') },
           'live session cleanup failed'
         );
       })
@@ -265,6 +293,7 @@ export class LiveSessionService {
     };
 
     let created: OpenAiLiveSession | undefined;
+    let registered = false;
     try {
       created = await this.transport.create({
         apiKey: this.env.OPENAI_API_KEY!,
@@ -282,6 +311,7 @@ export class LiveSessionService {
         nowMs,
         expiresAtMs,
       });
+      registered = true;
       await this.attach(created.session.id);
       this.failureCount = 0;
       return {
@@ -292,13 +322,9 @@ export class LiveSessionService {
     } catch (error) {
       this.noteProviderFailure();
       if (created) {
-        await this.transport.hangup({
-          apiKey: this.env.OPENAI_API_KEY!,
-          baseUrl: this.env.OPENAI_BASE_URL,
-          sessionId: created.session.id,
-          timeoutMs: 3_000,
-        }).catch(() => undefined);
-        if (this.registry.find(created.session.id)) {
+        this.releaseSideband(created.session.id);
+        await this.hangup(created.session.id, 'live_create_cleanup_hangup_failed');
+        if (registered) {
           this.registry.markClosed({
             sessionId: created.session.id,
             confirmed: false,
@@ -321,23 +347,26 @@ export class LiveSessionService {
     this.registry.markClosing(sessionId);
     const sideband = this.sidebands.get(sessionId);
     if (sideband?.socket.readyState === WebSocket.OPEN) {
-      sideband.socket.send(JSON.stringify({ type: 'session.close', event_id: `close_${Date.now()}` }));
-      const closed = await this.waitForClosed(sessionId, 3_000);
-      if (closed) return;
+      try {
+        sideband.socket.send(JSON.stringify({ type: 'session.close', event_id: `close_${Date.now()}` }));
+        const closed = await this.waitForClosed(sessionId, 3_000);
+        if (closed) return;
+      } catch (error) {
+        this.log.warn(
+          { errorCode: safeErrorCode(error, 'live_session_close_signal_failed') },
+          'Live sideband close signal failed'
+        );
+      }
     }
-    await this.transport.hangup({
-      apiKey: this.env.OPENAI_API_KEY!,
-      baseUrl: this.env.OPENAI_BASE_URL,
-      sessionId,
-      timeoutMs: 3_000,
-    }).catch(() => undefined);
-    sideband?.socket.terminate();
-    this.sidebands.delete(sessionId);
-    this.registry.markClosed({
-      sessionId,
-      confirmed: false,
-      errorCode: 'close_unconfirmed',
-    });
+    await this.hangup(sessionId, 'live_session_close_hangup_failed');
+    this.releaseSideband(sessionId);
+    if (this.registry.find(sessionId)?.state !== 'closed') {
+      this.registry.markClosed({
+        sessionId,
+        confirmed: false,
+        errorCode: 'close_unconfirmed',
+      });
+    }
   }
 
   async recoverOrphans(): Promise<void> {
@@ -345,13 +374,13 @@ export class LiveSessionService {
       try {
         await this.attach(session.sessionId);
         await this.close(session.sessionId, undefined, true);
-      } catch {
-        await this.transport.hangup({
-          apiKey: this.env.OPENAI_API_KEY ?? '',
-          baseUrl: this.env.OPENAI_BASE_URL,
-          sessionId: session.sessionId,
-          timeoutMs: 3_000,
-        }).catch(() => undefined);
+      } catch (error) {
+        this.log.warn(
+          { errorCode: safeErrorCode(error, 'live_orphan_recovery_failed') },
+          'Live orphan recovery failed'
+        );
+        this.releaseSideband(session.sessionId);
+        await this.hangup(session.sessionId, 'live_orphan_hangup_failed');
         this.registry.markClosed({
           sessionId: session.sessionId,
           confirmed: false,
@@ -382,7 +411,12 @@ export class LiveSessionService {
       },
     });
     this.sidebands.set(sessionId, { socket });
-    this.registry.markSidebandAttached(sessionId);
+    try {
+      this.registry.markSidebandAttached(sessionId);
+    } catch (error) {
+      this.releaseSideband(sessionId);
+      throw error;
+    }
   }
 
   private onSidebandEvent(sessionId: string, raw: Buffer): void {
@@ -402,7 +436,7 @@ export class LiveSessionService {
       }
     } catch (error) {
       this.log.warn(
-        { sessionId, errorCode: error instanceof Error ? error.message : 'live_event_rejected' },
+        { sessionId, errorCode: safeErrorCode(error, 'live_event_rejected') },
         'live sideband event rejected'
       );
     }
@@ -438,6 +472,46 @@ export class LiveSessionService {
     const nowMs = Date.now();
     const expired = this.registry.listOpen()
       .filter((session) => session.expiresAtMs <= nowMs);
-    for (const session of expired) await this.close(session.sessionId, undefined, true);
+    for (const session of expired) {
+      try {
+        await this.close(session.sessionId, undefined, true);
+      } catch (error) {
+        this.log.warn(
+          {
+            liveSessionId: session.sessionId,
+            errorCode: safeErrorCode(error, 'live_expired_session_close_failed'),
+          },
+          'expired Live session close failed'
+        );
+      }
+    }
+  }
+
+  private releaseSideband(sessionId: string): void {
+    const sideband = this.sidebands.get(sessionId);
+    this.sidebands.delete(sessionId);
+    if (
+      sideband &&
+      sideband.socket.readyState !== WebSocket.CLOSED &&
+      sideband.socket.readyState !== WebSocket.CLOSING
+    ) {
+      sideband.socket.terminate();
+    }
+  }
+
+  private async hangup(sessionId: string, failureCode: string): Promise<void> {
+    try {
+      await this.transport.hangup({
+        apiKey: this.env.OPENAI_API_KEY ?? '',
+        baseUrl: this.env.OPENAI_BASE_URL,
+        sessionId,
+        timeoutMs: 3_000,
+      });
+    } catch (error) {
+      this.log.warn(
+        { liveSessionId: sessionId, errorCode: safeErrorCode(error, failureCode) },
+        'Live provider hangup failed'
+      );
+    }
   }
 }

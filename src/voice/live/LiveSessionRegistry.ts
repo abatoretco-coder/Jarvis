@@ -80,6 +80,14 @@ const delegationStateRank: Record<LiveDelegationState, number> = {
   failed: 7,
 };
 
+function isRecoverableTransition(
+  current: LiveDelegationState,
+  next: LiveDelegationState
+): boolean {
+  return current === 'uncertain' &&
+    ['ingest_completed', 'replying', 'completed'].includes(next);
+}
+
 export function hashLiveDeviceId(deviceId: string): string {
   return createHash('sha256').update(deviceId.trim(), 'utf8').digest('hex');
 }
@@ -136,6 +144,16 @@ export class LiveSessionRegistry {
          WHERE session_id=? AND owner_user_id=? AND state='active' AND expires_at_ms>?`
       )
       .get(sessionId, ownerUserId, nowMs) as SessionRow | undefined;
+    return row ? toSession(row) : null;
+  }
+
+  findActive(sessionId: string, nowMs = Date.now()): LiveSessionRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM live_voice_sessions
+         WHERE session_id=? AND state='active' AND expires_at_ms>?`
+      )
+      .get(sessionId, nowMs) as SessionRow | undefined;
     return row ? toSession(row) : null;
   }
 
@@ -197,12 +215,13 @@ export class LiveSessionRegistry {
   }
 
   markSidebandAttached(sessionId: string, nowMs = Date.now()): void {
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE live_voice_sessions
          SET sideband_attached=1,last_event_at_ms=? WHERE session_id=? AND state='active'`
       )
       .run(nowMs, sessionId);
+    if (result.changes !== 1) throw new Error('live_session_inactive');
   }
 
   updateUsage(sessionId: string, usageSeconds: number, nowMs = Date.now()): void {
@@ -338,14 +357,26 @@ export class LiveSessionRegistry {
   }): LiveDelegationRecord {
     const nowMs = input.nowMs ?? Date.now();
     const current = this.requireDelegation(input.sessionId, input.delegationId);
-    if (delegationStateRank[input.state] < delegationStateRank[current.state]) {
-      throw new Error('live_delegation_state_regression');
+    if (current.state === input.state) return current;
+    if (current.state === 'completed' || current.state === 'failed') {
+      return current;
     }
     if (
-      delegationStateRank[current.state] === 7 &&
-      input.state !== current.state
+      input.state === 'uncertain' &&
+      ['ingest_completed', 'replying'].includes(current.state)
     ) {
-      throw new Error('live_delegation_state_terminal');
+      return current;
+    }
+    if (!isRecoverableTransition(current.state, input.state)) {
+      if (delegationStateRank[input.state] < delegationStateRank[current.state]) {
+        // Client telemetry can arrive out of order. Keeping the durable state
+        // at its furthest known point is safer than treating a late event as a
+        // new transition.
+        return current;
+      }
+      if (delegationStateRank[current.state] === 7) {
+        throw new Error('live_delegation_state_terminal');
+      }
     }
     const result = this.db
       .prepare(

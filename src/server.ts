@@ -215,7 +215,7 @@ export function buildApp(env: Env): FastifyInstance {
   registerSecurityHooks(app, env);
   registerApiKeyHook(app, env, identityService, adminRepository);
   registerPrincipalRateLimitHook(app, env);
-  registerLiveIngestValidationHook(app, liveVoice);
+  registerLiveIngestValidationHook(app, liveVoice, runtimeDb);
   registerMutationIdempotencyHooks(
     app,
     new MutationIdempotencyCoordinator({
@@ -280,9 +280,9 @@ export function buildApp(env: Env): FastifyInstance {
 
   liveVoice.sessions.start();
   if (env.OPENAI_LIVE_ENABLED && env.OPENAI_API_KEY && env.OIDC_ENABLED) {
-    void liveVoice.sessions.recoverOrphans().catch((error: unknown) => {
+    void liveVoice.sessions.recoverOrphans().catch(() => {
       app.log.warn(
-        { errorCode: error instanceof Error ? error.message : 'live_orphan_recovery_failed' },
+        { errorCode: 'live_orphan_recovery_failed' },
         'live orphan recovery failed'
       );
     });
