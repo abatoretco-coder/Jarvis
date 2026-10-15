@@ -181,8 +181,9 @@ describe('calendar ingest confirmation', () => {
       }
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
         expect(init?.method).toBe('POST');
+        const requestBody = JSON.parse(String(init?.body)) as { id: string };
         return new Response(JSON.stringify({
-          id: 'event-1',
+          id: requestBody.id,
           summary: 'RDV dentiste',
           start: { dateTime: '2026-07-01T15:00:00+02:00' },
           end: { dateTime: '2026-07-01T16:00:00+02:00' },
@@ -250,8 +251,9 @@ describe('calendar ingest confirmation', () => {
       if (rawUrl.includes('oauth2.googleapis.com/token')) return googleToken();
       if (rawUrl.includes('/calendar/v3/calendars/primary/events')) {
         expect(init?.method).toBe('POST');
+        const requestBody = JSON.parse(String(init?.body)) as { id: string };
         return new Response(JSON.stringify({
-          id: 'event-garage',
+          id: requestBody.id,
           summary: 'RDV garage',
           start: { dateTime: '2026-07-03T10:00:00+02:00' },
           end: { dateTime: '2026-07-03T11:00:00+02:00' },
@@ -611,7 +613,8 @@ describe('calendar ingest confirmation', () => {
       },
     });
     expect(patchBody).toContain('"end"');
-    expect(patchBody).toContain('17:00:00');
+    expect(patchBody).toContain('"dateTime":"2026-07-01T15:00:00.000Z"');
+    expect(patchBody).toContain('"timeZone":"Europe/Paris"');
     await app.close();
   });
 

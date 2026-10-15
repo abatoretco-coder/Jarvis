@@ -11,11 +11,15 @@
  *  - create_event   : "Ajoute un RDV dentiste vendredi 15h"
  */
 
+import { createHash, randomBytes } from 'node:crypto';
+
 import { z } from 'zod';
 
 import { completeOpenAiResponse } from '../openai/responsesClient';
 import { formatParisDateTime, getParisIsoDate } from '../time/parisTime';
 import {
+  CalendarApiError,
+  calendarApiListItems,
   calendarApiRequest,
   type CalendarTokenEnv,
   fetchUpcomingEventsMultiCalendarDetailed,
@@ -23,10 +27,10 @@ import {
   getGoogleCalendarConfigState,
   type GoogleCalendarEvent,
   parseCalendarIds,
-  refreshCalendarToken,
   resolveEventEnd,
   resolveEventStart,
   toGoogleCalendarTimeBoundary,
+  withCalendarAccessToken,
 } from './googleCalendarClient';
 
 // ─── Key detection ────────────────────────────────────────────────────────────
@@ -70,8 +74,25 @@ export type CalendarAction =
 
 export type CalendarAgentMode = 'execute' | 'propose';
 
-const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u);
-const localDateTimeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/u);
+function isValidLocalTemporal(value: string): boolean {
+  try {
+    toGoogleCalendarTimeBoundary(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function localTemporalMs(value: string): number {
+  try {
+    return Date.parse(toGoogleCalendarTimeBoundary(value));
+  } catch {
+    return Number.NaN;
+  }
+}
+
+const localDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).refine(isValidLocalTemporal, 'invalid local date');
+const localDateTimeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/u).refine(isValidLocalTemporal, 'invalid Paris local date-time');
 const localTemporalSchema = z.union([localDateSchema, localDateTimeSchema]);
 const optionalCalendarIdSchema = z.string().trim().min(1).max(256).optional();
 const eventQuerySchema = z.string().trim().min(1).max(200);
@@ -145,8 +166,8 @@ const calendarActionSchema = z.discriminatedUnion('action', [
   }).strict(),
 ]).superRefine((action, ctx) => {
   if ('timeMin' in action && action.timeMin && 'timeMax' in action && action.timeMax) {
-    const start = Date.parse(action.timeMin);
-    const end = Date.parse(action.timeMax);
+    const start = localTemporalMs(action.timeMin);
+    const end = localTemporalMs(action.timeMax);
     if (Number.isFinite(start) && Number.isFinite(end) && end <= start) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timeMax must be after timeMin', path: ['timeMax'] });
     }
@@ -170,8 +191,8 @@ const calendarActionSchema = z.discriminatedUnion('action', [
   if (!isAllDay && (startIsDate || endIsDate)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'timed events must use local date-time start/end', path: ['start'] });
   }
-  const start = Date.parse(startValue);
-  const end = Date.parse(endValue);
+  const start = localTemporalMs(startValue);
+  const end = localTemporalMs(endValue);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'end must be after start', path: ['end'] });
   }
@@ -204,6 +225,26 @@ type MinLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
   warn: (obj: Record<string, unknown>, msg: string) => void;
 };
+
+async function settleCalendarWork<T>(
+  calendarIds: string[],
+  mapper: (calendarId: string) => Promise<T>,
+): Promise<PromiseSettledResult<T>[]> {
+  const results = new Array<PromiseSettledResult<T>>(calendarIds.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < calendarIds.length) {
+      const index = nextIndex++;
+      try {
+        results[index] = { status: 'fulfilled', value: await mapper(calendarIds[index]!) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, calendarIds.length) }, () => worker()));
+  return results;
+}
 
 // ─── Planner ──────────────────────────────────────────────────────────────────
 
@@ -511,8 +552,17 @@ function formatEventTarget(ev: GoogleCalendarEvent): string {
 }
 
 function formatLocalDateTime(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date);
+  const value = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}-${value('month')}-${value('day')}T${value('hour')}:${value('minute')}:${value('second')}`;
+}
+
+function googleTimedDateTime(value: string): { dateTime: string; timeZone: 'Europe/Paris' } {
+  return { dateTime: toGoogleCalendarTimeBoundary(value), timeZone: 'Europe/Paris' };
 }
 
 function buildMutationPatch(action: Extract<CalendarAction, { action: 'update_event' | 'remove_from_event' }>, existing?: GoogleCalendarEvent): Record<string, unknown> {
@@ -532,15 +582,15 @@ function buildMutationPatch(action: Extract<CalendarAction, { action: 'update_ev
   if (action.start) {
     patch['start'] = action.isAllDay
       ? { date: action.start }
-      : { dateTime: action.start.includes('T') ? action.start : `${action.start}T00:00:00`, timeZone: 'Europe/Paris' };
+      : googleTimedDateTime(action.start.includes('T') ? action.start : `${action.start}T00:00:00`);
   }
   const endValue = action.end ?? (action.start && existing?.start?.dateTime && existing?.end?.dateTime
-    ? formatLocalDateTime(new Date(new Date(action.start.includes('T') ? action.start : `${action.start}T00:00:00`).getTime() + (new Date(existing.end.dateTime).getTime() - new Date(existing.start.dateTime).getTime())))
+    ? formatLocalDateTime(new Date(Date.parse(toGoogleCalendarTimeBoundary(action.start)) + (new Date(existing.end.dateTime).getTime() - new Date(existing.start.dateTime).getTime())))
     : undefined);
   if (endValue) {
     patch['end'] = action.isAllDay
       ? { date: endValue }
-      : { dateTime: endValue.includes('T') ? endValue : `${endValue}T00:00:00`, timeZone: 'Europe/Paris' };
+      : googleTimedDateTime(endValue.includes('T') ? endValue : `${endValue}T00:00:00`);
   }
   return patch;
 }
@@ -572,51 +622,82 @@ export async function prepareCalendarMutationAction(
   const configState = await getGoogleCalendarConfigState(env);
   if (configState !== 'ready') return { status: 'not_found', message: 'Connecte Google via OAuth pour activer le calendrier.' };
   const tokenEnv = env as CalendarTokenEnv;
-  const token = await refreshCalendarToken(tokenEnv);
   const calendarIds = action.calendarId ? [action.calendarId] : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
   const defaultTimeMin = new Date().toISOString();
   const defaultTimeMax = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const candidates: Array<GoogleCalendarEvent & { calendarId: string }> = [];
+  const failedCalendarIds = new Set<string>();
   const searchCandidates = async (query: string): Promise<void> => {
-    for (const calendarId of calendarIds) {
-      const params = new URLSearchParams({
-        singleEvents: 'true',
-        orderBy: 'startTime',
-        maxResults: '10',
-        showDeleted: 'false',
-        q: query,
+    await withCalendarAccessToken(tokenEnv, async (token) => {
+      const results = await settleCalendarWork(calendarIds, async (calendarId) => {
+        const params = new URLSearchParams({
+          singleEvents: 'true',
+          orderBy: 'startTime',
+          maxResults: '10',
+          showDeleted: 'false',
+          q: query,
+        });
+        params.set('timeMin', toGoogleCalendarTimeBoundary(action.timeMin ?? defaultTimeMin));
+        params.set('timeMax', toGoogleCalendarTimeBoundary(action.timeMax ?? defaultTimeMax));
+        return calendarApiListItems<GoogleCalendarEvent>(
+          `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
+          token,
+          10,
+        );
       });
-      params.set('timeMin', toGoogleCalendarTimeBoundary(action.timeMin ?? defaultTimeMin));
-      params.set('timeMax', toGoogleCalendarTimeBoundary(action.timeMax ?? defaultTimeMax));
-      const payload = await calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
-        `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
-        token,
-      );
-      candidates.push(...(payload.items ?? []).filter((ev) => ev.status !== 'cancelled').map((ev) => ({ ...ev, calendarId })));
-    }
+      const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      const authFailure = rejected.find((result) => result.reason instanceof CalendarApiError && result.reason.status === 401);
+      if (authFailure) throw authFailure.reason;
+      if (rejected.length === results.length) throw rejected[0]!.reason;
+      results.forEach((result, index) => {
+        const calendarId = calendarIds[index] ?? 'unknown';
+        if (result.status === 'rejected') {
+          failedCalendarIds.add(calendarId);
+          return;
+        }
+        candidates.push(...result.value
+          .filter((ev) => ev.status !== 'cancelled')
+          .map((ev) => ({ ...ev, calendarId })));
+      });
+    });
   };
 
   await searchCandidates(action.q);
   const looseQuery = candidates.length === 0 ? loosenEventSearchQuery(action.q) : undefined;
   if (looseQuery) await searchCandidates(looseQuery);
 
-  if (candidates.length === 0) return { status: 'not_found', message: `Je n'ai trouvé aucun événement correspondant à "${action.q}".` };
-  if (candidates.length > 1) {
-    const disambiguationCandidates = candidates.slice(0, 5).map((ev, index) => ({
-      index: index + 1,
-      eventId: ev.id,
-      calendarId: ev.calendarId,
-      title: ev.summary?.trim() || '(sans titre)',
-      start: ev.start?.dateTime ?? ev.start?.date ?? '',
-    }));
+  const uniqueCandidates = [...new Map(candidates.map((event) => [
+    `${event.iCalUID?.trim() || event.id}|${event.start?.dateTime ?? event.start?.date ?? ''}`,
+    event,
+  ])).values()];
+
+  const disambiguationCandidates = uniqueCandidates.slice(0, 5).map((ev, index) => ({
+    index: index + 1,
+    eventId: ev.id,
+    calendarId: ev.calendarId,
+    title: ev.summary?.trim() || '(sans titre)',
+    start: ev.start?.dateTime ?? ev.start?.date ?? '',
+  }));
+
+  if (failedCalendarIds.size > 0) {
     const lines = disambiguationCandidates.map((ev) => `${ev.index}. ${ev.title}, ${ev.start}`);
-    return { status: 'ambiguous', action, candidates: disambiguationCandidates, message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
-    // eslint-disable-next-line no-unreachable
-    return { status: 'ambiguous', message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
+    const suffix = lines.length > 0 ? ` Événements disponibles : ${lines.join(' ; ')}` : '';
+    return {
+      status: 'ambiguous',
+      action,
+      candidates: disambiguationCandidates,
+      message: `Je ne peux pas identifier l'événement de façon sûre : agendas indisponibles (${[...failedCalendarIds].join(', ')}).${suffix}`,
+    };
   }
 
-  const event = candidates[0]!;
+  if (uniqueCandidates.length === 0) return { status: 'not_found', message: `Je n'ai trouvé aucun événement correspondant à "${action.q}".` };
+  if (uniqueCandidates.length > 1) {
+    const lines = disambiguationCandidates.map((ev) => `${ev.index}. ${ev.title}, ${ev.start}`);
+    return { status: 'ambiguous', action, candidates: disambiguationCandidates, message: `J'ai trouvé plusieurs événements. Lequel dois-je modifier ? ${lines.join(' ; ')}` };
+  }
+
+  const event = uniqueCandidates[0]!;
   const resolved: ResolvedCalendarMutationAction = { ...action, eventId: event.id, calendarId: event.calendarId };
   return {
     status: 'ready',
@@ -645,7 +726,7 @@ function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): str
       weekday: 'long',
       day: 'numeric',
       month: 'long',
-      timeZone: 'Europe/Paris',
+      timeZone: 'UTC',
     });
   }
   return start.toLocaleString('fr-FR', {
@@ -656,6 +737,66 @@ function formatCreatedEventDate(ev: GoogleCalendarEvent, isAllDay: boolean): str
     minute: '2-digit',
     timeZone: 'Europe/Paris',
   });
+}
+
+const CREATE_OPERATION_TTL_MS = 30 * 60_000;
+const CREATE_OPERATION_MAX_ENTRIES = 1_000;
+const _createOperationIds = new Map<string, { eventId: string; expiresAt: number }>();
+
+function createOperationKey(calendarId: string, body: Record<string, unknown>): string {
+  return createHash('sha256')
+    .update(calendarId)
+    .update('\0')
+    .update(JSON.stringify(body))
+    .digest('hex');
+}
+
+function eventIdForCreateOperation(calendarId: string, body: Record<string, unknown>): string {
+  const now = Date.now();
+  for (const [key, value] of _createOperationIds) {
+    if (value.expiresAt <= now) _createOperationIds.delete(key);
+  }
+  const key = createOperationKey(calendarId, body);
+  const existing = _createOperationIds.get(key);
+  if (existing) return existing.eventId;
+  if (_createOperationIds.size >= CREATE_OPERATION_MAX_ENTRIES) {
+    const oldest = _createOperationIds.keys().next().value as string | undefined;
+    if (oldest) _createOperationIds.delete(oldest);
+  }
+  const eventId = createHash('sha256').update(randomBytes(32)).digest('hex').slice(0, 32);
+  _createOperationIds.set(key, { eventId, expiresAt: now + CREATE_OPERATION_TTL_MS });
+  return eventId;
+}
+
+async function createCalendarEvent(
+  calendarId: string,
+  token: string,
+  body: Record<string, unknown>,
+): Promise<GoogleCalendarEvent> {
+  const eventId = eventIdForCreateOperation(calendarId, body);
+  try {
+    const created = await calendarApiRequest<GoogleCalendarEvent>(
+      `/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
+      token,
+      { method: 'POST', body: { ...body, id: eventId } },
+    );
+    if (created.id !== eventId) throw new CalendarApiError('POST', 'uncertain');
+    return created;
+  } catch (error) {
+    if (!(error instanceof CalendarApiError) || error.status !== 409) throw error;
+    try {
+      const existing = await calendarApiRequest<GoogleCalendarEvent>(
+        `/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+        token,
+      );
+      if (existing.id === eventId) return existing;
+    } catch (readError) {
+      if (readError instanceof CalendarApiError && readError.status === 401) throw readError;
+      // The duplicate response proves that the identifier exists, but not that
+      // the corresponding event can currently be read and attributed safely.
+    }
+    throw new CalendarApiError('POST', 'uncertain', 409);
+  }
 }
 
 async function executeCalendarAction(
@@ -681,7 +822,7 @@ async function executeCalendarAction(
         20,
       );
       if (result.failedCalendarIds.length === calendarIds.length) {
-        throw new Error('calendar_all_sources_unavailable');
+        throw result.failures[0]?.error ?? new Error('calendar_all_sources_unavailable');
       }
       const partialWarning = result.failedCalendarIds.length > 0
         ? `Résultats partiels : agendas indisponibles (${result.failedCalendarIds.join(', ')}).`
@@ -699,14 +840,14 @@ async function executeCalendarAction(
     }
 
     case 'search_events': {
-      const token = await refreshCalendarToken(tokenEnv);
       const calendarIds = plan.calendarId
         ? [plan.calendarId]
         : parseCalendarIds(env.GOOGLE_CALENDAR_CALENDAR_IDS);
       const maxResults = Math.max(1, Math.min(20, plan.maxResults ?? 5));
 
-      const perCalendar = await Promise.allSettled(
-        calendarIds.map((id) => {
+      const perCalendar = await withCalendarAccessToken(tokenEnv, async (token) => settleCalendarWork(
+        calendarIds,
+        async (id) => {
           const params = new URLSearchParams({
             singleEvents: 'true',
             orderBy:      'startTime',
@@ -716,17 +857,24 @@ async function executeCalendarAction(
           });
           if (plan.timeMin) params.set('timeMin', toGoogleCalendarTimeBoundary(plan.timeMin));
           if (plan.timeMax) params.set('timeMax', toGoogleCalendarTimeBoundary(plan.timeMax));
-          return calendarApiRequest<{ items?: GoogleCalendarEvent[] }>(
+          return calendarApiListItems<GoogleCalendarEvent>(
             `/calendars/${encodeURIComponent(id)}/events?${params.toString()}`,
             token,
+            maxResults,
           );
-        }),
-      );
+        },
+      ).then((results) => {
+        const rejected = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+        const authFailure = rejected.find((result) => result.reason instanceof CalendarApiError && result.reason.status === 401);
+        if (authFailure) throw authFailure.reason;
+        if (rejected.length === results.length) throw rejected[0]!.reason;
+        return results;
+      }));
 
       const all: GoogleCalendarEvent[] = [];
       const failedCalendarIds: string[] = [];
       for (const [index, r] of perCalendar.entries()) {
-        if (r.status === 'fulfilled') all.push(...(r.value.items ?? []));
+        if (r.status === 'fulfilled') all.push(...r.value);
         else failedCalendarIds.push(calendarIds[index] ?? 'unknown');
       }
       if (failedCalendarIds.length === calendarIds.length) {
@@ -735,7 +883,12 @@ async function executeCalendarAction(
       const partialWarning = failedCalendarIds.length > 0
         ? `Résultats partiels : agendas indisponibles (${failedCalendarIds.join(', ')}).`
         : '';
-      const active = all.filter((ev) => ev.status !== 'cancelled');
+      const active = [...new Map(all
+        .filter((ev) => ev.status !== 'cancelled')
+        .map((event) => [
+          `${event.iCalUID?.trim() || event.id}|${event.start?.dateTime ?? event.start?.date ?? ''}`,
+          event,
+        ])).values()];
       active.sort((a, b) => {
         const aS = a.start?.dateTime ?? a.start?.date ?? '';
         const bS = b.start?.dateTime ?? b.start?.date ?? '';
@@ -757,26 +910,24 @@ async function executeCalendarAction(
     }
 
     case 'create_event': {
-      const token = await refreshCalendarToken(tokenEnv);
       const calendarId = resolveCreateCalendarId(plan, env);
 
       const eventBody: Record<string, unknown> = {
         summary: plan.summary,
         start: plan.isAllDay
           ? { date: plan.start }
-          : { dateTime: plan.start.includes('T') ? plan.start : `${plan.start}T00:00:00`, timeZone: 'Europe/Paris' },
+          : googleTimedDateTime(plan.start.includes('T') ? plan.start : `${plan.start}T00:00:00`),
         end: plan.isAllDay
           ? { date: plan.end }
-          : { dateTime: plan.end.includes('T') ? plan.end : `${plan.end}T00:00:00`, timeZone: 'Europe/Paris' },
+          : googleTimedDateTime(plan.end.includes('T') ? plan.end : `${plan.end}T00:00:00`),
       };
       eventBody['reminders'] = { useDefault: false, overrides: [] };
       if (plan.description) eventBody['description'] = plan.description;
       if (plan.location)    eventBody['location']    = plan.location;
 
-      const created = await calendarApiRequest<GoogleCalendarEvent>(
-        `/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
-        token,
-        { method: 'POST', body: eventBody },
+      const created = await withCalendarAccessToken(
+        tokenEnv,
+        (token) => createCalendarEvent(calendarId, token, eventBody),
       );
 
       const isAllDay = Boolean(plan.isAllDay);
@@ -788,35 +939,47 @@ async function executeCalendarAction(
 
     case 'delete_event': {
       if (!plan.eventId || !plan.calendarId) return 'Je dois d abord identifier un seul événement à supprimer.';
-      const token = await refreshCalendarToken(tokenEnv);
-      await calendarApiRequest<undefined>(
-        `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}?sendUpdates=none`,
-        token,
-        { method: 'DELETE' },
-      );
+      await withCalendarAccessToken(tokenEnv, async (token) => {
+        try {
+          await calendarApiRequest<undefined>(
+            `/calendars/${encodeURIComponent(plan.calendarId!)}/events/${encodeURIComponent(plan.eventId!)}?sendUpdates=none`,
+            token,
+            { method: 'DELETE' },
+          );
+        } catch (error) {
+          if (error instanceof CalendarApiError && error.status === 404) return;
+          throw error;
+        }
+      });
       return `C'est fait, l'événement "${plan.q}" est supprimé.`;
     }
 
     case 'update_event':
     case 'remove_from_event': {
       if (!plan.eventId || !plan.calendarId) return 'Je dois d abord identifier un seul événement à modifier.';
-      const token = await refreshCalendarToken(tokenEnv);
-      const existing = plan.action === 'remove_from_event' || (plan.action === 'update_event' && Boolean(plan.start) && !plan.end)
-        ? await calendarApiRequest<GoogleCalendarEvent>(
-          `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}`,
+      const outcome = await withCalendarAccessToken(tokenEnv, async (token) => {
+        const existing = plan.action === 'remove_from_event' || (plan.action === 'update_event' && Boolean(plan.start) && !plan.end)
+          ? await calendarApiRequest<GoogleCalendarEvent>(
+            `/calendars/${encodeURIComponent(plan.calendarId!)}/events/${encodeURIComponent(plan.eventId!)}`,
+            token,
+          )
+          : undefined;
+        if (plan.action === 'remove_from_event' && plan.field === 'attendee') {
+          const found = (existing?.attendees ?? []).some((attendee) => attendee.email?.toLowerCase() === plan.attendeeEmail?.toLowerCase());
+          if (!found) return 'attendee_not_found' as const;
+        }
+        const patch = buildMutationPatch(plan, existing);
+        const updated = await calendarApiRequest<GoogleCalendarEvent>(
+          `/calendars/${encodeURIComponent(plan.calendarId!)}/events/${encodeURIComponent(plan.eventId!)}?sendUpdates=none`,
           token,
-        )
-        : undefined;
-      if (plan.action === 'remove_from_event' && plan.field === 'attendee') {
-        const found = (existing?.attendees ?? []).some((attendee) => attendee.email?.toLowerCase() === plan.attendeeEmail?.toLowerCase());
-        if (!found) return `Je n'ai pas trouvé l'invité ${plan.attendeeEmail} sur cet événement.`;
+          { method: 'PATCH', body: patch },
+        );
+        if (updated.id !== plan.eventId) throw new CalendarApiError('PATCH', 'uncertain');
+        return 'updated' as const;
+      });
+      if (outcome === 'attendee_not_found' && plan.action === 'remove_from_event') {
+        return `Je n'ai pas trouvé l'invité ${plan.attendeeEmail} sur cet événement.`;
       }
-      const patch = buildMutationPatch(plan, existing);
-      await calendarApiRequest<GoogleCalendarEvent>(
-        `/calendars/${encodeURIComponent(plan.calendarId)}/events/${encodeURIComponent(plan.eventId)}?sendUpdates=none`,
-        token,
-        { method: 'PATCH', body: patch },
-      );
       return `C'est fait, l'événement "${plan.q}" est modifié.`;
     }
 
