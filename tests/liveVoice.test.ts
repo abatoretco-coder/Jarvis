@@ -62,6 +62,7 @@ describe('GPT-Live foundations', () => {
     expect(canUseLivePilot(service, true)).toBe(false);
     expect(canUseLivePilot(resident, false)).toBe(true);
     expect(liveEnv().OPENAI_LIVE_PILOT_OWNER_ONLY).toBe(true);
+    expect(liveEnv().OPENAI_LIVE_IDLE_TIMEOUT_MS).toBe(3_000);
   });
 
   test('stores only a device hash and durable delegation metadata', () => {
