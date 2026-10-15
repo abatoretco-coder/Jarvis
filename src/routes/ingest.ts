@@ -25,6 +25,7 @@ import type { ProactiveContextDomain } from '../context/ProactiveContextCache';
 import { enrichWithContextNote } from '../conversation/contextNote';
 import { ConversationService } from '../conversation/ConversationService';
 import { detectEffectiveThreadId } from '../conversation/conversationWindow';
+import { HaConversationAgentInventory } from '../conversation/HaConversationAgentInventory';
 import {
   type AgentRouteEntry,
   HOME_CONTROL_ROUTER_AGENT_ID,
@@ -1316,6 +1317,9 @@ function findPreparedContextAnswer(
 
 export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   const runtimeCfg = INGEST_RUNTIME_TUNING_CONFIG;
+  const haConversationAgentInventory = deps.ha
+    ? new HaConversationAgentInventory(deps.ha)
+    : undefined;
 
   app.addHook('preSerialization', async (req, _reply, payload) =>
     req.routeOptions.url === '/v1/ingest' ? ensureResponseTextVariants(payload) : payload
@@ -4255,7 +4259,17 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
     // remain available for utilities with no direct device equivalent (timer,
     // reminder, alarm, note), but it receives a distinct router identity and
     // must never be selected for TV/light/climate/vacuum actions.
-    const configuredAgentEntries = parseAgentMap(deps.env.HA_AGENT_MAP);
+    const configuredAgentEntriesRaw = parseAgentMap(deps.env.HA_AGENT_MAP);
+    const conversationAgentSnapshot = haConversationAgentInventory
+      ? await haConversationAgentInventory.getSnapshot()
+      : undefined;
+    const configuredAgentEntries = configuredAgentEntriesRaw.filter((entry) => {
+      if (!conversationAgentSnapshot || !haConversationAgentInventory) return true;
+      return haConversationAgentInventory.isEntityStyleAgentAvailable(
+        entry.agentId,
+        conversationAgentSnapshot
+      ) !== false;
+    });
     const spotifyEntry = spotifyWebApi().isConfigured() && hasRequestPermission(req, 'music')
       ? {
           agentId: SPOTIFY_AGENT_ID,
@@ -4272,6 +4286,34 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
         }
       : null;
     const generalAgentId = deps.env.HA_AGENT_GENERAL;
+    const generalHaAgentAvailable = !conversationAgentSnapshot || !haConversationAgentInventory
+      ? true
+      : haConversationAgentInventory.isEntityStyleAgentAvailable(
+          generalAgentId,
+          conversationAgentSnapshot
+        ) !== false;
+    if (conversationAgentSnapshot && !conversationAgentSnapshot.cached) {
+      const unavailableAgentIds = [
+        generalAgentId,
+        ...configuredAgentEntriesRaw.map((entry) => entry.agentId),
+      ].filter((agentId, index, all) => (
+        all.indexOf(agentId) === index &&
+        haConversationAgentInventory?.isEntityStyleAgentAvailable(
+          agentId,
+          conversationAgentSnapshot
+        ) === false
+      ));
+      if (unavailableAgentIds.length > 0) {
+        app.log.warn(
+          {
+            errorCode: 'ha_conversation_agents_unavailable',
+            agentIds: unavailableAgentIds,
+            inventoryAvailable: conversationAgentSnapshot.available,
+          },
+          'configured Home Assistant conversation agents are unavailable'
+        );
+      }
+    }
     const legacyUtilityEntry = resolveLegacyUtilityEntry(configuredAgentEntries, generalAgentId);
     const agentEntries = configuredAgentEntries.map((entry) =>
       legacyUtilityEntry && entry.agentId === legacyUtilityEntry.agentId
@@ -5942,7 +5984,10 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
 
     // ── General conversation fallback ────────────────────────────────────────
     if (assistantText === undefined) {
-      if (deps.env.HA_BASE_URL && deps.env.HA_TOKEN) {
+      if (deps.env.HA_BASE_URL && deps.env.HA_TOKEN && !generalHaAgentAvailable) {
+        gracefulFallback = true;
+      }
+      if (deps.env.HA_BASE_URL && deps.env.HA_TOKEN && generalHaAgentAvailable) {
         if (denyUnless('chat')) return reply;
         try {
           assistantText = await conversationService.callHomeAssistantConversation(
@@ -6232,33 +6277,43 @@ export function registerIngestRoute(app: FastifyInstance, deps: AppDeps): void {
   });
 
   app.get('/v1/conversation-agent/screening', async (_req, reply) => {
-    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN || !deps.ha) {
+    if (!deps.env.HA_BASE_URL || !deps.env.HA_TOKEN || !haConversationAgentInventory) {
       return reply.code(503).send({ error: 'ha_not_configured' });
     }
 
-    const configuredAgentId = 'conversation.openai_conversation';
-    const preferredSecondaryAgentId = 'conversation.openai_conversation';
+    const configuredAgentId = deps.env.HA_AGENT_GENERAL;
+    const preferredSecondaryAgentId = 'conversation.home_assistant';
 
     try {
-      const statesRaw = await deps.ha.getStates();
-      const states = toEntityStates(statesRaw);
-      const conversationAgents = states
-        .map((item) => item.entity_id)
-        .filter((entityId) => entityId.startsWith('conversation.'))
-        .sort((a, b) => a.localeCompare(b));
+      const snapshot = await haConversationAgentInventory.getSnapshot({ force: true });
+      if (!snapshot.available) {
+        return reply.code(502).send({ error: 'ha_screening_failed' });
+      }
+      const conversationAgents = snapshot.agentIds;
 
-      const configuredAgentAvailable = conversationAgents.includes(configuredAgentId);
-      const secondaryAgentAvailable = conversationAgents.includes(preferredSecondaryAgentId);
+      const configuredAgentAvailable =
+        haConversationAgentInventory.isEntityStyleAgentAvailable(configuredAgentId, snapshot);
+      const secondaryAgentAvailable =
+        haConversationAgentInventory.isEntityStyleAgentAvailable(preferredSecondaryAgentId, snapshot);
+      const configuredAgents = [
+        configuredAgentId,
+        ...parseAgentMap(deps.env.HA_AGENT_MAP).map((entry) => entry.agentId),
+      ].filter((agentId, index, all) => all.indexOf(agentId) === index)
+        .map((agentId) => ({
+          agentId,
+          available: haConversationAgentInventory.isEntityStyleAgentAvailable(agentId, snapshot),
+        }));
 
       return reply.code(200).send({
         configuredAgentId,
         configuredAgentAvailable,
+        configuredAgents,
         preferredSecondaryAgentId,
         preferredSecondaryAgentAvailable: secondaryAgentAvailable,
         availableConversationAgents: conversationAgents,
         recommendation:
-          !configuredAgentAvailable && secondaryAgentAvailable
-            ? `Set HA_CONVERSATION_AGENT_ID=${preferredSecondaryAgentId} to use the secondary agent by default.`
+          configuredAgentAvailable === false && secondaryAgentAvailable
+            ? `Set HA_AGENT_GENERAL=${preferredSecondaryAgentId} to use the available built-in agent.`
             : undefined,
       });
     } catch (error) {

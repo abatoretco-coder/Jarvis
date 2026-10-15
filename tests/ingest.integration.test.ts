@@ -124,11 +124,25 @@ function makeEnv(dbPath: string, overrides: Partial<Env> = {}): Env {
   return { ...base, ...overrides } as Env;
 }
 
-function makeDeps(env: Env, haStates: unknown[] = []): AppDeps {
+function makeDeps(
+  env: Env,
+  haStates: unknown[] = [],
+  includeConfiguredConversationAgents = true
+): AppDeps {
+  const configuredConversationAgentIds = includeConfiguredConversationAgents
+    ? [
+        env.HA_AGENT_GENERAL,
+        ...(env.HA_AGENT_MAP ?? '').split('|').map((entry) => entry.split(':')[1]),
+      ].filter((agentId): agentId is string => Boolean(agentId?.startsWith('conversation.')))
+    : [];
+  const states = [
+    ...haStates,
+    ...configuredConversationAgentIds.map((entity_id) => ({ entity_id })),
+  ];
   return {
     env,
     ha: {
-      getStates: async () => haStates,
+      getStates: async () => states,
     } as AppDeps['ha'],
     spotifyWebApi: {
       isConfigured: () => false,
@@ -983,7 +997,7 @@ describe('/v1/ingest integration', () => {
     expect(calls[0]?.conversation_id).toBe('thread-b');
   });
 
-  it('falls back to OpenAI when the HA general conversation agent rejects the request', async () => {
+  it('skips an unavailable HA general conversation agent and uses OpenAI directly', async () => {
     const fetchMock = jest.fn(async (url: string) => {
       if (url === 'http://ha.test:8123/api/conversation/process') {
         return new Response(JSON.stringify({ error: 'agent_not_found' }), { status: 400 });
@@ -1009,7 +1023,9 @@ describe('/v1/ingest integration', () => {
       OPENAI_API_KEY: 'test-openai-key',
       HA_AGENT_MAP: undefined,
     });
-    registerIngestRoute(app, makeDeps(env));
+    registerIngestRoute(app, makeDeps(env, [
+      { entity_id: 'conversation.home_assistant' },
+    ], false));
 
     const response = await app.inject({
       method: 'POST',
@@ -1026,7 +1042,40 @@ describe('/v1/ingest integration', () => {
       responseText: 'Paris est la capitale de la France.',
       replyMeta: { kind: 'general', source: 'openai_general', fallbackReason: 'general_fallback' },
     });
-    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(2);
+    expect(nonTitleFetchCalls(fetchMock)).toHaveLength(1);
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain(
+      'http://ha.test:8123/api/conversation/process'
+    );
+  });
+
+  it('screens the configured runtime agents instead of hard-coded legacy ids', async () => {
+    const env = makeEnv(join(tempDir, 'conversation.sqlite'), {
+      HA_AGENT_GENERAL: 'conversation.missing_general',
+      HA_AGENT_MAP: 'executors:conversation.missing_executor:Legacy utility',
+    });
+    registerIngestRoute(app, makeDeps(env, [
+      { entity_id: 'conversation.home_assistant' },
+    ], false));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/conversation-agent/screening',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      configuredAgentId: 'conversation.missing_general',
+      configuredAgentAvailable: false,
+      preferredSecondaryAgentId: 'conversation.home_assistant',
+      preferredSecondaryAgentAvailable: true,
+      availableConversationAgents: ['conversation.home_assistant'],
+      configuredAgents: [
+        { agentId: 'conversation.missing_general', available: false },
+        { agentId: 'conversation.missing_executor', available: false },
+      ],
+      recommendation:
+        'Set HA_AGENT_GENERAL=conversation.home_assistant to use the available built-in agent.',
+    });
   });
 
   it('allows the general conversation target for a chat-scoped service principal', async () => {
@@ -1165,12 +1214,9 @@ describe('/v1/ingest integration', () => {
       })
     );
     const routedAgents = mockedRouteUserRequest.mock.calls[0]?.[0].agents ?? [];
-    expect(routedAgents).toEqual(
+    expect(routedAgents).not.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          agentId: 'conversation.legacy_executor',
-          routerId: 'home_utility',
-        }),
+        expect.objectContaining({ agentId: 'conversation.legacy_executor' }),
       ])
     );
   });
