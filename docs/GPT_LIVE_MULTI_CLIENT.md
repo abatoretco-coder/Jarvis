@@ -73,8 +73,8 @@ Avant toute tentative d'ingest, le client peut reprendre avec un transcript fina
 - Phase 0 fournisseur : WebRTC Desktop réel, sideband corrélé et fermeture gracieuse validés le 15 octobre 2026.
 - Backend : déployé sur le runtime PC public le 15 octobre 2026, migration SQLite 21 et sondes HTTPS/OIDC validées.
 - Desktop : release instrumentée installée sur le PC et pilote propriétaire actif avec `OPENAI_LIVE_ENABLED=true`, `OPENAI_LIVE_DESKTOP_ENABLED=true` et `OPENAI_LIVE_PILOT_OWNER_ONLY=true`.
-- Promotion Desktop : campagne mesurable ouverte à 0/30 conversations ; Android reste bloqué jusqu'à validation des mesures de connexion, latence, interruption et mutation exactement une fois.
-- Android : contrat et machine d'état compilent; choix WebRTC et activation bloqués jusqu'au test sur appareil réel.
+- Promotion Desktop : le rapport du 15 octobre contient 5 sessions connectées sur 5, 3 délégations `ingest_completed` et 2 `uncertain`. Le taux de connexion satisfait le seuil, mais l'échantillon de 30 conversations et l'absence d'échec non résolu ne sont pas encore atteints ; ces mesures mêlent les clients du pilote et ne constituent pas une promotion finale.
+- Android : pilote propriétaire actif sur le runtime PC avec `OPENAI_LIVE_ANDROID_ENABLED=true`. Le Samsung SM-S906U1 physique a validé SDP, `session.started`, audio bidirectionnel, Bluetooth A2DP, focus exclusif, bascule Wi-Fi, arrière-plan, fermeture serveur, délai d'inactivité de 3 secondes et sortie vers Réglages. La perte de focus est couverte automatiquement ; l'interruption par un appel téléphonique réel reste la dernière preuve matérielle avant promotion de WebRTC hors du build debug.
 - Home Assistant : validateur de fidélité implémenté; activation bloquée jusqu'au corpus de 50 phrases.
 
-Le runtime actif de cette promotion est le PC, pas VM400. Android et Home Assistant restent désactivés.
+Le runtime actif de cette promotion est le PC, pas VM400. Desktop et Android sont actifs uniquement pour le pilote propriétaire ; Home Assistant reste désactivé. Aucun déploiement VM400 ni changement de flag n'a été effectué pendant la validation Android.
