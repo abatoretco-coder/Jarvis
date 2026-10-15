@@ -1,7 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals';
 
 import { createConversationDb } from '../src/conversation/repositories/SqliteRepositories';
-import type { HomeAssistantClient } from '../src/haClient';
+import type { HomeAssistantAutomationConfig, HomeAssistantClient } from '../src/haClient';
 import {
   compileManagedAutomation,
   HomeAssistantAutomationService,
@@ -190,7 +190,16 @@ describe('HomeAssistantAutomationService', () => {
 
   test('reconciles a stale managed automation with the current scene mapping', async () => {
     let state = 'on';
-    const saveAutomationConfig = jest.fn(async (_id: string, _config: unknown) => undefined);
+    let currentConfig: HomeAssistantAutomationConfig = {
+      alias: 'Soirée',
+      description: 'jarvis-managed:v1:scene=scene-evening',
+      triggers: [{ trigger: 'time', at: '19:30:00' }],
+      conditions: [{ condition: 'time', weekday: ['mon'] }],
+      actions: [{ action: 'light.turn_on', target: { entity_id: 'light.old' } }],
+    };
+    const saveAutomationConfig = jest.fn(async (_id: string, config: HomeAssistantAutomationConfig) => {
+      currentConfig = config;
+    });
     const callService = jest.fn(async (input: {
       domain: string;
       service: string;
@@ -205,13 +214,7 @@ describe('HomeAssistantAutomationService', () => {
         state,
         attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
       }]),
-      getAutomationConfig: jest.fn(async () => ({
-        alias: 'Soirée',
-        description: 'jarvis-managed:v1:scene=scene-evening',
-        triggers: [{ trigger: 'time', at: '19:30:00' }],
-        conditions: [{ condition: 'time', weekday: ['mon'] }],
-        actions: [{ action: 'light.turn_on', target: { entity_id: 'light.old' } }],
-      })),
+      getAutomationConfig: jest.fn(async () => currentConfig),
       saveAutomationConfig,
       callService,
     } as unknown as HomeAssistantClient;
@@ -529,13 +532,83 @@ describe('HomeAssistantAutomationService', () => {
     expect(events.indexOf('second')).toBeGreaterThan(events.indexOf('first:end'));
   });
 
+  test('serializes an automation update behind catalog reconciliation', async () => {
+    const events: string[] = [];
+    let releaseMutation!: () => void;
+    const mutationBlocked = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    let currentConfig = compileManagedAutomation(catalog(), {
+      name: 'Soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: false,
+    });
+    const saveAutomationConfig = jest.fn(async (_id: string, config: HomeAssistantAutomationConfig) => {
+      events.push('save');
+      currentConfig = config;
+    });
+    const ha = {
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree', state: 'off',
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      getAutomationConfig: jest.fn(async () => currentConfig),
+      saveAutomationConfig,
+      callService: jest.fn(async () => ({ status: 200, data: [] })),
+    } as unknown as HomeAssistantClient;
+    const service = new HomeAssistantAutomationService(ha, catalog(), async () => undefined);
+
+    const reconciliation = service.reconcileCatalogMutation(async () => {
+      events.push('mutation:start');
+      await mutationBlocked;
+      events.push('mutation:end');
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const update = service.update('jarvis_schedule', {
+      name: 'Soirée tardive', sceneId: 'scene-evening', at: '20:30', weekdays: [1], enabled: false,
+    });
+    await Promise.resolve();
+    expect(saveAutomationConfig).not.toHaveBeenCalled();
+
+    releaseMutation();
+    await reconciliation;
+    await expect(update).resolves.toBe('succeeded');
+    expect(events.indexOf('save')).toBeGreaterThan(events.indexOf('mutation:end'));
+  });
+
+  test('does not report success or toggle state until the saved config is observable', async () => {
+    const staleConfig = compileManagedAutomation(catalog(), {
+      name: 'Ancienne soirée', sceneId: 'scene-evening', at: '19:30', weekdays: [1], enabled: true,
+    });
+    const callService = jest.fn();
+    const ha = {
+      getAutomationConfig: jest.fn(async () => staleConfig),
+      saveAutomationConfig: jest.fn(async () => undefined),
+      getStates: jest.fn(async () => [{
+        entity_id: 'automation.soiree', state: 'on',
+        attributes: { id: 'jarvis_schedule', friendly_name: 'Soirée' },
+      }]),
+      callService,
+    } as unknown as HomeAssistantClient;
+    const wait = jest.fn(async () => undefined);
+    const service = new HomeAssistantAutomationService(ha, catalog(), wait);
+
+    await expect(service.update('jarvis_schedule', {
+      name: 'Nouvelle soirée', sceneId: 'scene-evening', at: '20:30', weekdays: [2], enabled: false,
+    })).resolves.toBe('accepted');
+    expect(wait).toHaveBeenCalledTimes(19);
+    expect(callService).not.toHaveBeenCalled();
+  });
+
   test('waits for a saved automation to reload and applies the requested state', async () => {
     let savedId = '';
+    let savedConfig: unknown;
     const callService = jest.fn(async (_input: unknown) => ({ status: 200, data: [] }));
     const ha = {
-      saveAutomationConfig: jest.fn(async (id: string) => {
+      saveAutomationConfig: jest.fn(async (id: string, config: unknown) => {
         savedId = id;
+        savedConfig = config;
       }),
+      getAutomationConfig: jest.fn(async () => savedConfig),
       getStates: jest.fn(async () => [
         {
           entity_id: 'automation.jarvis_schedule',
