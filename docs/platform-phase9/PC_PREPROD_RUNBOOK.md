@@ -117,14 +117,14 @@ Après prévalidation, les données existantes sont déplacées sous `runtime/pc
 
 Pour `pc-preprod-full`, définir aussi `KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD`. Le script exige l’archive d’identité associée, l’extrait entièrement avant l’arrêt et exige la base Keycloak `h2/keycloakdb.mv.db` non vide.
 
-Si l’installation, la validation ou le démarrage échoue, le runtime partiel est arrêté, les nouveaux composants sont conservés sous `failed-install`, les anciens sont remis en place sans écrasement et leur redémarrage est tenté. Un échec de cette compensation produit `manual_recovery_required` et ne déclenche aucune suppression automatique.
+Si l’installation, la validation ou le démarrage échoue, le runtime partiel est arrêté. Avant le rollback, le script recoupe pour chaque composant la cible active, le staging, la quarantaine précédente et `failed-install`. Les indicateurs `previousMoved` et `installed` du journal ne sont jamais utilisés seuls comme preuve négative : une interruption peut avoir eu lieu après le déplacement mais avant leur écriture. Lorsque les chemins prouvent une séquence unique, les nouveaux composants sont conservés sous `failed-install`, les anciens sont remis en place sans écrasement et leur redémarrage est tenté. Toute provenance ambiguë produit `manual_recovery_required` sans déplacer ni supprimer les chemins concernés.
 
 ### Restauration interrompue
 
-Chaque étape sensible est enregistrée dans `runtime/pc-preprod/restore-state.json`. `start`, `restart`, `backup` et une nouvelle `restore` refusent de continuer si ce journal indique une opération inachevée. Un verrou exclusif empêche aussi deux opérations PC sensibles de se chevaucher.
+Chaque étape sensible est enregistrée dans `runtime/pc-preprod/restore-state.json`. `start`, `restart`, `backup` et une nouvelle `restore` refusent de continuer si ce journal indique une opération inachevée. Lors de cette détection, le script examine les chemins réels et écrit `runtime/pc-preprod/restore-state.reconciliation.json` avec l’état reconstruit ou l’ambiguïté constatée ; il ne déplace rien automatiquement car l’état du runtime après une interruption de processus ne peut pas être prouvé par les seuls fichiers. Un verrou exclusif empêche aussi deux opérations PC sensibles de se chevaucher.
 
 1. Arrêter le profil et copier le journal ainsi que tout le dossier `restore-quarantine/<operationId>` vers un emplacement de diagnostic.
-2. Comparer les chemins `target`, `staged` et `previous` du journal avec les fichiers présents. Ne rien écraser et ne rien supprimer tant que l’état de chaque composant n’est pas établi.
+2. Lire le rapport `restore-state.reconciliation.json`, puis comparer les chemins `target`, `staged`, `previous` et `failed-install` avec les fichiers présents. Ne rien écraser et ne rien supprimer tant que l’état de chaque composant n’est pas établi.
 3. Vérifier la base choisie avec `npm run db:conversation -- verify --source <chemin>` ; vérifier les `home.json` et, pour le profil complet, `identity/h2/keycloakdb.mv.db`.
 4. Remettre soit l’ensemble précédent, soit l’ensemble restauré complet. Ne jamais mélanger les générations.
 5. Après vérification seulement, conserver une copie du journal puis marquer son `state` `rolled_back` ou `completed`. Redémarrer et contrôler `/ready`.

@@ -43,6 +43,7 @@ function Assert-NoInterruptedRestore {
   $stateProperty = $journal.PSObject.Properties['state']
   if ($null -eq $stateProperty) { throw "restore_journal_invalid_state:$JournalPath" }
   if ($stateProperty.Value -in @('completed', 'rolled_back')) { return }
+  Write-InterruptedRestoreReconciliation $JournalPath $journal
   throw "restore_interrupted_manual_recovery_required:$JournalPath"
 }
 
@@ -210,6 +211,129 @@ function Test-RestoreManifestIfPresent {
   return $true
 }
 
+function Get-RestoreComponentObservation {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $true)]$ComponentState,
+    [Parameter(Mandatory = $true)][string]$FailedPath
+  )
+
+  $target = [string]$ComponentState.target
+  $staged = [string]$ComponentState.staged
+  $previous = [string]$ComponentState.previous
+  $hadPrevious = [bool]$ComponentState.hadPrevious
+  $targetExists = Test-Path -LiteralPath $target
+  $stagedConfigured = -not [string]::IsNullOrWhiteSpace($staged)
+  $stagedExists = $stagedConfigured -and (Test-Path -LiteralPath $staged)
+  $previousExists = Test-Path -LiteralPath $previous
+  $failedExists = Test-Path -LiteralPath $FailedPath
+
+  $observation = [ordered]@{
+    previousMoved = $false
+    installed = $false
+    rollbackComplete = $false
+  }
+
+  if ($failedExists) {
+    if ($hadPrevious -and $previousExists -and -not $targetExists) {
+      $observation.previousMoved = $true
+      return $observation
+    }
+    if ($hadPrevious -and -not $previousExists -and $targetExists) {
+      $observation.rollbackComplete = $true
+      return $observation
+    }
+    if (-not $hadPrevious -and -not $previousExists -and -not $targetExists) {
+      $observation.rollbackComplete = $true
+      return $observation
+    }
+    throw "restore_component_state_ambiguous:$Name"
+  }
+
+  if ($hadPrevious) {
+    if ($previousExists) {
+      $observation.previousMoved = $true
+      if ($targetExists) {
+        if (-not $stagedConfigured -or $stagedExists) {
+          throw "restore_component_state_ambiguous:$Name"
+        }
+        $observation.installed = $true
+      }
+      return $observation
+    }
+    if (-not $targetExists) { throw "restore_component_previous_missing:$Name" }
+    if (-not $stagedConfigured -or $stagedExists) { return $observation }
+    throw "restore_component_state_ambiguous:$Name"
+  }
+
+  if ($previousExists) { throw "restore_component_unexpected_previous:$Name" }
+  if ($targetExists) {
+    if (-not $stagedConfigured -or $stagedExists) {
+      throw "restore_component_state_ambiguous:$Name"
+    }
+    $observation.installed = $true
+    return $observation
+  }
+  if ($stagedExists) { return $observation }
+  throw "restore_component_state_ambiguous:$Name"
+}
+
+function Write-InterruptedRestoreReconciliation {
+  param(
+    [Parameter(Mandatory = $true)][string]$JournalPath,
+    [Parameter(Mandatory = $true)]$Journal
+  )
+
+  $reportPath = $JournalPath -replace '\.json$', '.reconciliation.json'
+  $observations = [ordered]@{}
+  $safe = $true
+  $componentsProperty = $Journal.PSObject.Properties['components']
+  if ($null -ne $componentsProperty) {
+    foreach ($componentProperty in $componentsProperty.Value.PSObject.Properties) {
+      $name = $componentProperty.Name
+      try {
+        $observation = Get-RestoreComponentObservation `
+          -Name $name `
+          -ComponentState $componentProperty.Value `
+          -FailedPath (Join-Path ([string]$Journal.quarantineRoot) "failed-install\$name")
+        $observations[$name] = $observation
+      } catch {
+        $safe = $false
+        $observations[$name] = [ordered]@{ error = $_.Exception.Message }
+      }
+    }
+  } else {
+    $safe = $false
+  }
+  $report = [ordered]@{
+    schemaVersion = 1
+    operationId = $Journal.operationId
+    journalState = $Journal.state
+    safeComponentObservations = $safe
+    components = $observations
+  }
+  Write-RestoreJournal $reportPath $report
+}
+
+function Sync-RestoreJournalWithFileSystem {
+  param(
+    [Parameter(Mandatory = $true)][Collections.IDictionary]$Journal,
+    [Parameter(Mandatory = $true)][string]$FailedInstallRoot
+  )
+
+  foreach ($name in @($Journal.components.Keys)) {
+    $state = $Journal.components[$name]
+    $observation = Get-RestoreComponentObservation `
+      -Name $name `
+      -ComponentState $state `
+      -FailedPath (Join-Path $FailedInstallRoot $name)
+    $state.previousMoved = $observation.previousMoved
+    $state.installed = $observation.installed
+    $state.rollbackComplete = $observation.rollbackComplete
+  }
+  $Journal.reconciledAtUtc = [DateTime]::UtcNow.ToString('o')
+}
+
 function Invoke-ControlledRestoreInstallation {
   param(
     [Parameter(Mandatory = $true)][string]$JournalPath,
@@ -272,6 +396,8 @@ function Invoke-ControlledRestoreInstallation {
     try { Write-RestoreJournal $JournalPath $Journal } catch { }
     try {
       if ($PrepareRollback) { & $PrepareRollback }
+      Sync-RestoreJournalWithFileSystem $Journal $installedRoot
+      Write-RestoreJournal $JournalPath $Journal
       New-Item -ItemType Directory -Path $installedRoot -Force | Out-Null
       $rollbackComponents = @($Components)
       [Array]::Reverse($rollbackComponents)

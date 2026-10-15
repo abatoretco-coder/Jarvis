@@ -85,6 +85,38 @@ function New-TestJournal([string]$Name) {
   }
 }
 
+function New-SingleComponentFixture([string]$Name, [string]$ComponentName) {
+  $root = Join-Path $testRoot $Name
+  $active = Join-Path $root 'active'
+  $stagedRoot = Join-Path $root 'staged'
+  New-Item -ItemType Directory -Path $active, $stagedRoot -Force | Out-Null
+  if ($ComponentName -eq 'database') {
+    $target = Join-Path $active 'conversation.sqlite'
+    $staged = Join-Path $stagedRoot 'conversation.sqlite'
+    [IO.File]::WriteAllText($target, 'old-database')
+    [IO.File]::WriteAllText($staged, 'new-database')
+  } else {
+    $target = Join-Path $active $ComponentName
+    $staged = Join-Path $stagedRoot $ComponentName
+    New-Item -ItemType Directory -Path $target, $staged -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $target 'marker.txt'), "old-$ComponentName")
+    [IO.File]::WriteAllText((Join-Path $staged 'marker.txt'), "new-$ComponentName")
+  }
+  return @{
+    Root = $root
+    Journal = Join-Path $root 'restore-state.json'
+    Quarantine = Join-Path $root 'quarantine'
+    Target = $target
+    Staged = $staged
+    Component = @{ Name = $ComponentName; Staged = $staged; Target = $target }
+  }
+}
+
+function Read-ComponentMarker([string]$ComponentName, [string]$Path) {
+  if ($ComponentName -eq 'database') { return Get-Content -Raw $Path }
+  return Get-Content -Raw (Join-Path $Path 'marker.txt')
+}
+
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
   Invoke-Test 'corrupt decrypted identity ZIP is rejected before extraction' {
@@ -213,6 +245,85 @@ try {
     Assert-True (Test-Path -LiteralPath $fixture.NewDatabase) 'staged database was lost'
   }
 
+  foreach ($componentName in @('database', 'homes', 'identity')) {
+    Invoke-Test "reconciles $componentName interruption after previous data moved but before journal update" {
+      $fixture = New-SingleComponentFixture "post-previous-$componentName" $componentName
+      $move = {
+        param($Source, $Destination)
+        Move-Item -LiteralPath $Source -Destination $Destination
+        if ($Source -eq $fixture.Target) { throw "simulated_post_previous_move_$componentName" }
+      }
+      Assert-Throws {
+        Invoke-ControlledRestoreInstallation `
+          -JournalPath $fixture.Journal `
+          -Journal (New-TestJournal "post-previous-$componentName") `
+          -Components @($fixture.Component) `
+          -QuarantineRoot $fixture.Quarantine `
+          -ValidateInstalled {} `
+          -StartRuntime {} `
+          -MoveOperation $move
+      } "restore_failed_rolled_back:simulated_post_previous_move_$componentName"
+      Assert-True (
+        (Read-ComponentMarker $componentName $fixture.Target) -eq "old-$componentName"
+      ) "$componentName previous data was not restored"
+      Assert-True (Test-Path -LiteralPath $fixture.Staged) "$componentName staging was lost"
+      Assert-True ((Read-RestoreJournal $fixture.Journal).state -eq 'rolled_back') "$componentName rollback state is wrong"
+    }
+
+    Invoke-Test "reconciles $componentName interruption after new data installed but before journal update" {
+      $fixture = New-SingleComponentFixture "post-install-$componentName" $componentName
+      $move = {
+        param($Source, $Destination)
+        Move-Item -LiteralPath $Source -Destination $Destination
+        if ($Source -eq $fixture.Staged) { throw "simulated_post_install_move_$componentName" }
+      }
+      Assert-Throws {
+        Invoke-ControlledRestoreInstallation `
+          -JournalPath $fixture.Journal `
+          -Journal (New-TestJournal "post-install-$componentName") `
+          -Components @($fixture.Component) `
+          -QuarantineRoot $fixture.Quarantine `
+          -ValidateInstalled {} `
+          -StartRuntime {} `
+          -MoveOperation $move
+      } "restore_failed_rolled_back:simulated_post_install_move_$componentName"
+      Assert-True (
+        (Read-ComponentMarker $componentName $fixture.Target) -eq "old-$componentName"
+      ) "$componentName previous data was not restored"
+      $failed = Join-Path $fixture.Quarantine "failed-install\$componentName"
+      Assert-True (
+        (Read-ComponentMarker $componentName $failed) -eq "new-$componentName"
+      ) "$componentName installed data was not retained for diagnostics"
+      Assert-True ((Read-RestoreJournal $fixture.Journal).state -eq 'rolled_back') "$componentName rollback state is wrong"
+    }
+  }
+
+  Invoke-Test 'ambiguous component provenance blocks rollback without overwriting any path' {
+    $fixture = New-SingleComponentFixture 'ambiguous-provenance' 'homes'
+    $move = {
+      param($Source, $Destination)
+      Move-Item -LiteralPath $Source -Destination $Destination
+      if ($Source -eq $fixture.Target) {
+        New-Item -ItemType Directory -Path $fixture.Target -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fixture.Target 'marker.txt'), 'unknown-homes')
+        throw 'simulated_unknown_target_after_previous_move'
+      }
+    }
+    Assert-Throws {
+      Invoke-ControlledRestoreInstallation `
+        -JournalPath $fixture.Journal `
+        -Journal (New-TestJournal 'ambiguous-provenance') `
+        -Components @($fixture.Component) `
+        -QuarantineRoot $fixture.Quarantine `
+        -ValidateInstalled {} `
+        -StartRuntime {} `
+        -MoveOperation $move
+    } 'restore_failed_manual_recovery_required'
+    Assert-True ((Read-ComponentMarker 'homes' $fixture.Target) -eq 'unknown-homes') 'uncertain target was overwritten'
+    Assert-True ((Read-ComponentMarker 'homes' (Join-Path $fixture.Quarantine 'homes')) -eq 'old-homes') 'previous data was changed'
+    Assert-True ((Read-ComponentMarker 'homes' $fixture.Staged) -eq 'new-homes') 'staging data was changed'
+  }
+
   Invoke-Test 'Docker start failure stops the partial runtime and restores old data' {
     $fixture = New-InstallFixture 'docker-start-error'
     $calls = @{ Start = 0; Stop = 0 }
@@ -251,11 +362,30 @@ try {
   }
 
   Invoke-Test 'interrupted restoration blocks launch until state is reconciled' {
-    $journalPath = Join-Path $testRoot 'interrupted.json'
+    $fixture = New-SingleComponentFixture 'interrupted' 'identity'
+    $journalPath = $fixture.Journal
     $journal = New-TestJournal 'interrupted'
+    $previous = Join-Path $fixture.Quarantine 'identity'
+    New-Item -ItemType Directory -Path $fixture.Quarantine -Force | Out-Null
+    $journal.quarantineRoot = $fixture.Quarantine
+    $journal.components = @{
+      identity = [ordered]@{
+        target = $fixture.Target
+        staged = $fixture.Staged
+        previous = $previous
+        hadPrevious = $true
+        previousMoved = $false
+        installed = $false
+      }
+    }
     $journal.state = 'installing'
     Write-RestoreJournal $journalPath $journal
+    Move-Item -LiteralPath $fixture.Target -Destination $previous
     Assert-Throws { Assert-NoInterruptedRestore $journalPath } 'restore_interrupted_manual_recovery_required'
+    $report = Read-RestoreJournal ($journalPath -replace '\.json$', '.reconciliation.json')
+    Assert-True ($report.safeComponentObservations) 'interrupted state was not reconstructed'
+    Assert-True ($report.components.identity.previousMoved) 'quarantined identity was not detected'
+    Assert-True (-not $report.components.identity.installed) 'missing target was misclassified as installed'
     $journal.state = 'rolled_back'
     Write-RestoreJournal $journalPath $journal
     Assert-NoInterruptedRestore $journalPath
