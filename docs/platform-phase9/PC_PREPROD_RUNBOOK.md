@@ -93,14 +93,16 @@ npm run pc -- backup -Profile pc-preprod
 npm run pc -- drill -Profile pc-preprod
 ```
 
-Les sauvegardes persistantes sont écrites sous `runtime/backups`. Chaque point de sauvegarde comprend la base (`*.database.jarvisdb`) et le catalogue mutable des domiciles (`*.homes.zip.jarvisdb`) ; le profil complet ajoute les données d'identité (`*.identity.zip.jarvisdb`). Le service Jarvis est brièvement arrêté pour garantir la cohérence entre ces artefacts. Le drill vérifie aussi le chiffrement, le déchiffrement et le nombre de fichiers du home-store, puis supprime son dossier temporaire.
+Les sauvegardes persistantes sont écrites sous `runtime/backups`. Chaque point de sauvegarde comprend la base (`*.database.jarvisdb`), le catalogue mutable des domiciles (`*.homes.zip.jarvisdb`) et un manifeste chiffré (`*.manifest.json.jarvisdb`) portant les noms, tailles et SHA-256 des composants. Le profil complet ajoute les données d'identité (`*.identity.zip.jarvisdb`). Le service Jarvis est brièvement arrêté pour garantir la cohérence entre ces artefacts. Le drill vérifie aussi le chiffrement, le déchiffrement et le nombre de fichiers du home-store, puis supprime son dossier temporaire.
 
-Avec `-Profile pc-preprod-full`, la commande effectue un bref arrêt coordonné de Jarvis et Keycloak, puis crée deux fichiers chiffrés portant le même horodatage :
+Avec `-Profile pc-preprod-full`, la commande effectue un bref arrêt coordonné de Jarvis et Keycloak, puis crée quatre fichiers chiffrés portant le même horodatage :
 
 - `jarvis-AAAAMMJJ-HHMMSS.database.jarvisdb` pour SQLite ;
-- `jarvis-AAAAMMJJ-HHMMSS.identity.zip.jarvisdb` pour l’identité Keycloak.
+- `jarvis-AAAAMMJJ-HHMMSS.homes.zip.jarvisdb` pour le home-store ;
+- `jarvis-AAAAMMJJ-HHMMSS.identity.zip.jarvisdb` pour l’identité Keycloak ;
+- `jarvis-AAAAMMJJ-HHMMSS.manifest.json.jarvisdb` pour la cohérence de l’ensemble.
 
-Les services sont relancés même si la sauvegarde échoue. Conserver et copier hors du PC les deux fichiers de la paire.
+Les services sont relancés même si la sauvegarde échoue. Conserver et copier hors du PC tous les fichiers de l’ensemble. Les sauvegardes antérieures sans manifeste restent restaurables ; le script signale alors que la cohérence inter-composants ne peut être garantie que par les noms correspondants et leur structure interne.
 
 ## Restaurer
 
@@ -109,9 +111,29 @@ $env:JARVIS_BACKUP_PASSPHRASE = '<même phrase>'
 npm run pc -- restore -Profile pc-preprod -EnvFile ops/pc/env/pc-preprod.env -BackupPath runtime/backups/jarvis-AAAAMMJJ-HHMMSS.database.jarvisdb
 ```
 
-La commande exige la sauvegarde `homes` portant le même horodatage, arrête Jarvis, place la base et le home-store existants en quarantaine `pre-restore-*`, restaure les deux ensembles, puis redémarre. En cas d’échec, les données précédentes restent disponibles dans le dossier de données.
+Avant d’arrêter Jarvis, la commande déchiffre et vérifie SQLite, extrait entièrement les ZIP dans des dossiers temporaires, refuse les chemins hors destination, doublons, liens symboliques, archives vides ou trop volumineuses, puis contrôle les `home.json`. Le manifeste est vérifié lorsqu’il existe. Aucune donnée active n’est modifiée pendant cette prévalidation.
 
-Pour `pc-preprod-full`, définir aussi `KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD` et utiliser le fichier `*.database.jarvisdb` de la paire. Le script exige automatiquement le fichier d’identité associé, déchiffre et contrôle l’archive ZIP avant d’arrêter les services, puis met l’ancienne base et l’ancien dossier d’identité en quarantaine.
+Après prévalidation, les données existantes sont déplacées sous `runtime/pc-preprod/restore-quarantine/<operationId>`, puis les composants validés sont installés. SQLite et les structures Home/Identity sont revérifiés avant un `docker compose up --wait --wait-timeout 120`. Cette séquence est contrôlée et récupérable mais n’est pas une transaction atomique entre plusieurs chemins du système de fichiers.
+
+Pour `pc-preprod-full`, définir aussi `KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD`. Le script exige l’archive d’identité associée, l’extrait entièrement avant l’arrêt et exige la base Keycloak `h2/keycloakdb.mv.db` non vide.
+
+Si l’installation, la validation ou le démarrage échoue, le runtime partiel est arrêté, les nouveaux composants sont conservés sous `failed-install`, les anciens sont remis en place sans écrasement et leur redémarrage est tenté. Un échec de cette compensation produit `manual_recovery_required` et ne déclenche aucune suppression automatique.
+
+### Restauration interrompue
+
+Chaque étape sensible est enregistrée dans `runtime/pc-preprod/restore-state.json`. `start`, `restart`, `backup` et une nouvelle `restore` refusent de continuer si ce journal indique une opération inachevée. Un verrou exclusif empêche aussi deux opérations PC sensibles de se chevaucher.
+
+1. Arrêter le profil et copier le journal ainsi que tout le dossier `restore-quarantine/<operationId>` vers un emplacement de diagnostic.
+2. Comparer les chemins `target`, `staged` et `previous` du journal avec les fichiers présents. Ne rien écraser et ne rien supprimer tant que l’état de chaque composant n’est pas établi.
+3. Vérifier la base choisie avec `npm run db:conversation -- verify --source <chemin>` ; vérifier les `home.json` et, pour le profil complet, `identity/h2/keycloakdb.mv.db`.
+4. Remettre soit l’ensemble précédent, soit l’ensemble restauré complet. Ne jamais mélanger les générations.
+5. Après vérification seulement, conserver une copie du journal puis marquer son `state` `rolled_back` ou `completed`. Redémarrer et contrôler `/ready`.
+
+Le harnais local de défaillance, sans Docker ni données réelles, s’exécute avec :
+
+```powershell
+npm run test:pc-restore
+```
 
 ## Rollback applicatif
 

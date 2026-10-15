@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 Add-Type -AssemblyName System.Security
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'pc-restore.ps1')
 $composeFile = Join-Path $repositoryRoot 'compose.pc.yaml'
 $runtimeRoot = Join-Path $repositoryRoot 'runtime'
 $dataRoot = Join-Path $runtimeRoot 'pc-preprod\data'
@@ -23,6 +24,8 @@ $backupRoot = Join-Path $runtimeRoot 'backups'
 $secretsRoot = Join-Path $runtimeRoot 'pc-preprod\secrets'
 $protectedIdentitySecret = Join-Path $secretsRoot 'keycloak-bootstrap-admin.dpapi'
 $protectedBackupSecret = Join-Path $secretsRoot 'backup-passphrase.dpapi'
+$restoreJournalPath = Join-Path $runtimeRoot 'pc-preprod\restore-state.json'
+$runtimeOperationLockPath = Join-Path $runtimeRoot 'pc-preprod\backup-restore.lock'
 
 function New-RandomSecret([int]$Bytes = 48) {
   $buffer = [byte[]]::new($Bytes)
@@ -181,28 +184,6 @@ function Assert-IdentityBootstrapSecret() {
   }
 }
 
-function Expand-ValidatedArchive([string]$ArchivePath, [string]$DestinationPath) {
-  $destination = [IO.Path]::GetFullPath($DestinationPath)
-  $prefix = $destination.TrimEnd('\') + '\'
-  $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
-  try {
-    if ($archive.Entries.Count -gt 10000) { throw 'Archive contains too many entries.' }
-    [long]$expandedBytes = 0
-    foreach ($entry in $archive.Entries) {
-      $expandedBytes += $entry.Length
-      if ($expandedBytes -gt 2147483648) { throw 'Archive expands beyond the 2 GiB safety limit.' }
-      $candidate = [IO.Path]::GetFullPath((Join-Path $destination $entry.FullName))
-      if (-not $candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Archive contains an unsafe path.'
-      }
-    }
-  } finally {
-    $archive.Dispose()
-  }
-  New-Item -ItemType Directory -Path $destination -Force | Out-Null
-  Expand-Archive -LiteralPath $ArchivePath -DestinationPath $destination
-}
-
 if ($EnvFile) {
   $resolvedEnvFile = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $EnvFile))
   if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) {
@@ -212,8 +193,25 @@ if ($EnvFile) {
 }
 
 Push-Location $repositoryRoot
+$runtimeOperationLock = $null
 try {
   Import-ProtectedRuntimeSecrets
+  if ($Command -in @('start', 'restart', 'backup', 'restore')) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeOperationLockPath) -Force | Out-Null
+    try {
+      $runtimeOperationLock = [IO.File]::Open(
+        $runtimeOperationLockPath,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+      )
+    } catch {
+      throw 'pc_runtime_operation_already_in_progress'
+    }
+  }
+  if ($Command -in @('start', 'restart', 'backup', 'restore')) {
+    Assert-NoInterruptedRestore $restoreJournalPath
+  }
   switch ($Command) {
     'provision' {
       if ($Profile -ne 'pc-preprod-full') { throw 'Provisioning is only available for pc-preprod-full.' }
@@ -258,11 +256,16 @@ try {
       if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
         throw "Database not found: $databasePath"
       }
+      if (-not (Test-Path -LiteralPath $homesDataRoot -PathType Container)) {
+        throw "Homes data not found: $homesDataRoot"
+      }
+      Assert-HomesRestoreLayout $homesDataRoot
       if ($Profile -eq 'pc-preprod-full') {
         Assert-IdentityBootstrapSecret
         if (-not (Test-Path -LiteralPath $identityDataRoot -PathType Container)) {
           throw "Identity data not found: $identityDataRoot"
         }
+        Assert-IdentityRestoreLayout $identityDataRoot
       }
       New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
       $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -271,6 +274,8 @@ try {
       $encryptedIdentity = Join-Path $backupRoot ("jarvis-{0}.identity.zip.jarvisdb" -f $stamp)
       $homesArchive = Join-Path $backupRoot (".jarvis-{0}.homes.zip" -f $stamp)
       $encryptedHomes = Join-Path $backupRoot ("jarvis-{0}.homes.zip.jarvisdb" -f $stamp)
+      $manifest = Join-Path $backupRoot (".jarvis-{0}.manifest.json" -f $stamp)
+      $encryptedManifest = Join-Path $backupRoot ("jarvis-{0}.manifest.json.jarvisdb" -f $stamp)
       $runtimeStopped = $false
       $backupSucceeded = $false
       try {
@@ -282,7 +287,6 @@ try {
         npm run db:conversation -- secure-backup --source $databasePath --destination $destination
         if ($LASTEXITCODE -ne 0) { throw 'Encrypted backup failed.' }
         Write-Host "Encrypted backup created: $destination" -ForegroundColor Green
-        New-Item -ItemType Directory -Path $homesDataRoot -Force | Out-Null
         [IO.Compression.ZipFile]::CreateFromDirectory(
           $homesDataRoot,
           $homesArchive,
@@ -303,13 +307,37 @@ try {
           if ($LASTEXITCODE -ne 0) { throw 'Encrypted identity backup failed.' }
           Write-Host "Encrypted identity backup created: $encryptedIdentity" -ForegroundColor Green
         }
+        $manifestComponents = [ordered]@{
+          database = Get-RestoreManifestComponent $destination
+          homes = Get-RestoreManifestComponent $encryptedHomes
+        }
+        if ($Profile -eq 'pc-preprod-full') {
+          $manifestComponents.identity = Get-RestoreManifestComponent $encryptedIdentity
+        }
+        $manifestPayload = [ordered]@{
+          schemaVersion = 1
+          backupId = $stamp
+          createdAtUtc = [DateTime]::UtcNow.ToString('o')
+          profile = $Profile
+          components = $manifestComponents
+        }
+        [IO.File]::WriteAllText(
+          $manifest,
+          ($manifestPayload | ConvertTo-Json -Depth 6),
+          [Text.UTF8Encoding]::new($false)
+        )
+        npm run db:conversation -- encrypt-file --source $manifest --destination $encryptedManifest
+        if ($LASTEXITCODE -ne 0) { throw 'Encrypted backup manifest failed.' }
+        Write-Host "Encrypted backup manifest created: $encryptedManifest" -ForegroundColor Green
         $backupSucceeded = $true
       } finally {
         if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
         if (Test-Path -LiteralPath $homesArchive) { Remove-Item -LiteralPath $homesArchive -Force }
+        if (Test-Path -LiteralPath $manifest) { Remove-Item -LiteralPath $manifest -Force }
         if (-not $backupSucceeded) {
           if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Force }
           if (Test-Path -LiteralPath $encryptedHomes) { Remove-Item -LiteralPath $encryptedHomes -Force }
+          if (Test-Path -LiteralPath $encryptedManifest) { Remove-Item -LiteralPath $encryptedManifest -Force }
         }
         if ($Profile -eq 'pc-preprod-full' -and -not $backupSucceeded) {
           if (Test-Path -LiteralPath $encryptedIdentity) { Remove-Item -LiteralPath $encryptedIdentity -Force }
@@ -328,6 +356,7 @@ try {
       }
       $identitySource = $source -replace '\.database\.jarvisdb$', '.identity.zip.jarvisdb'
       $homesSource = $source -replace '\.database\.jarvisdb$', '.homes.zip.jarvisdb'
+      $manifestSource = $source -replace '\.database\.jarvisdb$', '.manifest.json.jarvisdb'
       if (-not (Test-Path -LiteralPath $homesSource -PathType Leaf)) {
         throw "Matching homes backup not found: $homesSource"
       }
@@ -338,54 +367,99 @@ try {
       $identityArchive = Join-Path $runtimeRoot (".identity-restore-{0}.zip" -f [Guid]::NewGuid().ToString('N'))
       $homesArchive = Join-Path $runtimeRoot (".homes-restore-{0}.zip" -f [Guid]::NewGuid().ToString('N'))
       $homesPreflight = Join-Path $runtimeRoot (".homes-restore-{0}" -f [Guid]::NewGuid().ToString('N'))
+      $identityPreflight = Join-Path $runtimeRoot (".identity-restore-{0}" -f [Guid]::NewGuid().ToString('N'))
+      $manifestPreflight = Join-Path $runtimeRoot (".manifest-restore-{0}.json" -f [Guid]::NewGuid().ToString('N'))
       try {
         npm run db:conversation -- secure-restore --source $source --destination $databasePreflight
         if ($LASTEXITCODE -ne 0) { throw 'Database backup preflight failed; no runtime data was changed.' }
         npm run db:conversation -- decrypt-file --source $homesSource --destination $homesArchive
         if ($LASTEXITCODE -ne 0) { throw 'Homes backup preflight decryption failed; no runtime data was changed.' }
-        New-Item -ItemType Directory -Path $homesPreflight -Force | Out-Null
         Expand-ValidatedArchive $homesArchive $homesPreflight
+        Assert-HomesRestoreLayout $homesPreflight
         if ($Profile -eq 'pc-preprod-full') {
           npm run db:conversation -- decrypt-file --source $identitySource --destination $identityArchive
           if ($LASTEXITCODE -ne 0) { throw 'Identity backup preflight decryption failed; no runtime data was changed.' }
-          $zip = [IO.Compression.ZipFile]::OpenRead($identityArchive)
-          try {
-            if ($zip.Entries.Count -eq 0) { throw 'Identity backup archive is empty.' }
-          } finally {
-            $zip.Dispose()
-          }
+          Expand-ValidatedArchive $identityArchive $identityPreflight
+          Assert-IdentityRestoreLayout $identityPreflight
         }
-        Invoke-Compose @('down', '--remove-orphans')
+        if (Test-Path -LiteralPath $manifestSource -PathType Leaf) {
+          npm run db:conversation -- decrypt-file --source $manifestSource --destination $manifestPreflight
+          if ($LASTEXITCODE -ne 0) { throw 'Backup manifest decryption failed; no runtime data was changed.' }
+          $manifestComponents = @{
+            database = $source
+            homes = $homesSource
+          }
+          if ($Profile -eq 'pc-preprod-full') { $manifestComponents.identity = $identitySource }
+          Test-RestoreManifestIfPresent $manifestPreflight $Profile $manifestComponents | Out-Null
+        } else {
+          Write-Warning 'Legacy backup has no encrypted manifest; sibling names and component structure were validated, but cross-component hashes are unavailable.'
+        }
+
+        $operationId = [Guid]::NewGuid().ToString('N')
+        $quarantineRoot = Assert-WithinRuntime (Join-Path $runtimeRoot "pc-preprod\restore-quarantine\$operationId")
+        $journal = [ordered]@{
+          schemaVersion = 1
+          operationId = $operationId
+          profile = $Profile
+          backupFile = [IO.Path]::GetFileName($source)
+          quarantineRoot = $quarantineRoot
+          staging = [ordered]@{
+            database = $databasePreflight
+            homes = $homesPreflight
+            identity = if ($Profile -eq 'pc-preprod-full') { $identityPreflight } else { $null }
+          }
+          state = 'prevalidated'
+          startedAtUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        Write-RestoreJournal $restoreJournalPath $journal
+        $journal.state = 'stopping_runtime'
+        Write-RestoreJournal $restoreJournalPath $journal
+        try {
+          Invoke-Compose @('down', '--remove-orphans')
+        } catch {
+          $journal.state = 'rolled_back'
+          $journal.failure = $_.Exception.Message
+          Write-RestoreJournal $restoreJournalPath $journal
+          throw
+        }
         New-Item -ItemType Directory -Path $dataRoot -Force | Out-Null
-        if (Test-Path -LiteralPath $databasePath) {
-          $quarantine = Join-Path $dataRoot ("conversation-memory.pre-restore-{0}.sqlite" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-          Move-Item -LiteralPath $databasePath -Destination $quarantine
-          foreach ($suffix in @('-wal', '-shm')) {
-            $sidecar = "$databasePath$suffix"
-            if (Test-Path -LiteralPath $sidecar) { Move-Item -LiteralPath $sidecar -Destination "$quarantine$suffix" }
+        $components = @(
+          @{ Name = 'database'; Staged = $databasePreflight; Target = $databasePath },
+          @{ Name = 'homes'; Staged = $homesPreflight; Target = $homesDataRoot }
+        )
+        foreach ($suffix in @('-wal', '-shm')) {
+          $sidecar = "$databasePath$suffix"
+          if (Test-Path -LiteralPath $sidecar) {
+            $components += @{ Name = "database$suffix"; Staged = $null; Target = $sidecar }
           }
-          Write-Host "Previous database quarantined: $quarantine" -ForegroundColor Yellow
         }
-        Move-Item -LiteralPath $databasePreflight -Destination $databasePath
-        if (Test-Path -LiteralPath $homesDataRoot) {
-          $homesQuarantine = "$homesDataRoot.pre-restore-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-          Move-Item -LiteralPath $homesDataRoot -Destination $homesQuarantine
-        }
-        Move-Item -LiteralPath $homesPreflight -Destination $homesDataRoot
         if ($Profile -eq 'pc-preprod-full') {
-          $identityQuarantine = "$identityDataRoot.pre-restore-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-          if (Test-Path -LiteralPath $identityDataRoot) {
-            Move-Item -LiteralPath $identityDataRoot -Destination $identityQuarantine
-          }
-          New-Item -ItemType Directory -Path $identityDataRoot -Force | Out-Null
-          Expand-ValidatedArchive $identityArchive $identityDataRoot
+          $components += @{ Name = 'identity'; Staged = $identityPreflight; Target = $identityDataRoot }
         }
-        Invoke-Compose @('up', '--detach', '--build', '--wait')
+        $validateInstalled = {
+          npm run db:conversation -- verify --source $databasePath
+          if ($LASTEXITCODE -ne 0) { throw 'Installed database verification failed.' }
+          Assert-HomesRestoreLayout $homesDataRoot
+          if ($Profile -eq 'pc-preprod-full') { Assert-IdentityRestoreLayout $identityDataRoot }
+        }
+        $startRuntime = { Invoke-Compose @('up', '--detach', '--build', '--wait', '--wait-timeout', '120') }
+        Invoke-ControlledRestoreInstallation `
+          -JournalPath $restoreJournalPath `
+          -Journal $journal `
+          -Components $components `
+          -QuarantineRoot $quarantineRoot `
+          -ValidateInstalled $validateInstalled `
+          -StartRuntime $startRuntime `
+          -PrepareRollback { Invoke-Compose @('down', '--remove-orphans') } `
+          -RestartPreviousRuntime $startRuntime
+        Write-Host "Restore completed. Previous data retained under: $quarantineRoot" -ForegroundColor Green
       } finally {
         if (Test-Path -LiteralPath $databasePreflight) { Remove-Item -LiteralPath $databasePreflight -Force }
         if (Test-Path -LiteralPath $identityArchive) { Remove-Item -LiteralPath $identityArchive -Force }
         if (Test-Path -LiteralPath $homesArchive) { Remove-Item -LiteralPath $homesArchive -Force }
         if (Test-Path -LiteralPath $homesPreflight) { Remove-Item -LiteralPath $homesPreflight -Recurse -Force }
+        if (Test-Path -LiteralPath $identityPreflight) { Remove-Item -LiteralPath $identityPreflight -Recurse -Force }
+        if (Test-Path -LiteralPath $manifestPreflight) { Remove-Item -LiteralPath $manifestPreflight -Force }
       }
     }
     'drill' {
@@ -429,5 +503,6 @@ try {
     }
   }
 } finally {
+  if ($runtimeOperationLock) { $runtimeOperationLock.Dispose() }
   Pop-Location
 }

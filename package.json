@@ -34,6 +34,7 @@
     "test:e2e:home:live": "tsx scripts/run-prod-home-e2e.ts",
     "test:e2e:lighting:live": "tsx scripts/run-prod-lighting-e2e.ts",
     "backup:pc": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-runtime.ps1 backup -Profile pc-preprod-full",
+    "test:pc-restore": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/pc-runtime-restore.tests.ps1",
     "verify": "npm run lint && npm run build && npm run typecheck:test && npm test && npm run check:capabilities",
     "format": "prettier . --check",
     "format:write": "prettier . --write"

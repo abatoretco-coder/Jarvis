@@ -24,6 +24,8 @@ npm run db:conversation -- restore --source <sauvegarde.sqlite> --destination <n
 
 Les commandes refusent d'écraser une destination existante. La sauvegarde utilise l'API online backup de SQLite, puis `PRAGMA quick_check`; la restauration vérifie la source et la copie avant renommage atomique.
 
+La restauration du profil PC complet ajoute une coordination non atomique entre SQLite, le home-store et l’identité Keycloak. Elle est documentée dans `docs/platform-phase9/PC_PREPROD_RUNBOOK.md` : prévalidation complète avant arrêt, manifeste chiffré pour les nouvelles sauvegardes, quarantaine, journal persistant et rollback compensatoire sans écrasement. Les sauvegardes historiques sans manifeste conservent leur compatibilité avec une garantie de cohérence inter-composants plus faible.
+
 ## Drill réalisé
 
 Source historique : `D:\Projets\NAS\All VM\conv.sqlite`, schéma pré-registre version `0`.

@@ -17,6 +17,7 @@ Only scripts used by package commands, runtime deployment, container assembly, o
 - run-prod-home-e2e.ts: Explicit authenticated production home checks.
 - run-prod-lighting-e2e.ts: Explicit authenticated production lighting checks.
 - pc-runtime.ps1: Used by `npm run pc` and `npm run backup:pc`.
+- pc-restore.ps1: Focused archive validation, restore journal and rollback primitives used by `pc-runtime.ps1` and its failure harness.
 - https-runtime.ps1, startup-runtime.ps1, pc-agent-runtime.ps1, update-duckdns.ps1: PC runtime and HTTPS startup operations documented in `docs/HTTPS_PC_DEPLOYMENT.md`.
 - validate-edge-config.ps1 and scan-runtime-image.ps1: Security validation commands exposed by `package.json`.
 - protect-local-secrets.ps1: Applies Windows ACLs to local runtime secrets.
